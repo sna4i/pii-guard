@@ -81,10 +81,16 @@
     const deps = resolveDeps();
     if (!deps.patterns) throw new Error("mask-mcp engine: patterns missing");
     const disabled = new Set((options && options.disabledCategories) || []);
+    return matchPatterns(text, deps.patterns.getPresetPatterns(disabled));
+  }
+
+  // 与えられたパターン群を NFKC 正規化テキストに当て、元テキストの座標で返す。
+  // collectDetections と、機密文の中だけで使う数値パターンが共有する。
+  function matchPatterns(text, patternList) {
     const { norm, map } = nfkcWithMap(text);
     const identity = norm === text;
     const out = [];
-    for (const { entity_type, pattern, validate } of deps.patterns.getPresetPatterns(disabled)) {
+    for (const { entity_type, pattern, validate } of patternList) {
       // Clone so module-level regex lastIndex is never mutated.
       const re = new RegExp(pattern.source, pattern.flags);
       let m;
@@ -159,8 +165,35 @@
   // filtering or overlap resolution. Shared between the sync pipeline
   // (used by tests, gateway-style callers) and the async pipeline that
   // additionally awaits ML/NER detections from the service worker.
+  // 「意味として機密」な文の中では、業務の文脈語が無くても数値を隠す。
+  //
+  // 率や「500万」は、文脈語 (値上げ・粗利率・見積…) が近くにあるときだけ
+  // マスクしている。CSS の width: 50% や公知の税率まで隠すと、送りたい
+  // 質問が壊れるため。ただし
+  //   A社との買収交渉は最終段階で、プレミアムは30%を想定している。
+  // の 30% は文脈語を持たないが、文そのものが機密 (confidential.js) なので
+  // 隠すべき数値である。機密文の範囲に入る数値だけを追加で拾う。
+  function collectConfidentialNumbers(text, opts, deps) {
+    if (opts.confidentialEnabled === false) return [];
+    const cf = deps.patterns && deps.patterns.CONTEXT_FREE_NUMBER_PATTERNS;
+    if (!deps.confidential || !cf || cf.length === 0) return [];
+    let hits;
+    try {
+      hits = deps.confidential.detectConfidential(text, { threshold: opts.confidentialThreshold });
+    } catch (_) {
+      return [];
+    }
+    if (!hits || hits.length === 0) return [];
+    const disabled = new Set(opts.disabledCategories || []);
+    const pats = cf.filter((p) => !disabled.has(p.entity_type));
+    return matchPatterns(text, pats).filter((d) =>
+      hits.some((h) => d.start >= h.start && d.end <= h.end),
+    );
+  }
+
   function collectRawDetections(text, opts, deps) {
     let dets = collectDetections(text, { disabledCategories: opts.disabledCategories });
+    dets = dets.concat(collectConfidentialNumbers(text, opts, deps));
     // ユーザーがサイドバー drop で登録した force-mask list を regex 検出と merge。
     // blocklist より前に積んでおくことで、ブロックリストに入った語を
     // 誤ってユーザーが追加してしまっても blocklist 側が最終的に勝つ

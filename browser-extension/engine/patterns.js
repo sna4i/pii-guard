@@ -93,6 +93,100 @@
     return rem === 1;
   }
 
+  // ---- 業務上の数値 (金額・率・比) ----------------------------------------
+  // 検出は NFKC 正規化後のテキストに対して行うので、全角の ％ ￥ ： と
+  // 全角数字はここでは半角として扱える。
+  //
+  // 数値は必ず「数値の途中から始めない」境界 (?<![\d.,]) を課す。
+  // 旧パターンはこれが無く、
+  //   予算は1億2000万円  -> 予算は1億<MONETARY_AMOUNT_1>   (1億が露出)
+  //   受注額3.5億円      -> 受注額3.<MONETARY_AMOUNT_1>     (3.が露出)
+  // のように数値の途中から一致して先頭の桁を漏らしていた。
+  const NUM = "(?:\\d{1,3}(?:,\\d{3})+(?:\\.\\d+)?|\\d+(?:\\.\\d+)?)";
+  const LB = "(?<![\\d.,])";
+  const SP = "[^\\S\\n]*";                         // 改行を含まない空白
+  // 千万・百万・十億 のような複合の桁も 1 単位として読む。これが無いと
+  // 「4億5千万円」が「4億5千」で途切れ、万円 が残る。
+  const MAG = "(?:[十百千]?[兆億万]|[百千])";
+  const CUR = "(?:円|日本円|ドル|米ドル|ユーロ|ポンド|人民元|ウォン|ルピー|バーツ)";
+  const CODE = "(?:USD|JPY|EUR|GBP|CNY|RMB|KRW|AUD|CAD|SGD|HKD|CHF)";
+  const SCALE = `(?:${MAG}|[KkMmBb](?![A-Za-z])|million|billion|thousand)`;
+  // 1億2000万 / 3.5億 / 2,000千 — 桁の単位を複合で読む
+  const MAG_AMOUNT = `${NUM}${SP}${MAG}(?:${SP}${NUM}${SP}${MAG})*(?:${SP}${NUM})?`;
+  // 金額ではない「数」。500万人 / 120万回 を金額にしないための除外
+  const COUNTER =
+    "人|名|回|件|個|台|本|枚|部|点|社|戸|世帯|票|再生|ダウンロード|DL|PV|UU|" +
+    "ユーザー|アクセス|行|文字|語|ページ|頁|キロ|km|kg|トン|リットル|平米|坪|" +
+    "年|時間|分|秒|歩|匹|頭|羽|通|冊|箇所|ヶ所|か所|倍|株";
+
+  // 文脈語の窓。同じ文・同じ行の中だけを見る。
+  // 文脈語の直後に別の名詞が続く場合、それは文脈語として働いていない。
+  //   予算委員会で3割の議員が… / 売上管理システムの稼働率は99.9%
+  // の 予算・売上 は金額や率を指していない。ただし 売上高・利益率・
+  // 値引き幅 のように率や額を作る接尾辞が続く場合は許す。
+  const CUE_TAIL = "(?:高|率|額|比|費|益|分|幅|値|価|金|料)?(?![\\p{Script=Han}\\p{Script=Katakana}ー])";
+  const WIN_BEFORE = (cues, n) => `(?<=(?:${cues})${CUE_TAIL}[^\\n。．!?！？]{0,${n}})`;
+  // 後ろ側は読点で切る — 「消費税は10%、手数料は…」の 10% を
+  // 後続の別話題の語で拾わないため。
+  const WIN_AFTER = (cues, n) => `(?=[^\\n。．!?！？、,]{0,${n}}(?:${cues}))`;
+
+  // 金額の文脈語 (円の付かない「500万」を金額と判断する根拠)
+  const MONEY_CUE =
+    "見積|予算|金額|総額|合計額|費用|コスト|経費|価格|値段|代金|料金|売上|" +
+    "売り上げ|収益|利益|粗利|年収|月収|給与|給料|報酬|単価|契約|受注|発注|請求|" +
+    "支払|入金|出金|振込|出資|投資|融資|借入|借り入れ|資本金|評価額|時価総額|" +
+    "買収|譲渡|賠償|和解金|手数料|概算|予定額|赤字|黒字|損失|負債|資金|調達|" +
+    "賞与|ボーナス|インセンティブ|初期費用|月額|年額|上限|下限|見込|想定|" +
+    "年俸|仕入れ|仕入|リベート|" + "費|額|金|(?<!資)料";
+
+  // 率の文脈語。パーセントは CSS (width: 50%)、公知の税率、進捗や
+  // カバレッジにも頻出するので無条件にはマスクしない。業務の率を
+  // 示す語が近くにあるときだけ拾う — 人名で文脈ゲートに反転したのと
+  // 同じ考え方で、閉じた語彙なら収束する。
+  const PCT_CUE_BEFORE =
+    "値上げ率|値下げ率|値上げ幅|値下げ幅|値上げ|値下げ|値引き率|値引率|値引き|値引|" +
+    "割引率|割引|粗利率|粗利益率|粗利|営業利益率|経常利益率|純利益率|利益率|利益|" +
+    "売上総利益|売上|売り上げ|収益|原価率|原価|利率|金利|年利|月利|利回り|" +
+    "手数料率|手数料|マージン|シェア|占有率|前年比|前年同期比|前年同月比|前期比|" +
+    "前月比|前年度比|昨対|昨年比|対前年|成長率|伸び率|増収率|増益率|達成率|" +
+    "解約率|成約率|受注率|還元率|還元|報酬|歩合|コミッション|掛け率|掛率|" +
+    "出資比率|出資|持株比率|持株|持ち株|議決権|配当性向|配当|賃上げ率|賃上げ|" +
+    "昇給率|昇給|ベースアップ|ベア|賞与|インセンティブ|ロイヤリティ|ロイヤルティ|" +
+    "レベニューシェア|取り分|按分|配分|分配|負担率|負担割合|補助率|助成率|" +
+    "価格|料金|単価|運賃|定価|売価|仕切り|卸値|卸価格|見積|予算|計画比|予算比|予実|" +
+    "仕入れ|仕入|リベート|年俸|費|額|金|(?<!資)料|" +
+    "margin|discount|markup|mark-up|stake|equity|royalty|commission|revenue|profit|budget|yoy|pricing";
+  const PCT_CUE_AFTER =
+    "値上げ|値下げ|引き上げ|引上げ|引き下げ|引下げ|アップ|ダウン|増収|減収|増益|減益|" +
+    "増額|減額|増資|減資|割引|値引き|値引|引き|オフ|off|還元|上乗せ|割増|割高|割安|" +
+    "手数料|マージン|粗利|シェア|出資|保有|取得|譲渡|配当|" +
+    "discount|increase|decrease|markup|margin|stake|equity";
+  // 比の文脈語 (6:4 / 51対49 を時刻や試合結果と区別する)
+  const RATIO_CUE =
+    "比率|配分|出資|持株|持ち株|按分|分配|割合|折半|取り分|分け前|レベニューシェア|" +
+    "負担割合|費用負担|議決権|利益配分|シェア";
+  // 「N割」単体の文脈語 (打率3割 と シェアの3割 を分ける)
+  const WARI_CUE =
+    "シェア|価格|料金|単価|定価|売価|利益|粗利|原価|売上|予算|費用|コスト|手数料|" +
+    "報酬|配分|出資|持株|値上げ|値下げ|値引き|割引|仕入れ|仕入|費|額|金|(?<!資)料";
+
+  const PERCENT = `${LB}${NUM}${SP}(?:%|パーセント|percent|per cent)`;
+  // 倍率 (売上1.5倍 / 価格を2倍に)。「2倍速で再生」「画像を2倍に拡大」
+  // のような技術的な用法が多いので、% と同じ文脈語で絞る。
+  const TIMES = `${LB}${NUM}${SP}倍(?!速|率)`;
+  const WARI = `${LB}\\d+割(?:\\d+分)?(?:\\d+厘)?`;
+
+  // 機密文の中では文脈語が無くても数値を隠す (engine.js が使う)。
+  // 「買収交渉は最終段階、プレミアムは30%を想定」の 30% は文脈語を
+  // 持たないが、文そのものが機密なので隠すべき数値である。
+  // 時刻と区別できない「6:4」形式は、機密文の中でも文脈語を要求する。
+  const CONTEXT_FREE_NUMBER_PATTERNS = [
+    T("PERCENTAGE", new RegExp(PERCENT, "giu")),
+    T("MONETARY_AMOUNT", new RegExp(`${LB}${MAG_AMOUNT}(?!${SP}(?:\\d|${COUNTER}|${CUR}))`, "gu")),
+    T("RATIO", new RegExp(`${WARI}(?![\\d])`, "gu")),
+    T("RATIO", new RegExp(TIMES, "gu")),
+  ];
+
   const BUILTIN_PATTERNS = {
     // 都道府県+市区町村 単体 (兵庫県明石市 / 東京都渋谷区 など)。
     // 中間 char class は [市区町村郡] を除外して「最初の suffix」で
@@ -109,9 +203,37 @@
     GENDER: [T("GENDER", /(?:男性|女性)(?![\p{Script=Han}\p{Script=Katakana}ー])/gu)],
     // 金額
     MONETARY_AMOUNT: [
-      T("MONETARY_AMOUNT", /[¥￥]\s*[\d,]+(?:\.\d+)?(?:\s*円)?/gu),
-      T("MONETARY_AMOUNT", /\d[\d,]*\s*(?:円|ドル|万円|億円)/gu),
-      T("MONETARY_AMOUNT", /\$\s*[\d,]+(?:\.\d+)?/gu),
+      // 通貨付き: 1億2000万円 / 3.5億円 / 2,000千円 / 120万ドル / 1,500円
+      T("MONETARY_AMOUNT", new RegExp(`${LB}${NUM}(?:${SP}${MAG}(?:${SP}${NUM}${SP}${MAG})*(?:${SP}${NUM})?)?${SP}${CUR}`, "gu")),
+      // 記号前置: ¥1,500 / $1.2M / ¥500万
+      T("MONETARY_AMOUNT", new RegExp(`(?:US\\$|\\$|¥|€|£)${SP}${NUM}(?:${SP}${SCALE})?(?:${SP}円)?`, "gu")),
+      // 通貨コード: USD 1.2M / 3,000 EUR
+      T("MONETARY_AMOUNT", new RegExp(`${CODE}${SP}${NUM}(?:${SP}${SCALE})?`, "gu")),
+      T("MONETARY_AMOUNT", new RegExp(`${LB}${NUM}(?:${SP}${SCALE})?${SP}${CODE}(?![A-Za-z])`, "gu")),
+      // 通貨の付かない「500万」は、金額の文脈語があるときだけ。
+      // 「500万人」「120万回」のような数は COUNTER で除外する。
+      T("MONETARY_AMOUNT", new RegExp(`${WIN_BEFORE(MONEY_CUE, 8)}${LB}${MAG_AMOUNT}(?!${SP}(?:\\d|${COUNTER}|${CUR}))`, "gu")),
+      T("MONETARY_AMOUNT", new RegExp(`${LB}${MAG_AMOUNT}(?!${SP}(?:\\d|${COUNTER}|${CUR}))${WIN_AFTER(MONEY_CUE, 8)}`, "gu")),
+    ],
+    // 率 (業務の文脈語が近くにあるときだけ)
+    PERCENTAGE: [
+      T("PERCENTAGE", new RegExp(`${WIN_BEFORE(PCT_CUE_BEFORE, 8)}${PERCENT}`, "giu")),
+      T("PERCENTAGE", new RegExp(`${PERCENT}${WIN_AFTER(PCT_CUE_AFTER, 6)}`, "giu")),
+    ],
+    // 比・掛け・割
+    RATIO: [
+      // 掛け率 (7掛け / 0.7掛け)。「2人掛け」は数字の直後が「人」なので
+      // 当たらない。「3掛ける」のような動詞は後続で除外する。
+      T("RATIO", new RegExp(`${LB}\\d+(?:\\.\\d+)?掛け?(?!け?[るてたなまれ])`, "gu")),
+      // 割引・割増 (3割引 / 2割増し / 3割安)。価格表現なので常に拾う。
+      T("RATIO", new RegExp(`${WARI}${SP}(?:引き?|増し?|減|安|高|方|OFF|オフ)`, "gu")),
+      // 「N割」単体は文脈語があるときだけ (打率3割 を除外)
+      T("RATIO", new RegExp(`${WIN_BEFORE(WARI_CUE, 8)}${WARI}(?![\\d])`, "gu")),
+      // 6:4 / 51対49。時刻や試合結果と区別するため文脈語を要求する。
+      T("RATIO", new RegExp(`${WIN_BEFORE(RATIO_CUE, 8)}(?<![\\d.,:])\\d+(?:\\.\\d+)?${SP}(?::|対)${SP}\\d+(?:\\.\\d+)?(?![\\d.:])`, "gu")),
+      // 倍率。前後どちらかに業務の文脈語があるときだけ。
+      T("RATIO", new RegExp(`${WIN_BEFORE(PCT_CUE_BEFORE, 8)}${TIMES}`, "giu")),
+      T("RATIO", new RegExp(`${TIMES}${WIN_AFTER(PCT_CUE_AFTER, 6)}`, "giu")),
     ],
     // 日付
     DATE: [
@@ -570,7 +692,7 @@
     return out;
   }
 
-  const api = { BUILTIN_PATTERNS, getPresetPatterns };
+  const api = { BUILTIN_PATTERNS, getPresetPatterns, CONTEXT_FREE_NUMBER_PATTERNS };
   if (typeof module === "object" && module.exports) module.exports = api;
   if (root && typeof root === "object") {
     root.__localMaskMCP = root.__localMaskMCP || {};

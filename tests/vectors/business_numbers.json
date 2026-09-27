@@ -1,0 +1,394 @@
+{
+  "label_groups": [
+    "PERCENTAGE",
+    "MONETARY_AMOUNT",
+    "RATIO"
+  ],
+  "cases": [
+    {
+      "name": "percentage before a price-increase verb",
+      "input": "来期から主力製品を10%値上げする",
+      "expected": [
+        {
+          "label": "PERCENTAGE",
+          "text": "10%"
+        }
+      ]
+    },
+    {
+      "name": "margin rate",
+      "input": "粗利率は35.5%を見込む",
+      "expected": [
+        {
+          "label": "PERCENTAGE",
+          "text": "35.5%"
+        }
+      ]
+    },
+    {
+      "name": "year-over-year",
+      "input": "前年比120%で推移",
+      "expected": [
+        {
+          "label": "PERCENTAGE",
+          "text": "120%"
+        }
+      ]
+    },
+    {
+      "name": "full-width percent sign keeps the original surface",
+      "input": "値引き率は最大15％まで",
+      "expected": [
+        {
+          "label": "PERCENTAGE",
+          "text": "15％"
+        }
+      ]
+    },
+    {
+      "name": "spelled-out パーセント",
+      "input": "シェア12パーセントを獲得",
+      "expected": [
+        {
+          "label": "PERCENTAGE",
+          "text": "12パーセント"
+        }
+      ]
+    },
+    {
+      "name": "fee rate",
+      "input": "手数料3.5%を上乗せ",
+      "expected": [
+        {
+          "label": "PERCENTAGE",
+          "text": "3.5%"
+        }
+      ]
+    },
+    {
+      "name": "amount with 万円",
+      "input": "見積額は3,800万円です",
+      "expected": [
+        {
+          "label": "MONETARY_AMOUNT",
+          "text": "3,800万円"
+        }
+      ]
+    },
+    {
+      "name": "bare 万 in an estimate",
+      "input": "見積もりは500万で出します",
+      "expected": [
+        {
+          "label": "MONETARY_AMOUNT",
+          "text": "500万"
+        }
+      ]
+    },
+    {
+      "name": "compound 億+万 is one span — no leading 1億 left exposed",
+      "input": "予算は1億2000万円",
+      "expected": [
+        {
+          "label": "MONETARY_AMOUNT",
+          "text": "1億2000万円"
+        }
+      ]
+    },
+    {
+      "name": "decimal 億 is one span — no leading 3. left exposed",
+      "input": "受注額3.5億円の案件",
+      "expected": [
+        {
+          "label": "MONETARY_AMOUNT",
+          "text": "3.5億円"
+        }
+      ]
+    },
+    {
+      "name": "unit price",
+      "input": "単価1,500円で提案",
+      "expected": [
+        {
+          "label": "MONETARY_AMOUNT",
+          "text": "1,500円"
+        }
+      ]
+    },
+    {
+      "name": "thousand-yen unit",
+      "input": "総額2,000千円",
+      "expected": [
+        {
+          "label": "MONETARY_AMOUNT",
+          "text": "2,000千円"
+        }
+      ]
+    },
+    {
+      "name": "bare 万 with the cue after it",
+      "input": "約800万ほどの見積もり",
+      "expected": [
+        {
+          "label": "MONETARY_AMOUNT",
+          "text": "800万"
+        }
+      ]
+    },
+    {
+      "name": "currency code with M suffix",
+      "input": "USD 1.2M の契約",
+      "expected": [
+        {
+          "label": "MONETARY_AMOUNT",
+          "text": "USD 1.2M"
+        }
+      ]
+    },
+    {
+      "name": "万ドル",
+      "input": "120万ドルで合意",
+      "expected": [
+        {
+          "label": "MONETARY_AMOUNT",
+          "text": "120万ドル"
+        }
+      ]
+    },
+    {
+      "name": "wholesale 掛け",
+      "input": "定価の7掛けで卸す",
+      "expected": [
+        {
+          "label": "RATIO",
+          "text": "7掛け"
+        }
+      ]
+    },
+    {
+      "name": "割引",
+      "input": "3割引で提供",
+      "expected": [
+        {
+          "label": "RATIO",
+          "text": "3割引"
+        }
+      ]
+    },
+    {
+      "name": "profit split",
+      "input": "利益配分は6:4",
+      "expected": [
+        {
+          "label": "RATIO",
+          "text": "6:4"
+        }
+      ]
+    },
+    {
+      "name": "equity split with 対",
+      "input": "出資比率は51対49",
+      "expected": [
+        {
+          "label": "RATIO",
+          "text": "51対49"
+        }
+      ]
+    },
+    {
+      "name": "割増し",
+      "input": "2割増しで見積もる",
+      "expected": [
+        {
+          "label": "RATIO",
+          "text": "2割増し"
+        }
+      ]
+    },
+    {
+      "name": "cue-less percentage inside a confidential sentence",
+      "input": "A社との買収交渉は最終段階で、プレミアムは30%を想定している。",
+      "expected": [
+        {
+          "label": "PERCENTAGE",
+          "text": "30%"
+        }
+      ]
+    },
+    {
+      "name": "negative — CSS percentage",
+      "input": "CSS の width: 50% が効かない",
+      "expected_absent": [
+        {
+          "label": "PERCENTAGE"
+        }
+      ]
+    },
+    {
+      "name": "negative — public tax rate",
+      "input": "消費税は10%です",
+      "expected_absent": [
+        {
+          "label": "PERCENTAGE"
+        }
+      ]
+    },
+    {
+      "name": "negative — test coverage",
+      "input": "テストカバレッジが85%になった",
+      "expected_absent": [
+        {
+          "label": "PERCENTAGE"
+        }
+      ]
+    },
+    {
+      "name": "negative — progress",
+      "input": "進捗は90%完了",
+      "expected_absent": [
+        {
+          "label": "PERCENTAGE"
+        }
+      ]
+    },
+    {
+      "name": "negative — headcount is not money",
+      "input": "年間500万人が訪れる観光地",
+      "expected_absent": [
+        {
+          "label": "MONETARY_AMOUNT"
+        }
+      ]
+    },
+    {
+      "name": "negative — play count is not money",
+      "input": "再生回数が120万回を突破",
+      "expected_absent": [
+        {
+          "label": "MONETARY_AMOUNT"
+        }
+      ]
+    },
+    {
+      "name": "negative — clock time is not a ratio",
+      "input": "12:30に会議室へ集合",
+      "expected_absent": [
+        {
+          "label": "RATIO"
+        }
+      ]
+    },
+    {
+      "name": "negative — batting average",
+      "input": "打率3割を維持している",
+      "expected_absent": [
+        {
+          "label": "RATIO"
+        }
+      ]
+    },
+    {
+      "name": "negative — two-seater",
+      "input": "2人掛けのソファ",
+      "expected_absent": [
+        {
+          "label": "RATIO"
+        }
+      ]
+    },
+    {
+      "name": "negative — multiplication verb",
+      "input": "3掛ける4は12",
+      "expected_absent": [
+        {
+          "label": "RATIO"
+        }
+      ]
+    },
+    {
+      "name": "multiplier with a revenue cue",
+      "input": "売上を前年の1.5倍に伸ばす",
+      "expected": [
+        {
+          "label": "RATIO",
+          "text": "1.5倍"
+        }
+      ]
+    },
+    {
+      "name": "multiplier with a price-increase cue after",
+      "input": "価格改定で2倍に値上げする",
+      "expected": [
+        {
+          "label": "RATIO",
+          "text": "2倍"
+        }
+      ]
+    },
+    {
+      "name": "negative — playback speed",
+      "input": "動画を2倍速で再生する",
+      "expected_absent": [
+        {
+          "label": "RATIO"
+        }
+      ]
+    },
+    {
+      "name": "negative — image zoom",
+      "input": "画像を2倍に拡大してください",
+      "expected_absent": [
+        {
+          "label": "RATIO"
+        }
+      ]
+    },
+    {
+      "name": "negative — 資料 is a document, not a cost",
+      "input": "資料の20%まで読み進めた",
+      "expected_absent": [
+        {
+          "label": "PERCENTAGE"
+        }
+      ]
+    },
+    {
+      "name": "cost word ending in 費",
+      "input": "人件費を5%圧縮する",
+      "expected": [
+        {
+          "label": "PERCENTAGE",
+          "text": "5%"
+        }
+      ]
+    },
+    {
+      "name": "negative — 消費税 is not a cost cue",
+      "input": "消費税10%の計算方法",
+      "expected_absent": [
+        {
+          "label": "PERCENTAGE"
+        }
+      ]
+    },
+    {
+      "name": "compound magnitude 千万 is one span",
+      "input": "落札価格は約4億5千万円",
+      "expected": [
+        {
+          "label": "MONETARY_AMOUNT",
+          "text": "4億5千万円"
+        }
+      ]
+    },
+    {
+      "name": "negative — cue inside a longer noun (予算委員会)",
+      "input": "予算委員会で3割の議員が反対した",
+      "expected_absent": [
+        {
+          "label": "RATIO"
+        }
+      ]
+    }
+  ]
+}
