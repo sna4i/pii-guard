@@ -208,7 +208,7 @@
       T("SECRET", /\b[a-z][a-z0-9+.\-]{1,20}:\/\/[^\s:@\/]{1,64}:[^\s@\/]{1,128}@[^\s"'<>、。]{1,255}/giu),
       // .env / CI の変数ダンプ。キー名に秘密を示す語が入っているものだけ
       // 拾うので、HOME=/root のような無害な行には当たらない。
-      T("SECRET", /(?:^|\n)\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_]{0,48}(?:SECRET|TOKEN|KEY|PASSWORD|PASSWD|PWD|CREDENTIAL|PRIVATE|APIKEY)[A-Za-z0-9_]{0,24}\s*=\s*(?:"[^"\n]{4,}"|'[^'\n]{4,}'|[^\s#\n]{4,})/giu),
+      T("SECRET", /(?<=^|\n)[^\S\n]*(?:export[^\S\n]+)?[A-Za-z_][A-Za-z0-9_]{0,48}(?:SECRET|TOKEN|KEY|PASSWORD|PASSWD|PWD|CREDENTIAL|PRIVATE|APIKEY)[A-Za-z0-9_]{0,24}\s*=\s*(?:"[^"\n]{4,}"|'[^'\n]{4,}'|[^\s#\n]{4,})/giu),
       T("SECRET", /-----BEGIN(?:\s[A-Z]+)?\s(?:RSA|EC|OPENSSH|DSA|PGP)?\s?PRIVATE KEY-----[\s\S]*?-----END(?:\s[A-Z]+)?\s(?:RSA|EC|OPENSSH|DSA|PGP)?\s?PRIVATE KEY-----/gu),
     ],
     // DB 接続 / API キー / シークレット
@@ -425,10 +425,10 @@
     // ---- 貼り付けの形そのものが PII を運ぶケース --------------------------
     // 転送メールのヘッダ貼り付けは、1 回で最も多くの PII が流入する経路。
     EMAIL_HEADER: [
-      T("EMAIL_HEADER", /(?:^|\n)(?:From|To|Cc|Bcc|Reply-To|Message-ID)\s*:\s*[^\n]{3,200}/giu),
+      T("EMAIL_HEADER", /(?<=^|\n)(?:From|To|Cc|Bcc|Reply-To|Message-ID)\s*:\s*[^\n]{3,200}/giu),
     ],
     COOKIE_HEADER: [
-      T("COOKIE_HEADER", /(?:^|\n)(?:Set-)?Cookie\s*:\s*[^\n]{8,}/giu),
+      T("COOKIE_HEADER", /(?<=^|\n)(?:Set-)?Cookie\s*:\s*[^\n]{8,}/giu),
     ],
     // スタックトレースを貼ると OS ユーザー名がほぼ必ず混入する。
     LOCAL_USER_PATH: [
@@ -455,39 +455,39 @@
     POSTAL_CODE: [T("POSTAL_CODE", /〒\s?\d{3}-\d{4}(?![\d-])|(?<![\d-])\d{3}-\d{4}(?![\d-])/gu)],
     DEPARTMENT: [
       T("DEPARTMENT", /\b(?:DEPT|DIV|DIVISION)[_\-]\d{2,6}\b/gu),
-      T("DEPARTMENT", /(?:部署コード|部門コード)[^\\S\\n]*(?:は|が|[:：=＝])?[^\\S\\n]*[\w\-ー－]{3,}/gu),
+      T("DEPARTMENT", /(?:部署コード|部門コード)[^\S\n]*(?:は|が|[:：=＝])?[^\S\n]*[\w\-ー－]{3,}/gu),
     ],
     CONTRACT_NUMBER: [
       T("CONTRACT_NUMBER", /\b(?:CONTRACT|CNTR|AGR)[_\-][\w\-]{3,20}\b/gu),
-      T("CONTRACT_NUMBER", /契約(?:番号|No\.?)[^\\S\\n]*(?:は|が|[:：=＝])?[^\\S\\n]*[\w\-ー－]{3,}/gu),
+      T("CONTRACT_NUMBER", /契約(?:番号|No\.?)[^\S\n]*(?:は|が|[:：=＝])?[^\S\n]*[\w\-ー－]{3,}/gu),
     ],
     PURCHASE_ORDER: [
       T("PURCHASE_ORDER", /\b(?:PO|P\.O\.|ORDER)[_\-]\d{4,10}\b/gu),
-      T("PURCHASE_ORDER", /発注(?:番号|No\.?)[^\\S\\n]*(?:は|が|[:：=＝])?[^\\S\\n]*[\w\-ー－]{3,}/gu),
+      T("PURCHASE_ORDER", /発注(?:番号|No\.?)[^\S\n]*(?:は|が|[:：=＝])?[^\S\n]*[\w\-ー－]{3,}/gu),
     ],
     CUSTOMER_ID: [
       T("CUSTOMER_ID", /\b(?:CUST|CUSTOMER|CLT)[_\-]\d{4,10}\b/gu),
-      T("CUSTOMER_ID", /顧客(?:番号|ID|コード)[^\\S\\n]*(?:は|が|[:：=＝])?[^\\S\\n]*[\w\-ー－]{3,}/gu),
+      T("CUSTOMER_ID", /顧客(?:番号|ID|コード)[^\S\n]*(?:は|が|[:：=＝])?[^\S\n]*[\w\-ー－]{3,}/gu),
     ],
     INVOICE_NUMBER: [
       T("INVOICE_NUMBER", /\b(?:INV|INVOICE)[_\-]\d{4,10}\b/gu),
-      T("INVOICE_NUMBER", /請求(?:書)?(?:番号|No\.?)[^\\S\\n]*(?:は|が|[:：=＝])?[^\\S\\n]*[\w\-ー－]{3,}/gu),
+      T("INVOICE_NUMBER", /請求(?:書)?(?:番号|No\.?)[^\S\n]*(?:は|が|[:：=＝])?[^\S\n]*[\w\-ー－]{3,}/gu),
     ],
     EMPLOYEE_ID: [
-      T("EMPLOYEE_ID", /(?:社員|従業員|スタッフ)(?:番号|ID|コード)[^\\S\\n]*(?:は|が|[:：=＝])?[^\\S\\n]*[\w\-ー－]{3,}/gu),
+      T("EMPLOYEE_ID", /(?:社員|従業員|スタッフ)(?:番号|ID|コード)[^\S\n]*(?:は|が|[:：=＝])?[^\S\n]*[\w\-ー－]{3,}/gu),
       T("EMPLOYEE_ID", /\b(?:STAFF|WORKER)[_\-]\d{3,10}\b/gu),
     ],
     MEMBER_ID: [
-      T("MEMBER_ID", /会員(?:番号|ID|コード)[^\\S\\n]*(?:は|が|[:：=＝])?[^\\S\\n]*[\w\-ー－]{3,}/gu),
+      T("MEMBER_ID", /会員(?:番号|ID|コード)[^\S\n]*(?:は|が|[:：=＝])?[^\S\n]*[\w\-ー－]{3,}/gu),
       T("MEMBER_ID", /\bMEMBER[_\-]\d{4,10}\b/gu),
     ],
     PATIENT_ID: [
       T("PATIENT_ID", /\b(?:PATIENT|MRN)[_\-]\d{4,10}\b/gu),
-      T("PATIENT_ID", /(?:患者|診療)(?:番号|ID)[^\\S\\n]*(?:は|が|[:：=＝])?[^\\S\\n]*[\w\-ー－]{3,}/gu),
+      T("PATIENT_ID", /(?:患者|診療)(?:番号|ID)[^\S\n]*(?:は|が|[:：=＝])?[^\S\n]*[\w\-ー－]{3,}/gu),
     ],
     SKU: [
       T("SKU", /\bSKU[_\-][\w\-]{3,20}\b/gu),
-      T("SKU", /(?:製品|商品)(?:コード|番号)[^\\S\\n]*(?:は|が|[:：=＝])?[^\\S\\n]*[\w\-ー－]{3,}/gu),
+      T("SKU", /(?:製品|商品)(?:コード|番号)[^\S\n]*(?:は|が|[:：=＝])?[^\S\n]*[\w\-ー－]{3,}/gu),
     ],
     // 後続が漢字/カタカナなら別語 (A型肝炎 / B型インフルエンザ) とみなす。
     BLOOD_TYPE: [T("BLOOD_TYPE", /(?:AB|A|B|O)型(?![\p{Script=Han}\p{Script=Katakana}ー])/gu)],
@@ -501,7 +501,7 @@
     ],
     ASSET_NUMBER: [
       T("ASSET_NUMBER", /\b(?:ASSET|FA)[_\-]\d{4,10}\b/gu),
-      T("ASSET_NUMBER", /資産(?:番号|コード)[^\\S\\n]*(?:は|が|[:：=＝])?[^\\S\\n]*[\w\-ー－]{3,}/gu),
+      T("ASSET_NUMBER", /資産(?:番号|コード)[^\S\n]*(?:は|が|[:：=＝])?[^\S\n]*[\w\-ー－]{3,}/gu),
     ],
     LICENSE_NUMBER: [T("LICENSE_NUMBER", /\b(?:LIC|LICENSE)[_\-][\w\-]{4,20}\b/gu)],
 
