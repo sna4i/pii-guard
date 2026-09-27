@@ -46,6 +46,8 @@
     LICENSE_NUMBER: "medium",
     PATENT_NUMBER: "medium",
     MONETARY_AMOUNT: "medium",
+    PERCENTAGE: "medium",
+    RATIO: "medium",
     ANNUAL_INCOME: "medium",
     URL: "medium",
     IP_ADDRESS: "medium",

@@ -93,6 +93,8 @@
     DATE: "attribute",
     BLOOD_TYPE: "attribute",
     MONETARY_AMOUNT: "attribute",
+    PERCENTAGE: "attribute",
+    RATIO: "attribute",
     ANNUAL_INCOME: "attribute",
   };
 
