@@ -3,7 +3,7 @@
 #
 # dev/ は Chrome に「パッケージ化されていない拡張機能」として読み込ませる
 # ディレクトリ。WSL 上のパスを Windows 側の Chrome から
-# \\wsl.localhost\Ubuntu\home\sna\workspace\pii-masking\dev として指定する。
+# \\wsl.localhost\<ディストリ名>\<リポジトリのパス>\dev のように指定する。
 #
 # 手でコピーしていると必ず古くなる (実際 v1.4.1 のエンジン修正が
 # 5 ファイル分反映されていなかった)。コードを変えたらこれを実行する。

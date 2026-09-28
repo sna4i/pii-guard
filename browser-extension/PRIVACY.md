@@ -110,9 +110,9 @@ ML 検出を無効化したい場合は、オプション画面の「ブラウ�
 
 ## 変更履歴
 
-このプライバシーポリシーが変更された場合、本拡張機能のリポジトリ (https://github.com/yuya4i/pii-masking) の `browser-extension/PRIVACY.md` を更新します。
+このプライバシーポリシーが変更された場合、本拡張機能のリポジトリ (https://github.com/sna4i/pii-guard) の `browser-extension/PRIVACY.md` を更新します。
 
 ## 連絡先
 
 質問や懸念がある場合は、リポジトリの issue として報告してください:
-https://github.com/yuya4i/pii-masking/issues
+https://github.com/sna4i/pii-guard/issues
