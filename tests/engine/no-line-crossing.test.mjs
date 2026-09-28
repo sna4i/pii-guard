@@ -43,7 +43,7 @@ const RECORD = [
   "From: tanaka@example.co.jp",
   "To: sato@example.co.jp",
   "Cookie: session_id=abcdef123456",
-  "export STRIPE_SECRET_KEY=sk_live_abcdefghijklmnop",
+  "export STRIPE_SECRET_KEY=dummy-value-not-a-real-key",
   "2026-09-22 18:15:32 INFO Customer profile accessed",
 ].join("\n");
 

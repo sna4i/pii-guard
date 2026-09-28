@@ -8,7 +8,7 @@
     },
     {
       "name": "dotenv assignment gated on the key name",
-      "input": "export STRIPE_SECRET_KEY=sk_live_abcdefghijklmnop",
+      "input": "export STRIPE_SECRET_KEY=dummy-value-not-a-real-key",
       "expected": [{ "label": "SECRET" }]
     },
     {
@@ -126,8 +126,8 @@
     },
     {
       "name": "local user path leaks the OS username",
-      "input": "エラーは /Users/yuya4i/project/main.js で発生",
-      "expected": [{ "label": "LOCAL_USER_PATH", "text": "/Users/yuya4i" }]
+      "input": "エラーは /Users/alice/project/main.js で発生",
+      "expected": [{ "label": "LOCAL_USER_PATH", "text": "/Users/alice" }]
     },
     {
       "name": "windows local user path",

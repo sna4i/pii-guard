@@ -144,7 +144,7 @@ supports plus the user-configured local LLM endpoint:
 - `http://127.0.0.1:8081/*` (loopback only, for the optional local gateway)
 - `http://*/*` *(v0.5.0-dev build only)* — needed because
   users can point `localLlmUrl` at any LAN address like
-  `http://192.168.1.12:11434`. The service worker host-lock
+  `http://192.168.0.10:11434`. The service worker host-lock
   described in §4 restricts actual traffic to the user's saved URL
   at runtime.
 

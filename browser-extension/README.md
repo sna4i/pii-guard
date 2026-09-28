@@ -127,7 +127,7 @@ both paths surface — regex becomes a safety net for structured PII
 | Field | Default | Notes |
 |---|---|---|
 | LLM 補助検出を有効化 | off | master switch |
-| エンドポイント URL | — | e.g. `http://localhost:11434` (Ollama) or `http://192.168.1.12:1234` (LM Studio) |
+| エンドポイント URL | — | e.g. `http://localhost:11434` (Ollama) or `http://192.168.0.10:1234` (LM Studio) |
 | 使用モデル | — | auto-populated from `/api/tags` or `/v1/models` after 接続確認 |
 | 動作モード | `検出補助 (regex + LLM)` | `AI 置換 (実験的)` rewrites the full text into `<tag_N>` placeholders |
 | タイムアウト (ms) | `120000` | 9B thinking models need ≥60s; max `240000` |
