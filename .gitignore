@@ -31,3 +31,14 @@ tests/integration/.tmp-profile-*/
 # Chrome に unpacked で読み込ませる作業用コピー。
 # browser-extension/scripts/sync-dev.sh が生成するので追跡しない。
 /dev/
+
+# 配布用の zip。browser-extension/scripts/build-store-zip.sh がリポジトリ直下に作る。
+/pii-guard-v*.zip
+
+# 別リポジトリへ移した実験。モデルとデータで数 GB あるので、git add -A で巻き込まない。
+/experiments/privacy-filter-ja/
+
+# Claude Code が作る端末ローカルのファイル (worktree・会話の記録・個人設定)。
+/.claude/worktrees/
+/.claude/projects/
+.claude/settings.local.json

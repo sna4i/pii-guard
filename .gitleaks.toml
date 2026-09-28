@@ -1,0 +1,19 @@
+# gitleaks の設定。push 前チェック (scripts/prepush-check.mjs の PP-06) が使う。
+# 既定の規則はそのまま使い、このリポジトリで分かっている誤検知だけを除外する。
+# 除外を足すときは、なぜ誤検知なのかを description に書くこと。
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "検出器の試験用データ。検出できるかを確かめるため、架空の鍵やトークンを意図的に置いている"
+paths = [
+  '''^tests/vectors/''',
+  '''^tests/engine/''',
+]
+
+[[allowlists]]
+description = "同梱の推論ライブラリ (minify 済み)。トークナイザの変数名と値が鍵の形に見える"
+paths = [
+  '''^browser-extension/vendor/''',
+]
