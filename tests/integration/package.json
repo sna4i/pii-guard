@@ -1,5 +1,5 @@
 {
-  "name": "pii-masking-integration-tests",
+  "name": "pii-guard-integration-tests",
   "version": "0.0.0",
   "private": true,
   "type": "module",
