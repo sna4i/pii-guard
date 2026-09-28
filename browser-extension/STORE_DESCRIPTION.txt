@@ -98,4 +98,4 @@ ChatGPT、Claude、Gemini、Manus のチャット画面で動作します。そ�
 ■ サポート
 
 不具合の報告やご要望は、次のページで受け付けています。
-https://github.com/sna4i/pii-masking/issues
+https://github.com/sna4i/pii-guard/issues
