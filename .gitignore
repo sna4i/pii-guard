@@ -1,0 +1,48 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# python build / cache artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# host-only python pinning (we're Docker-only; see TODO.md working agreement)
+.venv/
+.python-version
+
+# OS / editor
+.DS_Store
+*.swp
+
+# build artifacts (Chrome Web Store variant — produced by scripts/build-store.sh)
+dist/
+
+# Playwright が作るブラウザプロファイル。キャッシュに 100MB 超の blob が
+# 入るため、git add -A で巻き込むと GitHub の push が pre-receive で落ちる。
+tests/integration/.tmp-profile-*/
+.playwright-mcp/
+
+# Chrome に unpacked で読み込ませる作業用コピー。
+# browser-extension/scripts/sync-dev.sh が生成するので追跡しない。
+/dev/
+
+# 配布用の zip。browser-extension/scripts/build-store-zip.sh がリポジトリ直下に作る。
+/pii-guard-v*.zip
+
+# 別リポジトリへ移した実験。モデルとデータで数 GB あるので、git add -A で巻き込まない。
+/experiments/privacy-filter-ja/
+
+# Claude Code が作る端末ローカルのファイル (worktree・会話の記録・個人設定)。
+/.claude/worktrees/
+/.claude/projects/
+.claude/settings.local.json
+
+# ゲートウェイが実行時に作るファイル。管理トークンは初回起動時に乱数で生成される。
+# (2026-09-28 まで data/admin_token が追跡されていて、トークンが公開されていた)
+/data/

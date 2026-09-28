@@ -1,0 +1,22 @@
+{
+  "label_groups": ["URL"],
+  "cases": [
+    {
+      "name": "https",
+      "input": "詳細は https://example.com/docs を見てね",
+      "expected": [{ "label": "URL", "text": "https://example.com/docs" }]
+    },
+    {
+      "name": "http + query",
+      "input": "http://api.example.com/v1/users?id=42 を叩く",
+      "expected": [
+        { "label": "URL", "text": "http://api.example.com/v1/users?id=42" }
+      ]
+    },
+    {
+      "name": "negative — no scheme",
+      "input": "example.com を参照",
+      "expected_absent": [{ "label": "URL" }]
+    }
+  ]
+}

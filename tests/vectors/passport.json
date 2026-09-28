@@ -1,0 +1,20 @@
+{
+  "label_groups": ["PASSPORT"],
+  "cases": [
+    {
+      "name": "AB prefix",
+      "input": "パスポート AB1234567 を確認",
+      "expected": [{ "label": "PASSPORT", "text": "AB1234567" }]
+    },
+    {
+      "name": "XY prefix",
+      "input": "番号 XY9876543 を発行",
+      "expected": [{ "label": "PASSPORT", "text": "XY9876543" }]
+    },
+    {
+      "name": "negative — one letter prefix",
+      "input": "番号 A12345678",
+      "expected_absent": [{ "label": "PASSPORT" }]
+    }
+  ]
+}

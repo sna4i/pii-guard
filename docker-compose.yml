@@ -1,0 +1,73 @@
+# local-mask-mcp — development / single-host deployment
+#
+# First run:
+#   mkdir -p data                # persisted audit log + runtime config + admin_token
+#   docker compose up -d --build
+#   curl http://127.0.0.1:8081/health
+#
+# The admin bearer token auto-generates on first request and is
+# written to data/admin_token (mode 0600). Retrieve it with:
+#   cat data/admin_token
+#
+# A .env file is optional; copy .env.example only if you need to
+# override defaults (e.g. pin ADMIN_TOKEN to a shared value).
+#
+# The HTTP gateway is exposed on 127.0.0.1:8081 only. Do not publish
+# on 0.0.0.0 unless you understand the trust model — the proxy forwards
+# (sanitized) prompts to upstream LLM providers.
+#
+# IMPORTANT: this gateway is a pure MITM and holds NO upstream API keys.
+# Clients calling /proxy/* must send their own auth header exactly as
+# they would when calling the provider directly:
+#   OpenAI    → Authorization: Bearer sk-...
+#   Anthropic → x-api-key: sk-ant-...  (+ anthropic-version)
+
+services:
+  mask-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: local-mask-mcp:latest
+    container_name: mask-mcp-gateway
+    restart: unless-stopped
+
+    # Bind on all interfaces (0.0.0.0) so WSL2's localhost forwarding
+    # can expose the gateway to Chrome on the Windows host. Pure-Linux
+    # / macOS users can still reach it via 127.0.0.1:8081 thanks to
+    # normal loopback — WSL2 is the only environment that requires the
+    # broader bind because its 127.0.0.1 is not the same as Windows's.
+    # The gateway itself is still safe: it holds no API keys (pure MITM
+    # passthrough) and the only privileged endpoints require ADMIN_TOKEN.
+    ports:
+      - "8081:8081"
+
+    # .env is optional. Only used when present (e.g. to pin ADMIN_TOKEN
+    # or tweak runtime flags). Compose 2.24+ treats a missing file as
+    # empty when `required: false`.
+    env_file:
+      - path: .env
+        required: false
+
+    # Container-specific overrides applied after env_file.
+    environment:
+      APP_HOST: "0.0.0.0"
+      APP_PORT: "8081"
+      AUDIT_LOG_PATH: /app/data/audit.jsonl
+      RUNTIME_CONFIG_PATH: /app/data/runtime_config.json
+      TEMP_DIR: /app/data/tmp
+
+    # Persist audit log + runtime config across container restarts.
+    volumes:
+      - ./data:/app/data
+
+    # Liveness probe. Mirrors the Dockerfile HEALTHCHECK so the
+    # policy is visible in one place for operators.
+    #   - start_period covers the eager spaCy en_core_web_lg load
+    #     that happens during uvicorn startup (~10–25s).
+    #   - /health is a static endpoint; a 5s timeout is generous.
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8081/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      start_period: 45s
+      retries: 3

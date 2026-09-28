@@ -1,0 +1,20 @@
+{
+  "label_groups": ["SKU"],
+  "cases": [
+    {
+      "name": "SKU- prefix",
+      "input": "商品 SKU-ABC-001 の在庫",
+      "expected": [{ "label": "SKU", "text": "SKU-ABC-001" }]
+    },
+    {
+      "name": "製品コード 日本語",
+      "input": "製品コード: HX-12 をスキャン",
+      "expected": [{ "label": "SKU", "text": "製品コード: HX-12" }]
+    },
+    {
+      "name": "negative — SKU no suffix",
+      "input": "SKU を教えて",
+      "expected_absent": [{ "label": "SKU" }]
+    }
+  ]
+}

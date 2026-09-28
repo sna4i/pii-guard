@@ -1,0 +1,24 @@
+{
+  "label_groups": ["API_KEY"],
+  "cases": [
+    {
+      "name": "sk- prefix",
+      "input": "key: sk-aaaaaaaaaaaaaaaaaaaaaa で接続",
+      "expected": [
+        { "label": "API_KEY", "text": "sk-aaaaaaaaaaaaaaaaaaaaaa" }
+      ]
+    },
+    {
+      "name": "api_key- prefix",
+      "input": "value api_key-ZZZZZZZZZZZZZZZZZZZZZ",
+      "expected": [
+        { "label": "API_KEY", "text": "api_key-ZZZZZZZZZZZZZZZZZZZZZ" }
+      ]
+    },
+    {
+      "name": "negative — short value",
+      "input": "sk-short",
+      "expected_absent": [{ "label": "API_KEY" }]
+    }
+  ]
+}

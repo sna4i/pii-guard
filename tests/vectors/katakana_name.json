@@ -1,0 +1,20 @@
+{
+  "label_groups": ["KATAKANA_NAME"],
+  "cases": [
+    {
+      "name": "4-char katakana",
+      "input": "担当はヤマダハナコです",
+      "expected": [{ "label": "KATAKANA_NAME", "text": "ヤマダハナコ" }]
+    },
+    {
+      "name": "long katakana with prolonged sound mark",
+      "input": "本名はタカハシユウヤー",
+      "expected": [{ "label": "KATAKANA_NAME", "text": "タカハシユウヤー" }]
+    },
+    {
+      "name": "negative — 3-char katakana (below threshold)",
+      "input": "テスト中",
+      "expected_absent": [{ "label": "KATAKANA_NAME" }]
+    }
+  ]
+}

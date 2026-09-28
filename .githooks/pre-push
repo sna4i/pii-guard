@@ -1,0 +1,10 @@
+#!/bin/sh
+# push 前チェック: 端末のパス、個人のメールアドレス、秘密情報などが
+# 含まれていたら push を止める。検査の中身は scripts/prepush-check.mjs、
+# ルールと直し方は docs/prepush-check.md。
+#
+# 有効にする (クローンごとに 1 回):
+#   git config core.hooksPath .githooks
+#
+# node が無い、スクリプトが壊れているといった場合も push は止まる。
+exec node "$(git rev-parse --show-toplevel)/scripts/prepush-check.mjs" --hook "$@"

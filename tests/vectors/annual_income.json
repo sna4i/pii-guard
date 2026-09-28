@@ -1,0 +1,25 @@
+{
+  "label_groups": ["ANNUAL_INCOME"],
+  "cases": [
+    {
+      "name": "年収 1200万円",
+      "input": "希望年収1200万円です",
+      "expected": [{ "label": "ANNUAL_INCOME", "text": "年収1200万円" }]
+    },
+    {
+      "name": "年収 with comma",
+      "input": "現在の年収800万円を想定",
+      "expected": [{ "label": "ANNUAL_INCOME", "text": "年収800万円" }]
+    },
+    {
+      "name": "月収",
+      "input": "月収50万円で試算します",
+      "expected": [{ "label": "ANNUAL_INCOME", "text": "月収50万円" }]
+    },
+    {
+      "name": "negative — 年収 without numbers",
+      "input": "年収について話したい",
+      "expected_absent": [{ "label": "ANNUAL_INCOME" }]
+    }
+  ]
+}

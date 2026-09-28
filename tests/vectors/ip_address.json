@@ -1,0 +1,20 @@
+{
+  "label_groups": ["IP_ADDRESS"],
+  "cases": [
+    {
+      "name": "private IPv4",
+      "input": "サーバーは 192.168.1.1 に接続",
+      "expected": [{ "label": "IP_ADDRESS", "text": "192.168.1.1" }]
+    },
+    {
+      "name": "public IPv4",
+      "input": "dns: 8.8.8.8 を使用",
+      "expected": [{ "label": "IP_ADDRESS", "text": "8.8.8.8" }]
+    },
+    {
+      "name": "negative — not a dotted quad",
+      "input": "version 1.2.3",
+      "expected_absent": [{ "label": "IP_ADDRESS" }]
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "label_groups": ["DRIVERS_LICENSE"],
+  "cases": [
+    {
+      "name": "with dashes",
+      "input": "免許証 12-34-567890-12 を提示",
+      "expected": [{ "label": "DRIVERS_LICENSE", "text": "12-34-567890-12" }]
+    },
+    {
+      "name": "with dashes variant",
+      "input": "提示 99-88-123456-77 を確認",
+      "expected": [{ "label": "DRIVERS_LICENSE", "text": "99-88-123456-77" }]
+    },
+    {
+      "name": "negative — only 6 digits",
+      "input": "id 123456 さん",
+      "expected_absent": [{ "label": "DRIVERS_LICENSE" }]
+    }
+  ]
+}

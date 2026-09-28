@@ -1,0 +1,20 @@
+{
+  "label_groups": ["EMPLOYEE_ID"],
+  "cases": [
+    {
+      "name": "社員番号: 日本語",
+      "input": "社員番号: 12345 を提出",
+      "expected": [{ "label": "EMPLOYEE_ID", "text": "社員番号: 12345" }]
+    },
+    {
+      "name": "従業員ID 日本語",
+      "input": "従業員ID: E-0042 です",
+      "expected": [{ "label": "EMPLOYEE_ID", "text": "従業員ID: E-0042" }]
+    },
+    {
+      "name": "negative — just 社員 alone",
+      "input": "社員として働く",
+      "expected_absent": [{ "label": "EMPLOYEE_ID" }]
+    }
+  ]
+}

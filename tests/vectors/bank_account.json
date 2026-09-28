@@ -1,0 +1,22 @@
+{
+  "label_groups": ["BANK_ACCOUNT"],
+  "cases": [
+    {
+      "name": "普通 with number",
+      "input": "振込先: 普通 1234567 まで",
+      "expected": [{ "label": "BANK_ACCOUNT", "text": "普通 1234567" }]
+    },
+    {
+      "name": "当座 口座番号",
+      "input": "当座 口座番号: 12345678",
+      "expected": [
+        { "label": "BANK_ACCOUNT", "text": "当座 口座番号: 12345678" }
+      ]
+    },
+    {
+      "name": "negative — plain number",
+      "input": "受付番号 1234567 を控え",
+      "expected_absent": [{ "label": "BANK_ACCOUNT" }]
+    }
+  ]
+}

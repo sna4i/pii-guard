@@ -1,0 +1,12 @@
+{
+  "name": "pii-guard-integration-tests",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:ml": "node test-ml-pipeline.mjs"
+  },
+  "dependencies": {
+    "playwright": "^1.49.0"
+  }
+}

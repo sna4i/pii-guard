@@ -1,0 +1,27 @@
+{
+  "label_groups": ["EMAIL_ADDRESS"],
+  "cases": [
+    {
+      "name": "standard email",
+      "input": "連絡先 foo@example.com まで",
+      "expected": [{ "label": "EMAIL_ADDRESS", "text": "foo@example.com" }]
+    },
+    {
+      "name": "new gTLD (fizz)",
+      "input": "hogehoge@fugafuga.fizz 宛て",
+      "expected": [{ "label": "EMAIL_ADDRESS", "text": "hogehoge@fugafuga.fizz" }]
+    },
+    {
+      "name": "plus addressing + dash domain",
+      "input": "ticket+dev@my-company.dev でお願いします",
+      "expected": [
+        { "label": "EMAIL_ADDRESS", "text": "ticket+dev@my-company.dev" }
+      ]
+    },
+    {
+      "name": "negative — no @",
+      "input": "hoge.fuga.example.com",
+      "expected_absent": [{ "label": "EMAIL_ADDRESS" }]
+    }
+  ]
+}

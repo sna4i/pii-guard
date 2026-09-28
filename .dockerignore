@@ -1,0 +1,57 @@
+# Version control
+.git
+.gitignore
+.gitattributes
+
+# Local env (never bake secrets into images)
+.env
+.env.*
+!.env.example
+
+# Virtualenvs
+.venv
+venv
+env
+
+# Host-side Python pin — uv inside the container discovers python via
+# UV_PYTHON_DOWNLOADS=never against the base image's python3.11, so a
+# stale pyenv-specific version string here would only confuse it.
+.python-version
+
+# Python build/cache
+__pycache__
+**/__pycache__
+*.py[cod]
+*$py.class
+*.egg-info
+*.egg
+.eggs
+build
+dist
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.coverage
+htmlcov
+
+# Runtime data (must not be shipped inside the image)
+data
+**/data
+
+# Docs are not needed at runtime. tests/ IS needed — the Dockerfile's
+# optional `test` stage does `COPY tests ./tests`. The runtime stage
+# simply never COPYs tests, so they never end up in the shipped image
+# regardless of whether they're in the build context.
+docs
+
+# IDE / OS
+.vscode
+.idea
+.DS_Store
+*.swp
+*.swo
+
+# Docker artifacts themselves
+Dockerfile*
+docker-compose*.yml
+.dockerignore

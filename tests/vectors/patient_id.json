@@ -1,0 +1,25 @@
+{
+  "label_groups": ["PATIENT_ID"],
+  "cases": [
+    {
+      "name": "PATIENT- prefix",
+      "input": "PATIENT-9876 を確認してください",
+      "expected": [{ "label": "PATIENT_ID", "text": "PATIENT-9876" }]
+    },
+    {
+      "name": "MRN- prefix",
+      "input": "MRN-001234 の所見",
+      "expected": [{ "label": "PATIENT_ID", "text": "MRN-001234" }]
+    },
+    {
+      "name": "患者ID 日本語",
+      "input": "患者ID: A-100 で診察",
+      "expected": [{ "label": "PATIENT_ID", "text": "患者ID: A-100" }]
+    },
+    {
+      "name": "negative — 患者 alone",
+      "input": "患者の容態は安定",
+      "expected_absent": [{ "label": "PATIENT_ID" }]
+    }
+  ]
+}

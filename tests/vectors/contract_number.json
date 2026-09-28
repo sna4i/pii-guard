@@ -1,0 +1,27 @@
+{
+  "label_groups": ["CONTRACT_NUMBER"],
+  "cases": [
+    {
+      "name": "CONTRACT- prefix",
+      "input": "CONTRACT-ABC123 を参照",
+      "expected": [{ "label": "CONTRACT_NUMBER", "text": "CONTRACT-ABC123" }]
+    },
+    {
+      "name": "契約番号: 日本語",
+      "input": "契約番号: A-2024-0001 です",
+      "expected": [
+        { "label": "CONTRACT_NUMBER", "text": "契約番号: A-2024-0001" }
+      ]
+    },
+    {
+      "name": "AGR- prefix",
+      "input": "引用元 AGR-0099-X を確認",
+      "expected": [{ "label": "CONTRACT_NUMBER", "text": "AGR-0099-X" }]
+    },
+    {
+      "name": "negative — 契約 alone",
+      "input": "先週の契約は完了した",
+      "expected_absent": [{ "label": "CONTRACT_NUMBER" }]
+    }
+  ]
+}

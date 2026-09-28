@@ -1,0 +1,58 @@
+[project]
+name = "local-mask-mcp"
+version = "0.1.0"
+description = "Local PII masking gateway with MCP adapter and OpenAI-compatible proxy"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115.0",
+  "uvicorn>=0.30.0",
+  "httpx>=0.27.0",
+  "pydantic>=2.8.0",
+  "pydantic-settings>=2.3.0",
+  "python-multipart>=0.0.9",
+  "presidio-analyzer>=2.2.355",
+  "presidio-anonymizer>=2.2.355",
+  "Pillow>=10.4.0",
+  "pypdf>=4.3.0",
+  "pytesseract>=0.3.10",
+  "mcp>=1.9.0",
+  "sudachipy>=0.6.10",
+  "sudachidict-core>=20260116",
+]
+
+# Dev tooling lives in a PEP 735 dependency group. `uv sync` installs this
+# group by default; Docker builds opt out via `uv sync --no-dev`.
+[dependency-groups]
+dev = [
+  "pytest>=8.3.0",
+  "pytest-asyncio>=0.23.8",
+  "ruff>=0.5.0",
+]
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+# uv project configuration — keeps Python pinning and environment handling
+# inside the repo so `uv sync` is fully reproducible.
+[tool.uv]
+# Pin to a specific minor. Full version lives in .python-version (or is
+# resolved by uv's own Python discovery when .python-version is absent).
+required-version = ">=0.5"

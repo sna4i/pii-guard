@@ -1,0 +1,20 @@
+{
+  "label_groups": ["PHONE_NUMBER"],
+  "cases": [
+    {
+      "name": "mobile 090",
+      "input": "電話は 09012345678 です",
+      "expected": [{ "label": "PHONE_NUMBER", "text": "09012345678" }]
+    },
+    {
+      "name": "landline with hyphens",
+      "input": "連絡先 03-1234-5678 番",
+      "expected": [{ "label": "PHONE_NUMBER", "text": "03-1234-5678" }]
+    },
+    {
+      "name": "negative — too few digits",
+      "input": "内線 1234 まで",
+      "expected_absent": [{ "label": "PHONE_NUMBER" }]
+    }
+  ]
+}

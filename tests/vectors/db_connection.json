@@ -1,0 +1,32 @@
+{
+  "label_groups": ["DB_CONNECTION"],
+  "cases": [
+    {
+      "name": "postgres URI",
+      "input": "conn postgresql://user:pass@db.local/app を使う",
+      "expected": [
+        {
+          "label": "DB_CONNECTION",
+          "text": "postgresql://user:pass@db.local/app"
+        }
+      ]
+    },
+    {
+      "name": "DB_NAME= env",
+      "input": "env DB_NAME=customers",
+      "expected": [{ "label": "DB_CONNECTION", "text": "DB_NAME=customers" }]
+    },
+    {
+      "name": "mongodb URI",
+      "input": "mongodb://mongo:27017/mydb の設定",
+      "expected": [
+        { "label": "DB_CONNECTION", "text": "mongodb://mongo:27017/mydb" }
+      ]
+    },
+    {
+      "name": "negative — plain text",
+      "input": "データベースはPostgresです",
+      "expected_absent": [{ "label": "DB_CONNECTION" }]
+    }
+  ]
+}

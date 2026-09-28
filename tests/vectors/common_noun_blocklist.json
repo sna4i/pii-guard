@@ -1,0 +1,30 @@
+{
+  "label_groups": ["KATAKANA_NAME"],
+  "mode": "blocklist",
+  "cases": [
+    {
+      "name": "プロジェクト dropped",
+      "input": "このプロジェクトは進行中",
+      "expected_absent": [
+        { "label": "KATAKANA_NAME", "text": "プロジェクト" }
+      ]
+    },
+    {
+      "name": "メンバー dropped",
+      "input": "新しいメンバーを追加",
+      "expected_absent": [{ "label": "KATAKANA_NAME", "text": "メンバー" }]
+    },
+    {
+      "name": "ミーティング dropped",
+      "input": "明日のミーティングについて",
+      "expected_absent": [
+        { "label": "KATAKANA_NAME", "text": "ミーティング" }
+      ]
+    },
+    {
+      "name": "real name still caught",
+      "input": "担当はヤマダハナコさんです",
+      "expected": [{ "label": "KATAKANA_NAME", "text": "ヤマダハナコ" }]
+    }
+  ]
+}

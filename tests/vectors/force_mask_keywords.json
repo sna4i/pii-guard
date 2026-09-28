@@ -1,0 +1,26 @@
+{
+  "label_groups": ["force_mask"],
+  "mode": "force_mask",
+  "cases": [
+    {
+      "name": "leak keyword triggers",
+      "input": "leak: contact foo@example.com",
+      "expected_forced_categories": ["PERSON", "ORGANIZATION", "FINANCIAL"]
+    },
+    {
+      "name": "機密 keyword triggers (phase-1 substring)",
+      "input": "機密事項: foo@example.com を含む",
+      "expected_forced_categories": ["PERSON", "ORGANIZATION", "FINANCIAL"]
+    },
+    {
+      "name": "confidential triggers (case-insensitive)",
+      "input": "CONFIDENTIAL: foo@example.com",
+      "expected_forced_categories": ["PERSON", "ORGANIZATION", "FINANCIAL"]
+    },
+    {
+      "name": "no keyword → no forced categories",
+      "input": "just a normal note: foo@example.com",
+      "expected_forced_categories": []
+    }
+  ]
+}

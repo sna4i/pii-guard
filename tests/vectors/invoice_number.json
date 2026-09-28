@@ -1,0 +1,27 @@
+{
+  "label_groups": ["INVOICE_NUMBER"],
+  "cases": [
+    {
+      "name": "INV- prefix",
+      "input": "INV-00001234 を再発行",
+      "expected": [{ "label": "INVOICE_NUMBER", "text": "INV-00001234" }]
+    },
+    {
+      "name": "請求書番号 日本語",
+      "input": "請求書番号: 2024-001 を送付",
+      "expected": [
+        { "label": "INVOICE_NUMBER", "text": "請求書番号: 2024-001" }
+      ]
+    },
+    {
+      "name": "INVOICE- full",
+      "input": "INVOICE-987654 の内容を確認",
+      "expected": [{ "label": "INVOICE_NUMBER", "text": "INVOICE-987654" }]
+    },
+    {
+      "name": "negative — 請求 alone",
+      "input": "請求は来月です",
+      "expected_absent": [{ "label": "INVOICE_NUMBER" }]
+    }
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "label_groups": ["BLOOD_TYPE"],
+  "cases": [
+    {
+      "name": "A型",
+      "input": "血液型はA型です",
+      "expected": [{ "label": "BLOOD_TYPE", "text": "A型" }]
+    },
+    {
+      "name": "AB型 (two-letter)",
+      "input": "彼女はAB型の持ち主",
+      "expected": [{ "label": "BLOOD_TYPE", "text": "AB型" }]
+    },
+    {
+      "name": "O型",
+      "input": "犬の血液型はO型",
+      "expected": [{ "label": "BLOOD_TYPE", "text": "O型" }]
+    },
+    {
+      "name": "negative — just 型 alone",
+      "input": "型番は不明",
+      "expected_absent": [{ "label": "BLOOD_TYPE" }]
+    }
+  ]
+}

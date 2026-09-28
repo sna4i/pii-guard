@@ -1,0 +1,22 @@
+{
+  "label_groups": ["PURCHASE_ORDER"],
+  "cases": [
+    {
+      "name": "PO- prefix",
+      "input": "PO-00012345 の発注分を確認",
+      "expected": [{ "label": "PURCHASE_ORDER", "text": "PO-00012345" }]
+    },
+    {
+      "name": "発注番号 日本語",
+      "input": "発注番号: X-1234 を送付",
+      "expected": [
+        { "label": "PURCHASE_ORDER", "text": "発注番号: X-1234" }
+      ]
+    },
+    {
+      "name": "negative — PO without digits",
+      "input": "POの作成を依頼",
+      "expected_absent": [{ "label": "PURCHASE_ORDER" }]
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>PII Guard ML Worker</title>
+</head>
+<body>
+  <!--
+    Hidden offscreen document used to host transformers.js / ONNX
+    Runtime Web inference. Service workers in MV3 cannot use dynamic
+    `import()` (HTML spec disallows it on ServiceWorkerGlobalScope),
+    and the WASM backend in onnxruntime-web pulls its threading
+    helper via dynamic import, so the pipeline must live somewhere
+    that allows it. Offscreen documents are the official MV3
+    workaround. See https://developer.chrome.com/docs/extensions/reference/api/offscreen
+  -->
+  <script type="module" src="offscreen.js"></script>
+</body>
+</html>

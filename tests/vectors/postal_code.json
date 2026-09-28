@@ -1,0 +1,20 @@
+{
+  "label_groups": ["POSTAL_CODE"],
+  "cases": [
+    {
+      "name": "with 〒",
+      "input": "〒651-0087 神戸市",
+      "expected": [{ "label": "POSTAL_CODE", "text": "〒651-0087" }]
+    },
+    {
+      "name": "bare",
+      "input": "郵便番号: 100-0001",
+      "expected": [{ "label": "POSTAL_CODE", "text": "100-0001" }]
+    },
+    {
+      "name": "negative — not NNN-NNNN shape",
+      "input": "番号 12-345 を確認",
+      "expected_absent": [{ "label": "POSTAL_CODE" }]
+    }
+  ]
+}

@@ -1,0 +1,186 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <title>PII Guard — 設定</title>
+    <link rel="stylesheet" href="options.css" />
+  </head>
+  <body>
+    <header class="page-header">
+      <h1>PII Guard — 設定</h1>
+      <span class="version" id="version">v0.4.0</span>
+    </header>
+
+    <main>
+      <section class="card">
+        <h2>マスキング除外リスト</h2>
+        <p class="hint">
+          ここに登録した値は、PII として検出されてもマスキングされず原文のまま送信されます。
+          会社名・プロジェクト名・自分の名前など、マスキング不要だが PII 判定される値を追加してください。
+        </p>
+
+        <div class="add-row">
+          <input
+            type="text"
+            id="allowlist-input"
+            placeholder="例: Acme Corp, テストユーザー, project-x"
+            autofocus
+          />
+          <button id="allowlist-add-btn" type="button" class="btn-primary">追加</button>
+        </div>
+
+        <div class="list-header">
+          <span>登録済みエントリ</span>
+          <span id="allowlist-count" class="count-badge">0件</span>
+        </div>
+        <div id="allowlist-entries" class="entries-list"></div>
+
+        <div class="bulk-actions">
+          <button id="export-btn" type="button" class="btn-secondary">JSON でエクスポート</button>
+          <input type="file" id="import-file" accept=".json" hidden />
+          <button id="import-btn" type="button" class="btn-secondary">JSON からインポート</button>
+          <button id="clear-btn" type="button" class="btn-danger">全削除</button>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>動作モード</h2>
+        <div class="form-row">
+          <label class="form-label" for="opt-enabled">マスキング機能</label>
+          <label class="switch">
+            <input type="checkbox" id="opt-enabled" />
+            <span class="slider"></span>
+          </label>
+        </div>
+        <div class="form-row">
+          <label class="form-label" for="opt-interactive">送信前に確認 (インタラクティブ)</label>
+          <label class="switch">
+            <input type="checkbox" id="opt-interactive" />
+            <span class="slider"></span>
+          </label>
+        </div>
+        <div class="form-row">
+          <label class="form-label">UI モード</label>
+          <fieldset class="radios">
+            <label><input type="radio" name="ui-mode" value="sidebar" /> サイドバー (推奨)</label>
+            <label><input type="radio" name="ui-mode" value="modal" /> モーダル (従来)</label>
+          </fieldset>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>
+          ローカル LLM 連携
+          <span class="badge-experimental">v0.5.0 dev</span>
+        </h2>
+        <p class="hint">
+          Ollama / llama.cpp / LM Studio 等の OpenAI 互換 API を指定すると、
+          正規表現・形態素解析に加えて LLM による文脈考慮型 PII 検出が有効化されます。
+          URL 未設定時は従来通りローカルエンジンのみで動作します。
+        </p>
+
+        <div class="form-row">
+          <label class="form-label" for="llm-enabled">LLM 補助検出を有効化</label>
+          <label class="switch">
+            <input type="checkbox" id="llm-enabled" />
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <div class="form-row llm-url-row">
+          <label class="form-label" for="llm-url">エンドポイント URL</label>
+          <div class="llm-url-input">
+            <input type="url" id="llm-url" placeholder="http://localhost:11434" />
+            <button type="button" class="btn-secondary" id="llm-test-btn">接続確認</button>
+          </div>
+          <span id="llm-status" class="status-pill status-unknown">未設定</span>
+        </div>
+
+        <div class="form-row llm-model-row">
+          <label class="form-label" for="llm-model">使用モデル</label>
+          <select id="llm-model" class="llm-select"></select>
+        </div>
+
+        <div class="form-row llm-recommend-row">
+          <label class="form-label">推奨モデル</label>
+          <div id="llm-recommend-list" class="llm-recommend-list"></div>
+          <small class="hint-inline">
+            未インストールのモデルは右の「ダウンロード」で Ollama へ pull できます。
+            精度目安は PII 検出タスクでの相対評価 (内部ベンチマーク) です。
+          </small>
+        </div>
+
+        <div class="form-row">
+          <label class="form-label" for="llm-mode">動作モード</label>
+          <select id="llm-mode" class="llm-select llm-mode-select">
+            <option value="detect">検出補助 (regex + LLM)</option>
+            <option value="replace">AI 置換 (実験的)</option>
+          </select>
+        </div>
+
+        <div class="form-row">
+          <label class="form-label" for="llm-timeout">タイムアウト (ms)</label>
+          <input type="number" id="llm-timeout" class="llm-number" min="2000" max="240000" step="1000" value="120000" />
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>
+          ブラウザ内 ML 検出
+          <span class="badge-experimental">v1.3.0</span>
+        </h2>
+        <p class="hint">
+          BERT-NER モデル (DistilBERT-multilingual, ~135 MB) をブラウザに常駐させ、regex / 辞書では取れない人名・地名・組織名を文脈から検出します。
+          <strong>外部 LLM サービスやゲートウェイ不要</strong>で完結し、すべての推論は端末内で実行されます。
+        </p>
+
+        <div class="form-row">
+          <label class="form-label" for="ml-enabled">ML 検出を有効化</label>
+          <label class="switch">
+            <input type="checkbox" id="ml-enabled" />
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <div class="form-row">
+          <span class="form-label">ステータス</span>
+          <span id="ml-status" class="status-pill status-unknown">未有効</span>
+        </div>
+
+        <div class="form-row" id="ml-model-row">
+          <span class="form-label">モデル</span>
+          <code class="endpoint" id="ml-model-id">Xenova/distilbert-base-multilingual-cased-ner-hrl</code>
+        </div>
+
+        <p class="hint" style="margin-top:8px">
+          初回有効化時に Hugging Face Hub からモデル (約 135 MB) を取得します。
+          ブラウザの IndexedDB にキャッシュされるため 2 回目以降は秒で起動します。
+          無効化してもキャッシュは保持されます (再有効化が早くなる)。
+        </p>
+        <p class="hint" id="ml-standalone-note" style="margin-top:8px;color:var(--text-muted)">
+          現在 ML 検出は <strong>standalone モード</strong> のみで動作します。Docker ゲートウェイが起動中の場合はゲートウェイ側の Sudachi/Presidio が優先されるため、ML を試したい場合はゲートウェイを停止してください。
+        </p>
+      </section>
+
+      <section class="card">
+        <h2>エンジン</h2>
+        <div class="form-row">
+          <span class="form-label">動作モード</span>
+          <span class="status-pill status-ok">ローカル (オフライン)</span>
+        </div>
+        <div class="form-row">
+          <span class="form-label">バージョン</span>
+          <code class="endpoint" id="engine-version">v0.5.0-dev (phase1)</code>
+        </div>
+        <p class="hint" style="margin-top:12px">
+          PII 検出はブラウザ内で完結します。
+          LLM 連携が有効な場合、入力テキストは
+          <strong>あなたが指定したローカル/LAN 内の Ollama サーバーのみ</strong>に送信されます。
+          第三者サーバーへの自動送信はありません。
+        </p>
+      </section>
+    </main>
+
+    <script src="options.js"></script>
+  </body>
+</html>

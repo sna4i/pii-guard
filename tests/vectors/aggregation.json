@@ -1,0 +1,36 @@
+{
+  "label_groups": ["aggregation"],
+  "mode": "aggregation",
+  "cases": [
+    {
+      "name": "same surface → same placeholder (1件)",
+      "input": "foo@example.com と foo@example.com は同一人物",
+      "expected_aggregated": [
+        {
+          "value": "foo@example.com",
+          "label": "EMAIL_ADDRESS",
+          "placeholder": "<EMAIL_ADDRESS_1>",
+          "count": 2
+        }
+      ]
+    },
+    {
+      "name": "two different surfaces → two numbers",
+      "input": "foo@example.com と bar@example.com に連絡",
+      "expected_aggregated": [
+        {
+          "value": "foo@example.com",
+          "label": "EMAIL_ADDRESS",
+          "placeholder": "<EMAIL_ADDRESS_1>",
+          "count": 1
+        },
+        {
+          "value": "bar@example.com",
+          "label": "EMAIL_ADDRESS",
+          "placeholder": "<EMAIL_ADDRESS_2>",
+          "count": 1
+        }
+      ]
+    }
+  ]
+}

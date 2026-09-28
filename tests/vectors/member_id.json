@@ -1,0 +1,20 @@
+{
+  "label_groups": ["MEMBER_ID"],
+  "cases": [
+    {
+      "name": "MEMBER- prefix",
+      "input": "顧客情報 MEMBER-00042 を確認",
+      "expected": [{ "label": "MEMBER_ID", "text": "MEMBER-00042" }]
+    },
+    {
+      "name": "会員番号 日本語",
+      "input": "会員番号: ABC-001 で登録済み",
+      "expected": [{ "label": "MEMBER_ID", "text": "会員番号: ABC-001" }]
+    },
+    {
+      "name": "negative — 会員 alone",
+      "input": "今日は会員の集まりです",
+      "expected_absent": [{ "label": "MEMBER_ID" }]
+    }
+  ]
+}
