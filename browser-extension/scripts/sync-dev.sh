@@ -30,6 +30,7 @@ rsync -a --delete --delete-excluded \
   --exclude '*.md' \
   --exclude 'scripts/' \
   --exclude 'manifest.store.json' \
+  --exclude 'STORE_DESCRIPTION.txt' \
   --exclude '*.zip' \
   --exclude '.pytest_cache/' \
   --exclude '__pycache__/' \

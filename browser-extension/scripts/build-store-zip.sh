@@ -27,7 +27,8 @@ zip -r "$OUT" . \
   -x "engine/__pycache__/*" \
   -x ".playwright-mcp/*" \
   -x "*.pyc" \
-  -x "manifest.store.json"
+  -x "manifest.store.json" \
+  -x "STORE_DESCRIPTION.txt"
 
 echo
 echo "✓ Built: $OUT"
