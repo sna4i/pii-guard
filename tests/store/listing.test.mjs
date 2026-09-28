@@ -77,6 +77,44 @@ test("no vendor names that are not required for disclosure", () => {
   assert.deepEqual(hits, [], "only names needed to describe the product or disclose data flows may appear");
 });
 
+test("no more than five brand or site names in total", () => {
+  // 公式 FAQ (Spam policy): "When listing supported websites or brands in
+  // the description, do not list more than five." 対応サービス 4 つと、
+  // 開示に必要な Hugging Face で上限ちょうど。増やすなら、どれかを外す。
+  const brands = ["ChatGPT", "Claude", "Gemini", "Manus", "Hugging Face", "OpenAI", "Anthropic",
+    "Google", "Microsoft", "Copilot", "Perplexity", "Grok", "DeepSeek", "Mistral", "GitHub",
+    "AWS", "Slack", "Notion"];
+  const used = brands.filter((b) => desc.includes(b));
+  assert.ok(used.length <= 5, `${used.length} brands: ${used.join(", ")}`);
+});
+
+// 公式 FAQ: "it's best to keep instances of a specific keyword to under 5"、
+// さらに「主な目的の語であっても繰り返さない」とある。2026-09-28 版は
+// 「検出」13 回、「伏せ字」12 回、「AI」10 回だった。
+// 決め打ちの語だけを数えると、言い換えた先 (「隠す」10 回、「判定」7 回)
+// で同じことが起きたので、語を機械的に拾って数える。
+const tally = (items) => {
+  const c = new Map();
+  for (const w of items) c.set(w, (c.get(w) || 0) + 1);
+  return [...c].filter(([, n]) => n >= 5);
+};
+const show = (over) => over.map(([w, n]) => `${w} ×${n}`).join(", ");
+
+test("no word appears five or more times", () => {
+  // 漢字 2 字以上・カタカナ 3 字以上・英単語 2 字以上の連なりを 1 語とみなす。
+  const text = desc.replace(/https?:\/\/\S+/g, "");
+  const words = text.match(/\p{Script=Han}{2,}|\p{Script=Katakana}[\p{Script=Katakana}ー]{2,}|[A-Za-z][A-Za-z0-9]+/gu) || [];
+  const over = tally(words);
+  assert.deepEqual(over, [], show(over));
+});
+
+test("the core actions are not repeated five or more times either", () => {
+  // 動詞は活用するので、語幹の出現回数で数える (「隠す」「隠したい」「隠せる」)。
+  const stems = ["検出", "伏せ", "隠", "マスク", "置き換", "見つけ", "判定", "送"];
+  const over = stems.map((s) => [s, count(desc, s)]).filter(([, n]) => n >= 5);
+  assert.deepEqual(over, [], show(over));
+});
+
 test("the model host is disclosed, but not repeated", () => {
   // ML 検出はモデルをここから取得するので、開示として必ず書く。
   const n = count(desc, "Hugging Face");
