@@ -547,6 +547,15 @@ docker exec -it ollama ollama pull qwen3:4b
 
 ### Recommended models (v0.5.0+)
 
+The system prompt for assist mode is the same for every input. It has examples in both Japanese and English, and one example shows that instructions written inside the input are ignored. The model returns only values and labels, without reasons. Tailoring the prompt to the model size or to the regex findings was tried and lowered accuracy, so it is not used. The design and the evaluation results are in [llm-prompt-optimization.md](./llm-prompt-optimization.md) (Japanese).
+
+After changing the prompt, compare it with the current one on a real LLM:
+
+```bash
+node scripts/eval-llm-prompts.mjs --url http://127.0.0.1:11434 --models qwen3:4b,qwen3:1.7b --verbose
+node tests/integration/e2e-llm-detect.mjs browser-extension http://127.0.0.1:11434 qwen3:1.7b
+```
+
 | Model | Size | VRAM | Badge |
 |---|---|---|---|
 | `qwen3:1.7b` | 1.1 GB | ~1.5 GB | light |

@@ -561,6 +561,15 @@ docker exec -it ollama ollama pull qwen3:4b
 
 検出プロンプトは `browser-extension/engine/llm-prompts.js` で Qwen3 の特性 (JSON grammar 追従、CJK+EN 混在耐性、`<think>` トークン抑止) に合わせて最適化されています。他モデル (Llama3 / Gemma2 / Phi3.5) でも動作しますが、精度と応答速度の安定性で **Qwen3:4b 以上を推奨**。
 
+検出補助モードのシステムプロンプトは、入力によらず 1 通りです。日本語と英語の両方の例を含み、入力の中に書かれた指示には従わないよう、例でも実演しています。出力は値とラベルだけで、理由は書かせません。モデルの大きさや正規表現の検出結果に合わせて組み立てを変える方法も試しましたが、精度が下がったので採用していません。設計と評価の結果は [llm-prompt-optimization.md](./llm-prompt-optimization.md) にあります。
+
+プロンプトを変えたら、実物の LLM で現行版と比べてください。
+
+```bash
+node scripts/eval-llm-prompts.mjs --url http://127.0.0.1:11434 --models qwen3:4b,qwen3:1.7b --verbose
+node tests/integration/e2e-llm-detect.mjs browser-extension http://127.0.0.1:11434 qwen3:1.7b
+```
+
 | Model | Size | VRAM | Badge |
 |---|---|---|---|
 | `qwen3:1.7b` | 1.1 GB | ~1.5 GB | 軽量 |
