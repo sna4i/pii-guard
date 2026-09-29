@@ -18,7 +18,7 @@
 // llmAugment() と同じ手順で行う。評価セットは tests/llm-eval/cases.json。
 //
 // 採点は文字単位で行う (docs/llm-prompt-optimization.md)。
-//   - 再現率: expect の語のうち、半分以上の文字が伏せられた語の割合
+//   - 再現率: expect の語のうち、伏せられずに残った部分が無い語の割合 (法人格や敬称だけ残るのは可)
 //   - 適合率: 伏せた文字のうち、expect か optional の語に含まれる文字の割合
 //   - 禁止語: forbid の語 (expect・optional と重ならない出現) が半分以上伏せられた件数
 // 伏せる文字は、正規表現の検出値と LLM の検出値の和で決まる (mergeLlmDetect と同じ)。
@@ -138,16 +138,28 @@ function charSet(text, values) {
   return s;
 }
 
+// 伏せるべき語のうち、伏せられずに残った部分があるか。2 文字以上残っていれば
+// 漏れとみなす。名字だけ伏せて下の名前が残るような一部の漏れを取りこぼさないため。
+// 法人格や敬称のように、それだけでは誰かを特定しない部分は残ってもよい。
+const HARMLESS_REMAINDER = new Set(["株式会社", "有限会社", "合同会社", "様", "さん", "氏", "Inc.", "Inc", "LLC", "Ltd."]);
+function leftover(text, g, M) {
+  for (const [a, b] of occurrences(text, g)) {
+    let run = "";
+    const runs = [];
+    for (let k = a; k <= b; k++) {
+      if (k < b && !M.has(k)) run += text[k];
+      else if (run) { runs.push(run.trim()); run = ""; }
+    }
+    if (runs.some((r) => r.length >= 2 && !HARMLESS_REMAINDER.has(r))) return true;
+  }
+  return false;
+}
+
 function score(c, values) {
   const M = charSet(c.text, values);
   const ok = new Set([...charSet(c.text, c.expect), ...charSet(c.text, c.optional)]);
   const missed = [];
-  for (const g of c.expect) {
-    const gs = charSet(c.text, [g]);
-    let hit = 0;
-    for (const k of gs) if (M.has(k)) hit++;
-    if (hit / gs.size < 0.5) missed.push(g);
-  }
+  for (const g of c.expect) if (leftover(c.text, g, M)) missed.push(g);
   let maskedOk = 0;
   for (const k of M) if (ok.has(k)) maskedOk++;
   const forbidden = [];
