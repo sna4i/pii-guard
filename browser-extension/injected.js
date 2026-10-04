@@ -521,16 +521,14 @@
       for (const ent of llmEnts) {
         const value = typeof ent.text === "string" ? ent.text.trim() : "";
         if (!value || llmValues.has(value)) continue;
-        const positions = [];
-        let from = 0;
-        while (true) {
-          const idx = text.indexOf(value, from);
-          if (idx < 0) break;
-          positions.push([idx, idx + value.length]);
-          from = idx + value.length;
-        }
-        if (!positions.length) continue;
         const label = String(ent.entity_type || "SENSITIVE_FACT").toUpperCase();
+        // 英数字の語の途中は除く (「1234567」を「123456789012」の中で見つけない)。
+        // 人名は、名字の後の下の名前と、フルネームの各部分も含める (1.5.1)
+        const agg = NS.engine && NS.engine.aggregate;
+        const positions = !agg ? [] : label === "PERSON" && typeof agg.personSpans === "function"
+          ? agg.personSpans(text, value)
+          : typeof agg.findOccurrences === "function" ? agg.findOccurrences(text, value) : [];
+        if (!positions.length) continue;
         const category = LABEL_TO_CATEGORY[label] || "OTHER";
         const severity = LABEL_TO_SEVERITY[label] || "medium";
         counters[label] = (counters[label] || 0) + 1;
@@ -894,65 +892,25 @@
     }
   }
 
-  // Shared numbering helper — mirrors MaskingService._tag_mask's
-  // pass-1 on the server. Same (label, surface) → same number; the
-  // server and client therefore agree on exactly which placeholder
-  // each occurrence resolves to, so the gateway's sanitized_text and
-  // the client-side preview never disagree.
-  //
-  // Returns a function ``numberFor(label, surface) -> int`` that the
-  // substitution loops below call without re-scanning the input.
-  function buildNumberer(originalText, spans) {
-    // spans: Array<{start, end, label}> OR Array<[start, end, label]>
-    const counters = new Map();
-    const numbering = new Map();
-    const normalized = spans
-      .map((x) => {
-        if (Array.isArray(x)) return { start: x[0], end: x[1], label: x[2] };
-        return { start: x.start, end: x.end, label: x.label || x.entity_type };
-      })
-      .filter(
-        (x) =>
-          Number.isInteger(x.start) && Number.isInteger(x.end) && x.end > x.start
-      )
-      .sort((a, b) => a.start - b.start || a.end - b.end);
-    for (const { start, end, label } of normalized) {
-      const surface = originalText.slice(start, end);
-      const key = `${label}\x00${surface}`;
-      if (!numbering.has(key)) {
-        const n = (counters.get(label) || 0) + 1;
-        counters.set(label, n);
-        numbering.set(key, n);
-      }
-    }
-    return (label, surface) =>
-      numbering.get(`${label}\x00${surface}`) || 1;
-  }
-
   // Apply the subset of gateway detections that the user kept
   // checked in the review modal. We use the numbered-tag strategy
   // (``<ENTITY_TYPE_N>``) so repeated mentions of the same surface
   // share a placeholder, matching the server-side invariant.
   function applyTagSubstitutions(originalText, detections, keptIds) {
     if (!keptIds || keptIds.size === 0) return originalText;
-    const kept = detections
-      .map((d, idx) => ({ ...d, __idx: idx }))
-      .filter((d) => keptIds.has(d.__idx))
-      .filter(
-        (d) =>
-          Number.isInteger(d.start) &&
-          Number.isInteger(d.end) &&
-          d.end > d.start
-      );
-    const numberFor = buildNumberer(originalText, kept);
-    const descending = [...kept].sort((a, b) => b.start - a.start);
-    let out = originalText;
-    for (const d of descending) {
-      const surface = originalText.slice(d.start, d.end);
-      const n = numberFor(d.entity_type, surface);
-      out = out.slice(0, d.start) + `<${d.entity_type}_${n}>` + out.slice(d.end);
+    const kept = detections.filter((_, idx) => keptIds.has(idx));
+    return maskSpans(originalText, kept);
+  }
+
+  // 伏せる範囲を伏せ字に置き換える。重なる範囲のまとめ方は
+  // engine/aggregate.js の applySpans() を参照 (1.5.1)。エンジンが無いまま
+  // 伏せずに送ることはしない — 送信ごと止める。
+  function maskSpans(originalText, spans) {
+    const agg = NS.engine && NS.engine.aggregate;
+    if (!agg || typeof agg.applySpans !== "function") {
+      throw new Error("mask-mcp: engine not ready — refusing to send unmasked text");
     }
-    return out;
+    return agg.applySpans(originalText, spans);
   }
 
   // Sidebar variant: input is the flattened [start, end, label] list
@@ -1062,25 +1020,7 @@
 
   function applyTriples(originalText, triples) {
     if (!triples || triples.length === 0) return originalText;
-    const numberFor = buildNumberer(originalText, triples);
-    const sorted = [...triples].sort((a, b) => b[0] - a[0]);
-    let out = originalText;
-    for (const [s, e, label] of sorted) {
-      if (
-        !Number.isInteger(s) ||
-        !Number.isInteger(e) ||
-        e <= s ||
-        s < 0 ||
-        e > out.length
-      ) {
-        continue;
-      }
-      const lbl = String(label || "MASKED");
-      const surface = originalText.slice(s, e);
-      const n = numberFor(lbl, surface);
-      out = out.slice(0, s) + `<${lbl}_${n}>` + out.slice(e);
-    }
-    return out;
+    return maskSpans(originalText, triples);
   }
 
   async function processBody(adapter, bodyJson, url) {
