@@ -122,6 +122,10 @@
     pending.delete(data.id);
     entry.resolve(data);
   });
+  // 受け取りの準備ができたので、設定 (除外リスト・常に伏せる語を含む) を
+  // 取りに行く (1.5.1)。content.js は起動直後にも設定を送るが、このスクリプトの
+  // 読み込みより先に届くと失われ、除外リストも常に伏せる語も効かなかった
+  window.postMessage({ source: TAG_IN, type: "request-settings" }, "*");
 
   function request(type, extra, timeoutMs) {
     const id = `mcp-${++sequence}-${Date.now()}`;
