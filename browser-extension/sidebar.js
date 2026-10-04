@@ -80,47 +80,11 @@
   // back-to-front so earlier offsets stay valid as the string shrinks.
   function applyMasks(originalText, keepers) {
     if (!keepers || keepers.length === 0) return originalText;
-
-    // Pass 1 — number every (label, surface) pair left-to-right so
-    // repeated mentions of the same surface share a placeholder
-    // (``<PERSON_1>`` used twice means "same person referenced
-    // twice", matching the server-side _tag_mask invariant).
-    const counters = new Map();
-    const numbering = new Map();
-    const ascending = [...keepers].sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-    for (const [s, e, label] of ascending) {
-      if (!Number.isInteger(s) || !Number.isInteger(e) || e <= s) continue;
-      const surface = originalText.slice(s, e);
-      const key = `${label}\x00${surface}`;
-      if (!numbering.has(key)) {
-        const n = (counters.get(label) || 0) + 1;
-        counters.set(label, n);
-        numbering.set(key, n);
-      }
-    }
-
-    // Pass 2 — substitute back-to-front so earlier offsets remain
-    // valid as later substrings shrink or grow.
-    const descending = [...keepers].sort((a, b) => b[0] - a[0]);
-    let result = originalText;
-    for (const [s, e, label] of descending) {
-      if (
-        !Number.isInteger(s) ||
-        !Number.isInteger(e) ||
-        e <= s ||
-        s < 0 ||
-        e > result.length
-      ) {
-        // Defensive: skip malformed positions instead of throwing,
-        // so a single bad row never breaks the whole preview.
-        continue;
-      }
-      const surface = originalText.slice(s, e);
-      const lbl = String(label || "MASKED");
-      const n = numbering.get(`${lbl}\x00${surface}`) || 1;
-      result = result.slice(0, s) + `<${lbl}_${n}>` + result.slice(e);
-    }
-    return result;
+    // 送信本文と同じ置き換え (engine/aggregate.js の applySpans)。重なる範囲を
+    // まとめるので、プレビューでも伏せ字が途中で切れない (1.5.1)。
+    const agg = window.__localMaskMCP && window.__localMaskMCP.engine && window.__localMaskMCP.engine.aggregate;
+    if (!agg || typeof agg.applySpans !== "function") return originalText;
+    return agg.applySpans(originalText, keepers);
   }
 
   const STYLE = `

@@ -268,6 +268,14 @@
       return;
     }
 
+    // ページ側のスクリプトが受け取りの準備をしてから設定を取りに来る (1.5.1)。
+    // 起動直後に送った設定は、受け取り手の読み込み前だと失われ、除外リストも
+    // 常に伏せる語も効かなかった。id を持たない要求なので、下の id 判定より前で受ける
+    if (data.type === "request-settings") {
+      broadcastSettings();
+      return;
+    }
+
     if (typeof data.id !== "string") return;
 
     if (data.type === "sanitize") {
