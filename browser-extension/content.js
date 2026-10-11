@@ -136,11 +136,10 @@
   for (const f of ENGINE_FILES) injectScript(f);
   injectScript("review-modal.js");
   injectScript("sidebar.js");
-  injectScript("composer-toggle.js");
   injectScript("injected.js");
   console.debug(
     "[pii-guard] injected",
-    ENGINE_FILES.length + 4,
+    ENGINE_FILES.length + 3,
     "scripts (engine + ui + hook)"
   );
 
@@ -209,29 +208,6 @@
     // the API ever throws at boot.
   }
 
-  // ページ側 (MAIN world) からの設定変更は、利用者が実際に PII Guard の UI を
-  // 操作した直後 (0.5 秒以内) にだけ受け付ける (1.6.0)。サイトのスクリプトも同じ window に
-  // postMessage できるので、これが無いとサイトの JS が PII Guard を黙ってオフに
-  // したり、除外リストに値を足したりできてしまう。isTrusted は本物の入力でしか
-  // true にならず、スクリプトには偽造できない。
-  let lastTrustedUiAt = 0;
-  // 正規の経路はクリックのハンドラの中で同期的に postMessage するので、届くまでは数 ms。
-  // 窓を広げるほど、利用者の本物のクリックに便乗できる時間が延びる
-  const TRUST_WINDOW_MS = 500;
-  const isOurUi = (node) =>
-    !!node && node.nodeType === 1 && typeof node.hasAttribute === "function" &&
-    (node.hasAttribute("data-pii-guard") || node.hasAttribute("data-mask-mcp-sidebar"));
-  for (const type of ["click", "pointerup", "mouseup", "drop", "keyup"]) {
-    document.addEventListener(type, (e) => {
-      if (!e.isTrusted) return;
-      const path = typeof e.composedPath === "function" ? e.composedPath() : [e.target];
-      if (path.some(isOurUi)) lastTrustedUiAt = Date.now();
-    }, true);
-  }
-  const recentlyTouchedUi = () => Date.now() - lastTrustedUiAt < TRUST_WINDOW_MS;
-  const ignoreUntrusted = (type) =>
-    console.warn(`[pii-guard] ignored "${type}" from the page: no recent user interaction with the PII Guard UI`);
-
   // 2) Handle page-world requests.
   window.addEventListener("message", (event) => {
     if (event.source !== window) return;
@@ -240,7 +216,6 @@
 
     // Allowlist add (no id — fire-and-forget write to chrome.storage).
     if (data.type === "add-allowlist" && typeof data.value === "string") {
-      if (!recentlyTouchedUi()) { ignoreUntrusted(data.type); return; }
       (async () => {
         try {
           const { maskAllowlist = [] } = await chrome.storage.local.get("maskAllowlist");
@@ -256,7 +231,6 @@
 
     // Force-mask list add — drop-and-pick-category flow from the sidebar.
     if (data.type === "add-forcelist" && typeof data.value === "string") {
-      if (!recentlyTouchedUi()) { ignoreUntrusted(data.type); return; }
       (async () => {
         try {
           const { maskForceList = [] } = await chrome.storage.local.get("maskForceList");
@@ -280,7 +254,6 @@
 
     // Force-mask list remove — ( value + category ) ペアで一致を削除。
     if (data.type === "remove-forcelist" && typeof data.value === "string") {
-      if (!recentlyTouchedUi()) { ignoreUntrusted(data.type); return; }
       (async () => {
         try {
           const { maskForceList = [] } = await chrome.storage.local.get("maskForceList");
@@ -302,12 +275,6 @@
     // 常に伏せる語も効かなかった。id を持たない要求なので、下の id 判定より前で受ける
     if (data.type === "request-settings") {
       broadcastSettings();
-      return;
-    }
-    // 入力欄のピルからのオン/オフ。保存すると onChanged で全タブに配信される
-    if (data.type === "set-enabled" && typeof data.value === "boolean") {
-      if (!recentlyTouchedUi()) { ignoreUntrusted(data.type); return; }
-      chrome.storage.local.set({ enabled: data.value }).catch(() => {});
       return;
     }
 

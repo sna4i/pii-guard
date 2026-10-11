@@ -38,17 +38,17 @@
 
 | ID | 決定 | 対応 |
 |---|---|---|
-| D-01 | 新しいモジュール `browser-extension/composer-toggle.js` を作る。MAIN world に、sidebar.js の後、injected.js の前に注入する。`window.__localMaskMCP.composerToggle` として公開する | R-01 |
+| D-01 | 新しいモジュール `browser-extension/composer-toggle.js` を作る。content script (isolated world) として manifest の `content_scripts` に、エンジン一式と content.js の後に載せる。ページのスクリプトからは触れない | R-01, R-12 |
 | D-02 | 入力欄の特定は 2 段階。まずサービスごとのヒントを試し、無ければ汎用の判定にする。汎用の判定は、画面内に見えている `textarea` と `[contenteditable="true"]` のうち、画面の下半分にあって面積が最大のもの。見つからなければ DOM の変化を監視して再探索する | R-01, R-07 |
 | D-03 | 表示は `position: fixed` の Shadow DOM ホストを `<body>` 直下に置く。サイドバーが作る wrapper の外に置く (wrapper は `transform` を持つので、中に置くと fixed の基準がずれる)。入力欄の矩形の右上角の内側に重ね、入力欄の大きさの変化、スクロール、画面サイズの変化に追従する。入力欄が消えたら隠す | R-07, R-08 |
 | D-04 | 見た目は高さ 24px のピル。盾のアイコン、「PII Guard」、スイッチ。オンは既存の accent 色、オフは灰色。オフで検出があるときは、ピルの左に橙の警告バッジと件数を出す。バッジを押すと小さなポップオーバーに種類別の件数 (例: メールアドレス 2、電話番号 1、機密と思われる文 1) と「オンにする」「閉じる」を出す。配色の明暗はサイドバーと同じ輝度判定 | R-04, R-05 |
-| D-05 | 状態の同期: `enabled` を content.js の設定配信 (`broadcastSettings`) と `storage.onChanged` の監視に加える。ピルの操作は `set-enabled` メッセージで content.js に送り、content.js が `chrome.storage.local` に書く。書き込みが `onChanged` で全タブに配信され、各タブのピルとポップアップが更新される | R-02 |
-| D-06 | オフ時の検出: textarea は `input` イベント、contenteditable は `MutationObserver` で変化を受け、400ms の debounce 後に文章を読む (`value` か `innerText`、先頭 20,000 文字)。`engine.maskAggregated(text, { userForceMaskEntries, mlEnabled: false })` を呼び、結果の `aggregated` から除外リストの値を除いた件数と `confidential` の件数を合計する。0 なら警告を消す | R-04, R-06, R-09 |
+| D-05 | 状態の同期: ピルは `chrome.storage.local` の `enabled` を直接読み書きし、`storage.onChanged` で他のタブやポップアップからの変更を受ける。ページ側にメッセージは送らない | R-02, R-12 |
+| D-06 | オフ時の検出: 入力欄の `input` イベントを受け、400ms の debounce 後に文章を読む (`value` か `innerText`、先頭 20,000 文字)。isolated world に読み込んだエンジンの `maskAggregated(text, { userForceMaskEntries, mlEnabled: false })` を呼び、結果の `aggregated` から除外リストの値を除いた件数と `confidential` の件数を合計する。0 なら警告を消す。ページ側のエンジンに頼まないので、サイトのスクリプトが警告を抑え込むこともできない | R-04, R-06, R-09 |
 | D-07 | オンのときは入力欄を読まず、警告も出さない。送信時にサイドバーがすべて見せるため | R-06, R-09 |
 | D-08 | 「オンにする」は `enabled: true` を書いてから、「マスキングする」は書かずに、入力中の文章で下書きの確認 (D-12) を始める | R-05, A-01, A-04 |
-| D-12 | 下書きの確認: injected.js が `NS.reviewDraft(text)` を公開する。送信時と同じ検出 (エンジン、LLM が有効なら LLM の統合も) を行い、サイドバーを `draft: true` で開く。サイドバーは確定ボタンを「選択したものをマスクする」にし、送信を示す文言を下書き用に変える。承認されたら `applySpans` で伏せた文章を作り、入力欄に書き戻す (D-13)。キャンセルなら何もしない | R-05, R-11 |
+| D-12 | 下書きの確認: ピルが `review-draft` メッセージ (id と文章) をページ側に送る。injected.js は送信時と同じ検出 (`NS.reviewDraft`: エンジン、LLM が有効なら LLM の統合も) を行い、サイドバーを `draft: true` で開く。サイドバーは確定ボタンを「選択したものをマスクする」にし、送信を示す文言を下書き用に変える。承認の結果 (`accepted`、`maskedPositions`) を `review-draft-result` で返し、ピルが `applySpans` で伏せた文章を作って入力欄に書き戻す (D-13)。ページ側の応答は信用しない前提で扱う。影響するのは下書きの置き換えだけで、結果は利用者の目の前に出る | R-05, R-11 |
 | D-13 | 書き戻し: `textarea` は値の setter を prototype から呼んで `input` イベントを発火する (React などの管理下でも反映されるように)。`contenteditable` は全選択してから `insertText` コマンドで置き換える (ProseMirror や Quill が自分の入力として扱う経路)。書き戻した直後に入力欄の文章を読み直し、伏せた文章と一致しなければ失敗とみなし、元の文章に戻してピルに「入力欄に書き戻せませんでした」と出す | R-11 |
-| D-15 | 設定を変えるメッセージ (`set-enabled`、`add-allowlist`、`add-forcelist`、`remove-forcelist`) は、content.js が直前 1.5 秒以内に PII Guard の UI (ピルかサイドバーのホスト) で本物の入力イベント (`isTrusted`) を観測したときだけ処理する。サイトのスクリプトは `isTrusted` を偽造できず、Shadow DOM の中のボタンを本物の入力で押すこともできない | R-12 |
+| D-15 | オン/オフの書き込みはピル (isolated world) が行い、ページ側からのメッセージでは変えられない。ピルの Shadow DOM は `closed` で、ページのスクリプトは中の要素を取得も操作もできない。最初の案では「UI を本物の入力で操作した直後だけ受け付ける」判定を content.js に置いたが、自分の UI かどうかを要素の属性で見ていたため、サイトが同じ属性を自分の要素に付ければすり抜けられた (コミット時のセキュリティレビューの指摘)。ページ側の世界にあるものはサイトから偽造できるので、判定ではなく置き場所で守る | R-12 |
 | D-14 | 2 つ目の Shadow DOM ホストは `<html>` 直下の末尾に置く。既存のテストと injected.js は「最初に見つかる Shadow DOM ホスト」をサイドバーとして扱うので、サイドバーより後ろの文書順になる位置に置き、`data-pii-guard="composer-toggle"` を付ける | R-08 |
 | D-09 | 送信経路 (fetch、XHR、WebSocket) は変えない | R-03 |
 | D-10 | `composer-toggle.js` を両方の manifest の `web_accessible_resources` と content.js の注入順に加える。STORE-STRIP は使わない | R-10 |
@@ -78,13 +78,14 @@
 
 ### Shadow DOM の中の目印 (テストと実装の共通の約束)
 
-| 要素 | 目印 |
+閉じた Shadow DOM の中は外から読めないので、ホスト要素の data 属性に状態と部品の位置を写す。テストはこれを読み、本物のマウス入力で押す。
+
+| 属性 | 内容 |
 |---|---|
-| ホスト | `html > div[data-pii-guard="composer-toggle"]` |
-| スイッチ | `.switch` (`aria-checked` がオン/オフ) |
-| 警告バッジ | `.warn`、件数は `.warn .count` |
-| ポップオーバーのボタン | `[data-action="turn-on"]`、`[data-action="mask-once"]`、`[data-action="close"]` |
-| 書き戻し失敗の表示 | `.notice` |
+| `data-pii-guard="composer-toggle"` | ホスト (`html` 直下) |
+| `data-enabled` | `"true"` / `"false"` |
+| `data-warn` | 警告の件数。オンのときは `"0"` |
+| `data-layout` | 部品の矩形 `[x, y, w, h]` の JSON。`switch`、`warn`、`turnOn`、`maskOnce`、`close`。隠れている部品は `null` |
 
 ## 検証
 
@@ -97,7 +98,7 @@
 | T-05 | 警告の「オンにする」で設定がオンになり、サイドバーが開く。確定後に入力欄が伏せ字になり、ピルはオン表示 | 同上 |
 | T-06 | contenteditable の入力欄でも、警告と書き戻しが動く | 同上 |
 | T-07 | ピルでオフにすると保存された `enabled` が false になり、送信は素通しになる | 同上 |
-| T-08 | ページのスクリプトが送った偽の `set-enabled` と `add-allowlist` は無視される。本物のクリックによる除外リストへの追加は通る | `tests/integration/e2e-composer-toggle.mjs` |
+| T-08 | ページのスクリプトが `set-enabled` を送っても設定は変わらない。本物のクリックによる除外リストへの追加は通る | `tests/integration/e2e-composer-toggle.mjs` |
 | T-09 | 既存のテスト一式と、送信経路・アップデートの E2E が通る | 既存 |
 | T-10 | 実際の 4 サービスで、ピルの位置と追従、書き戻しを目で確かめる | リリース前の手動確認 |
 
@@ -105,5 +106,9 @@
 
 - **性能**: 検出は正規表現と辞書だけ。debounce 400ms、20,000 文字で打ち切り。オンのときは入力欄を読まない
 - **可用性**: 入力欄が見つからない、矩形が取れない、エンジンが未準備、のどの場合も黙って何もしない。送信経路には影響しない
-- **セキュリティ**: 新しい権限なし。ホストページの DOM に要素を挿入しない。入力欄の文章は端末内の検出にだけ使う。設定を変えるメッセージは、利用者の本物の操作を伴うときだけ受け付ける (D-15)
+- **セキュリティ**: 新しい権限なし。ホストページの DOM に要素を挿入しない。入力欄の文章は端末内の検出にだけ使う。オン/オフは isolated world で保存し、ページ側からは変えられない (D-15)
+
+## 残っている既知のリスク
+
+サイドバー (MAIN world) の「除外」とドラッグ登録は、以前から `add-allowlist` / `add-forcelist` / `remove-forcelist` メッセージで content.js に保存を頼んでいる。サイトのスクリプトも同じメッセージを送れるので、除外リストに値を足して以後の送信でその値を伏せさせない、ということが理論上できる。今回の変更より前からある露出で、この変更では直していない。確実に直すなら、保存の確定をピルと同じく isolated world の閉じた Shadow DOM の中で行う (例: 「『値』を除外リストに追加しますか」の確認を content script 側で出す) 必要があり、サイドバーの操作感が変わるため、別途判断する。
 - **運用**: サービスごとのヒントは 1 つの表。外れても汎用の判定で動くので、サイトの改修ごとの緊急対応を減らせる

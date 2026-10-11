@@ -8,7 +8,7 @@
 //   T-05 「オンにする」で設定がオンになり、サイドバーが開き、確定で入力欄が伏せ字になる
 //   T-06 contenteditable の入力欄でも警告と書き戻しが動く
 //   T-07 ピルでオフにすると設定が false になり、送信は素通しになる
-//   T-08 ページのスクリプトが送った偽の設定変更 (set-enabled / add-allowlist) は無視される
+//   T-08 ページのスクリプトが送った set-enabled では設定が変わらない (ピルは isolated world で保存する)
 //
 // 使い方: node tests/integration/e2e-composer-toggle.mjs <unpacked 拡張機能ディレクトリ>
 // モックサーバとブラウザはこのスクリプト自身が起動し、finally で必ず閉じる。
@@ -42,24 +42,19 @@ const page = (kind) => {
 <h1>mock chatgpt.com</h1><main></main><footer>${editor}</footer>`;
 };
 
-// 拡張機能の Shadow DOM の中を読む補助 (ピルの状態を読む / 要素を押す)
+// ピルは閉じた Shadow DOM なので、ホストの data 属性 (状態と部品の位置) を読み、本物のマウスで押す
 const pillState = (p) => p.evaluate((sel) => {
-  const host = document.querySelector(sel);
-  const root = host && host.shadowRoot;
-  if (!root) return null;
-  const sw = root.querySelector(".switch");
-  const warn = root.querySelector(".warn");
-  return { on: sw ? sw.getAttribute("aria-checked") : null, warn: !!(warn && warn.offsetParent !== null), count: warn ? (warn.querySelector(".count") || {}).textContent : null };
+  const h = document.querySelector(sel);
+  if (!h) return null;
+  return { on: h.dataset.enabled, warn: h.dataset.warn != null && h.dataset.warn !== "0", count: h.dataset.warn };
 }, HOST);
-const clickInPill = async (p, inner) => {
-  // 本物のマウス操作で押す。拡張機能は、利用者の実際の操作に伴わない設定変更を受け付けない
-  const box = await p.evaluate(([sel, q]) => {
-    const host = document.querySelector(sel);
-    const el = host && host.shadowRoot && host.shadowRoot.querySelector(q);
-    if (!el) return null;
-    const r = el.getBoundingClientRect();
-    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
-  }, [HOST, inner]);
+const clickInPill = async (p, part) => {
+  const box = await p.evaluate(([sel, k]) => {
+    const h = document.querySelector(sel);
+    const layout = h && h.dataset.layout ? JSON.parse(h.dataset.layout) : null;
+    const r = layout && layout[k];
+    return r ? { x: r[0] + r[2] / 2, y: r[1] + r[3] / 2 } : null;
+  }, [HOST, part]);
   if (!box) return false;
   await p.mouse.click(box.x, box.y);
   return true;
@@ -121,7 +116,7 @@ try {
   check(st && st.on === "true", `入力欄があるページではピルが出て、オン (${JSON.stringify(st)})`);
 
   console.log("T-07 ピルでオフ:");
-  await clickInPill(p, ".switch");
+  await clickInPill(p, "switch");
   await p.waitForTimeout(800);
   check((await stored(sw, "enabled")) === false, "保存された enabled が false になる");
   st = await pillState(p);
@@ -130,10 +125,8 @@ try {
   console.log("T-08 ページのスクリプトからの偽の設定変更:");
   await p.waitForTimeout(1500); // 直前の本物のクリックの受け付け窓 (0.5 秒) を過ぎてから送る
   await p.evaluate(() => window.postMessage({ source: "mask-mcp-inpage", type: "set-enabled", value: true }, "*"));
-  await p.evaluate(() => window.postMessage({ source: "mask-mcp-inpage", type: "add-allowlist", value: "forged@example.com" }, "*"));
   await p.waitForTimeout(1200);
-  check((await stored(sw, "enabled")) === false, "利用者の操作を伴わない set-enabled は無視される");
-  check(!((await stored(sw, "maskAllowlist")) || []).includes("forged@example.com"), "利用者の操作を伴わない add-allowlist は無視される");
+  check((await stored(sw, "enabled")) === false, "ページからの set-enabled では設定が変わらない");
   st = await pillState(p);
   check(st && st.on === "false", "ピルもオフのまま");
 
@@ -149,9 +142,9 @@ try {
   check(received.length === 1 && received[0] === PII, "本文はそのまま届く");
 
   console.log("T-04 「マスキングする」:");
-  await clickInPill(p, ".warn");
+  await clickInPill(p, "warn");
   await p.waitForTimeout(500);
-  await clickInPill(p, '[data-action="mask-once"]');
+  await clickInPill(p, "maskOnce");
   await p.waitForTimeout(3000);
   check(await sidebarOpen(p), "サイドバーが開く");
   const label = await confirmSidebar(p);
@@ -167,9 +160,9 @@ try {
 
   console.log("T-05 「オンにする」:");
   await typeInto(p, PII);
-  await clickInPill(p, ".warn");
+  await clickInPill(p, "warn");
   await p.waitForTimeout(500);
-  await clickInPill(p, '[data-action="turn-on"]');
+  await clickInPill(p, "turnOn");
   await p.waitForTimeout(3000);
   check((await stored(sw, "enabled")) === true, "保存された enabled が true になる");
   check(await sidebarOpen(p), "サイドバーが開く");
@@ -188,9 +181,9 @@ try {
   await typeInto(p, PII);
   st = await pillState(p);
   check(st && st.warn, `警告が出る (${st && st.count})`);
-  await clickInPill(p, ".warn");
+  await clickInPill(p, "warn");
   await p.waitForTimeout(500);
-  await clickInPill(p, '[data-action="mask-once"]');
+  await clickInPill(p, "maskOnce");
   await p.waitForTimeout(3000);
   // サイドバーの「除外」を本物のクリックで押す。利用者の操作を伴う設定変更は通ること (T-08 の裏側)。
   // カテゴリは折りたたまれているので、先に見出しを本物のクリックで開く

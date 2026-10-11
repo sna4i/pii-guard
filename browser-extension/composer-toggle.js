@@ -1,16 +1,22 @@
 // composer-toggle.js — チャット入力欄のそばに置く PII Guard のオン/オフのピルと、
 // オフのときの警告マーク。設計は docs/composer-toggle.md。
 //
-// - MAIN world で動く。content.js が sidebar.js の後、injected.js の前に注入する
+// - content script (isolated world) として動く。manifest の content_scripts で、
+//   エンジン一式と content.js の後に読み込まれる
+// - オン/オフの保存 (`enabled`) は、このスクリプトが chrome.storage.local に直接書く。
+//   ページ側 (MAIN world) のスクリプトは isolated world にも、閉じた Shadow DOM の
+//   中にも触れないので、サイトのスクリプトが PII Guard をオフにすることはできない
 // - ホストページの DOM ツリーには要素を挿入しない。<html> 直下に position: fixed の
 //   Shadow DOM ホストを 1 つ置き、入力欄の矩形に追従させる
-// - オフのときだけ、入力が止まって 400ms 後に入力欄の文章を読み、端末内の
-//   正規表現と辞書で検出する。LLM にも ML モデルにも渡さない
-// - 警告の「オンにする」「マスキングする」は、入力中の文章を対象にサイドバーを
-//   開き (injected.js の NS.reviewDraft)、承認された結果を入力欄に書き戻す
+// - オフのときだけ、入力が止まって 400ms 後に入力欄の文章を読み、isolated world に
+//   読み込んだ正規表現と辞書で検出する。LLM にも ML モデルにも渡さない
+// - 警告の「オンにする」「マスキングする」は、ページ側 (injected.js) に下書きの確認を
+//   頼んでサイドバーを開き、返ってきた承認結果をこのスクリプトが入力欄に書き戻す
+// - テストのために、ホスト要素の data 属性に状態 (data-enabled, data-warn) と
+//   部品の位置 (data-layout) を写す。閉じた Shadow DOM の中は外から読めないため
 "use strict";
 
-(function attach(root) {
+(function attach() {
   // ---- 警告の要約 (Node でもテストできる純粋な関数) ---------------------
   const CATEGORY_JA = {
     PERSON: "人名",
@@ -51,17 +57,17 @@
 
   const api = { summarizeWarning };
   if (typeof module === "object" && module.exports) module.exports = api;
-  if (typeof window === "undefined" || typeof document === "undefined") return;
-
-  const NS = (window.__localMaskMCP = window.__localMaskMCP || {});
-  NS.composerToggle = api;
+  if (typeof window === "undefined" || typeof document === "undefined" || typeof chrome === "undefined" || !chrome.storage) return;
 
   // ---- 設定 ---------------------------------------------------------------
-  const TAG_IN = "mask-mcp-inpage"; // ページ → content.js
+  const TAG_IN = "mask-mcp-inpage";   // ページ → content script
+  const TAG_OUT = "mask-mcp-content"; // content script → ページ
   const DEBOUNCE_MS = 400;
   const MAX_CHARS = 20000;
   const TICK_MS = 1000;
+  const REVIEW_TIMEOUT_MS = 10 * 60 * 1000;
   const LOG = (...a) => console.debug("[pii-guard] composer:", ...a);
+  const NS = window.__localMaskMCP || {}; // isolated world のエンジン
 
   // サービスごとの入力欄のヒント。外れていても下の汎用の判定で拾う
   const HINTS = [
@@ -121,9 +127,11 @@
   }
 
   // ---- 状態と UI ------------------------------------------------------------
-  const state = { el: null, enabled: true, summary: { count: 0, items: [] }, reviewing: false, scanSeq: 0 };
+  const state = {
+    el: null, enabled: true, allowlist: [], forceList: [],
+    summary: { count: 0, items: [] }, reviewing: false, scanSeq: 0,
+  };
   let host = null;
-  let shadow = null;
   let ui = null;
   let debounceTimer = null;
   let noticeTimer = null;
@@ -173,7 +181,9 @@
     host = document.createElement("div");
     host.setAttribute("data-pii-guard", "composer-toggle");
     host.style.cssText = "position:fixed;top:0;left:0;z-index:2147483647;isolation:isolate;display:none;";
-    shadow = host.attachShadow({ mode: "open" });
+    // 閉じた Shadow DOM。ページのスクリプトは中の要素を取得も操作もできない。
+    // 中身は固定の雛形だけで、入力欄の文章などの外部の値は入れない
+    const shadow = host.attachShadow({ mode: "closed" });
     shadow.innerHTML = `<style>${STYLE}</style>
       <div class="wrap">
         <button class="warn" type="button" hidden title="個人情報の可能性があります"><span class="icon">${BANG}</span><span class="count">0</span></button>
@@ -199,21 +209,20 @@
       popover: shadow.querySelector(".popover"),
       items: shadow.querySelector(".items"),
       notice: shadow.querySelector(".notice"),
+      turnOn: shadow.querySelector('[data-action="turn-on"]'),
+      maskOnce: shadow.querySelector('[data-action="mask-once"]'),
+      close: shadow.querySelector('[data-action="close"]'),
     };
     applyTheme();
     ui.sw.addEventListener("click", () => setEnabled(!state.enabled));
     ui.warn.addEventListener("click", () => {
       if (ui.popover.hidden) renderItems();
       ui.popover.hidden = !ui.popover.hidden;
+      exportLayout();
     });
-    ui.popover.addEventListener("click", (e) => {
-      const btn = e.target.closest("[data-action]");
-      if (!btn) return;
-      const action = btn.getAttribute("data-action");
-      ui.popover.hidden = true;
-      if (action === "turn-on") { setEnabled(true); reviewDraft(); }
-      else if (action === "mask-once") reviewDraft();
-    });
+    ui.close.addEventListener("click", () => { ui.popover.hidden = true; exportLayout(); });
+    ui.maskOnce.addEventListener("click", () => { ui.popover.hidden = true; exportLayout(); reviewDraft(); });
+    ui.turnOn.addEventListener("click", () => { ui.popover.hidden = true; setEnabled(true); reviewDraft(); });
     document.documentElement.appendChild(host);
   }
 
@@ -231,6 +240,22 @@
     } catch (_) { /* 既定の明るい配色のまま */ }
   }
 
+  // テスト用: 状態と部品の位置をホストの data 属性に写す (閉じた Shadow DOM は外から読めない)
+  function exportLayout() {
+    if (!host || !ui) return;
+    host.dataset.enabled = state.enabled ? "true" : "false";
+    host.dataset.warn = String(!state.enabled ? state.summary.count : 0);
+    const rect = (el) => {
+      if (!el || el.hidden || el.offsetParent === null) return null;
+      const r = el.getBoundingClientRect();
+      return [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)];
+    };
+    host.dataset.layout = JSON.stringify({
+      switch: rect(ui.sw), warn: rect(ui.warn),
+      turnOn: rect(ui.turnOn), maskOnce: rect(ui.maskOnce), close: rect(ui.close),
+    });
+  }
+
   function render() {
     if (!ui) return;
     ui.sw.setAttribute("aria-checked", state.enabled ? "true" : "false");
@@ -238,6 +263,7 @@
     ui.warn.hidden = !show;
     ui.count.textContent = String(state.summary.count);
     if (!show) ui.popover.hidden = true;
+    exportLayout();
   }
   function renderItems() {
     ui.items.textContent = "";
@@ -272,27 +298,38 @@
     if (left < 4) left = 4;
     ui.wrap.classList.toggle("below", below);
     host.style.transform = `translate(${Math.round(left)}px, ${Math.round(top)}px)`;
+    exportLayout();
   }
 
-  // ---- 設定の同期 -----------------------------------------------------------
+  // ---- 設定の読み書き (chrome.storage.local に直接) ----------------------------
   function setEnabled(value) {
     state.enabled = !!value;
-    render();
-    try { window.postMessage({ source: TAG_IN, type: "set-enabled", value: !!value }, "*"); } catch (_) { /* noop */ }
-    if (!state.enabled) scheduleScan(0); else state.summary = { count: 0, items: [] };
-  }
-  function onSettings(s) {
-    if (!s || typeof s !== "object") return;
-    const next = s.enabled !== false;
-    const changed = next !== state.enabled;
-    state.enabled = next;
     if (state.enabled) state.summary = { count: 0, items: [] };
     render();
-    if (changed && !state.enabled) scheduleScan(0);
-    if (!state.enabled && ("maskAllowlist" in s || "maskForceList" in s)) scheduleScan(0);
+    chrome.storage.local.set({ enabled: !!value }).catch((e) => LOG("storage write failed:", e && e.message));
+    if (!state.enabled) scheduleScan(0);
   }
-  window.addEventListener("mask-mcp:settings-updated", (e) => onSettings(e.detail));
-  if (NS.settings) onSettings(NS.settings);
+  function applyStored(stored) {
+    const prevEnabled = state.enabled;
+    if ("enabled" in stored) state.enabled = stored.enabled !== false;
+    if (Array.isArray(stored.maskAllowlist)) state.allowlist = stored.maskAllowlist.filter((v) => typeof v === "string");
+    if (Array.isArray(stored.maskForceList)) {
+      state.forceList = stored.maskForceList
+        .map((e) => (typeof e === "string" ? { value: e, category: "OTHER" }
+          : e && typeof e.value === "string" ? { value: e.value, category: typeof e.category === "string" ? e.category : "OTHER" } : null))
+        .filter(Boolean);
+    }
+    if (state.enabled) state.summary = { count: 0, items: [] };
+    render();
+    if (!state.enabled && (prevEnabled !== state.enabled || "maskAllowlist" in stored || "maskForceList" in stored)) scheduleScan(0);
+  }
+  chrome.storage.local.get(["enabled", "maskAllowlist", "maskForceList"]).then(applyStored).catch(() => {});
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== "local") return;
+    const stored = {};
+    for (const k of ["enabled", "maskAllowlist", "maskForceList"]) if (k in changes) stored[k] = changes[k].newValue;
+    if (Object.keys(stored).length) applyStored(stored);
+  });
 
   // ---- オフ時の検出 -----------------------------------------------------------
   function scheduleScan(delay) {
@@ -307,13 +344,9 @@
     const seq = ++state.scanSeq;
     if (!text.trim()) { state.summary = { count: 0, items: [] }; render(); return; }
     try {
-      const s = NS.settings || {};
-      const res = await engine.maskAggregated(text, {
-        userForceMaskEntries: Array.isArray(s.maskForceList) ? s.maskForceList : [],
-        mlEnabled: false,
-      });
+      const res = await engine.maskAggregated(text, { userForceMaskEntries: state.forceList, mlEnabled: false });
       if (seq !== state.scanSeq) return;
-      state.summary = summarizeWarning(res && res.aggregated, s.maskAllowlist, res && res.confidential);
+      state.summary = summarizeWarning(res && res.aggregated, state.allowlist, res && res.confidential);
     } catch (err) {
       LOG("scan failed:", err && err.message);
       state.summary = { count: 0, items: [] };
@@ -322,34 +355,47 @@
     place();
   }
 
-  // ---- 下書きの確認 (サイドバーを開いて、承認結果を入力欄に書き戻す) -----------
+  // ---- 下書きの確認 (ページ側にサイドバーを開いてもらい、承認結果を書き戻す) ---------
+  const pendingReviews = new Map();
+  let reviewSeq = 0;
+  window.addEventListener("message", (event) => {
+    if (event.source !== window) return;
+    const d = event.data;
+    if (!d || d.source !== TAG_IN || d.type !== "review-draft-result" || typeof d.id !== "string") return;
+    const entry = pendingReviews.get(d.id);
+    if (!entry) return;
+    pendingReviews.delete(d.id);
+    clearTimeout(entry.timer);
+    entry.resolve(d);
+  });
+  function askPageToReview(text) {
+    return new Promise((resolve) => {
+      const id = `review-${++reviewSeq}-${Date.now()}`;
+      const timer = setTimeout(() => { pendingReviews.delete(id); resolve(null); }, REVIEW_TIMEOUT_MS);
+      pendingReviews.set(id, { resolve, timer });
+      window.postMessage({ source: TAG_OUT, id, type: "review-draft", text }, "*");
+    });
+  }
   async function reviewDraft() {
     if (state.reviewing || !state.el) return;
-    const text = readText(state.el);
+    const el = state.el;
+    const text = readText(el);
     if (!text.trim()) return;
-    const sidebar = NS.sidebar;
-    if (typeof NS.reviewDraft !== "function" || !sidebar || typeof sidebar.show !== "function") {
-      notice("確認画面を開けませんでした");
-      return;
-    }
+    const agg = NS.engine && NS.engine.aggregate;
+    if (!agg || typeof agg.applySpans !== "function") { notice("確認画面を開けませんでした"); return; }
     state.reviewing = true;
     try {
-      const r = await NS.reviewDraft(text);
-      if (!r || !r.aggResp) { notice("検出に失敗しました"); return; }
-      const decision = await sidebar.show(r.aggResp, text, {
-        draft: true,
-        mode: r.llmPending ? "detect" : "regex",
-        llmPending: r.llmPending || undefined,
-      });
-      if (!decision || !decision.accepted) return;
-      const agg = NS.engine && NS.engine.aggregate;
-      if (!agg || typeof agg.applySpans !== "function") { notice("伏せ字に置き換えられませんでした"); return; }
-      const masked = agg.applySpans(text, decision.maskedPositions || []);
+      // ページ側の応答は信用しない前提で扱う。影響するのは入力欄の下書きの置き換えだけで、
+      // 置き換えた結果は利用者の目の前に出る
+      const d = await askPageToReview(text);
+      if (!d) { notice("確認画面が応答しませんでした"); return; }
+      if (!d.accepted) return;
+      const masked = agg.applySpans(text, Array.isArray(d.maskedPositions) ? d.maskedPositions : []);
       if (masked === text) return;
-      writeBack(state.el, masked);
-      if (norm(readText(state.el)) !== norm(masked)) {
+      writeBack(el, masked);
+      if (norm(readText(el)) !== norm(masked)) {
         LOG("write-back mismatch; restoring the original text");
-        writeBack(state.el, text);
+        writeBack(el, text);
         notice("入力欄に書き戻せませんでした");
       }
     } catch (err) {
@@ -403,4 +449,4 @@
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start, { once: true });
   else start();
-})(typeof window !== "undefined" ? window : globalThis);
+})();

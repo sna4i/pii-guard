@@ -39,9 +39,7 @@
         "https://gemini.google.com/*",
         "https://*.manus.im/*"
       ],
-      "js": [
-        "content.js"
-      ],
+      "js": ["engine/dictionaries.js", "engine/patterns.js", "engine/classification.js", "engine/severity.js", "engine/categories.js", "engine/aggregate.js", "engine/force-mask.js", "engine/blocklist.js", "engine/user-force-mask.js", "engine/confidential.js", "engine/engine.js", "engine/bundle.js", "content.js", "composer-toggle.js"],
       "run_at": "document_start"
     }
   ],
@@ -51,7 +49,6 @@
         "injected.js",
         "review-modal.js",
         "sidebar.js",
-        "composer-toggle.js",
         "engine/dictionaries.js",
         "engine/patterns.js",
         "engine/classification.js",
