@@ -1446,6 +1446,7 @@
 
       const host = document.createElement("div");
       host.setAttribute("data-mask-mcp-sidebar", "");
+      host.setAttribute("data-pii-guard", "sidebar");
       host.style.all = "initial";
       host.style.display = "block";
       host.style.height = "100vh";
@@ -2259,7 +2260,12 @@
             timerId = setTimeout(doToggle, ms);
           };
 
+          // 行の中の「除外」ボタンの操作は行の長押しとして扱わない (1.6.0)。pointerdown で
+          // ポインタを捕捉すると click の宛先が行になり、ボタンのハンドラが動かなかった
+          const onExcludeBtn = (event) =>
+            !!(event && event.target && typeof event.target.closest === "function" && event.target.closest(".exclude-btn"));
           const onDown = (event) => {
+            if (onExcludeBtn(event)) return;
             if (timerId !== null) return; // already holding
             holdFired = false;
             if (requiresHold()) {
@@ -2267,7 +2273,8 @@
             }
             // else: wait for pointerup — it's a click path
           };
-          const onUp = () => {
+          const onUp = (event) => {
+            if (onExcludeBtn(event)) return;
             const wasHolding = timerId !== null;
             clearTimers();
             resetFill();

@@ -8,6 +8,7 @@
 //   T-05 「オンにする」で設定がオンになり、サイドバーが開き、確定で入力欄が伏せ字になる
 //   T-06 contenteditable の入力欄でも警告と書き戻しが動く
 //   T-07 ピルでオフにすると設定が false になり、送信は素通しになる
+//   T-08 ページのスクリプトが送った偽の設定変更 (set-enabled / add-allowlist) は無視される
 //
 // 使い方: node tests/integration/e2e-composer-toggle.mjs <unpacked 拡張機能ディレクトリ>
 // モックサーバとブラウザはこのスクリプト自身が起動し、finally で必ず閉じる。
@@ -50,12 +51,19 @@ const pillState = (p) => p.evaluate((sel) => {
   const warn = root.querySelector(".warn");
   return { on: sw ? sw.getAttribute("aria-checked") : null, warn: !!(warn && warn.offsetParent !== null), count: warn ? (warn.querySelector(".count") || {}).textContent : null };
 }, HOST);
-const clickInPill = (p, inner) => p.evaluate(([sel, q]) => {
-  const host = document.querySelector(sel);
-  const el = host && host.shadowRoot && host.shadowRoot.querySelector(q);
-  if (el) el.click();
-  return !!el;
-}, [HOST, inner]);
+const clickInPill = async (p, inner) => {
+  // 本物のマウス操作で押す。拡張機能は、利用者の実際の操作に伴わない設定変更を受け付けない
+  const box = await p.evaluate(([sel, q]) => {
+    const host = document.querySelector(sel);
+    const el = host && host.shadowRoot && host.shadowRoot.querySelector(q);
+    if (!el) return null;
+    const r = el.getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+  }, [HOST, inner]);
+  if (!box) return false;
+  await p.mouse.click(box.x, box.y);
+  return true;
+};
 const sidebarHost = (p) => p.evaluateHandle(() => [...document.querySelectorAll("body *")].find((e) => e.shadowRoot && e.shadowRoot.querySelector("button")));
 const sidebarOpen = async (p) => {
   const h = await sidebarHost(p);
@@ -100,8 +108,10 @@ try {
   const sw = ctx.serviceWorkers()[0] || (await ctx.waitForEvent("serviceworker", { timeout: 25000 }));
   await sw.evaluate(async () => { for (let i = 0; i < 100; i++) { const s = await chrome.storage.local.get(["enabled"]); if (typeof s.enabled === "boolean") return; await new Promise((r) => setTimeout(r, 100)); } });
   const errs = [];
+  const logs = [];
   const p = await ctx.newPage();
   p.on("pageerror", (e) => errs.push(String(e)));
+  p.on("console", (m) => { const s = m.text(); if (s.includes("[pii-guard]")) logs.push(s); });
 
   console.log("T-02 ピルの表示:");
   await p.goto("https://chatgpt.com/none"); await p.waitForTimeout(3500);
@@ -116,6 +126,16 @@ try {
   check((await stored(sw, "enabled")) === false, "保存された enabled が false になる");
   st = await pillState(p);
   check(st && st.on === "false", "ピルがオフ表示になる");
+
+  console.log("T-08 ページのスクリプトからの偽の設定変更:");
+  await p.waitForTimeout(1500); // 直前の本物のクリックの受け付け窓 (0.5 秒) を過ぎてから送る
+  await p.evaluate(() => window.postMessage({ source: "mask-mcp-inpage", type: "set-enabled", value: true }, "*"));
+  await p.evaluate(() => window.postMessage({ source: "mask-mcp-inpage", type: "add-allowlist", value: "forged@example.com" }, "*"));
+  await p.waitForTimeout(1200);
+  check((await stored(sw, "enabled")) === false, "利用者の操作を伴わない set-enabled は無視される");
+  check(!((await stored(sw, "maskAllowlist")) || []).includes("forged@example.com"), "利用者の操作を伴わない add-allowlist は無視される");
+  st = await pillState(p);
+  check(st && st.on === "false", "ピルもオフのまま");
 
   console.log("T-03 オフで個人情報を入力:");
   await typeInto(p, CLEAN);
@@ -172,10 +192,48 @@ try {
   await p.waitForTimeout(500);
   await clickInPill(p, '[data-action="mask-once"]');
   await p.waitForTimeout(3000);
+  // サイドバーの「除外」を本物のクリックで押す。利用者の操作を伴う設定変更は通ること (T-08 の裏側)。
+  // カテゴリは折りたたまれているので、先に見出しを本物のクリックで開く
+  const header = await (await sidebarHost(p)).evaluate((e) => {
+    const row = [...e.shadowRoot.querySelectorAll(".row")].find((r) => (r.querySelector(".row-value") || {}).textContent === "tanaka@example.co.jp");
+    const cat = row && row.closest(".category");
+    const h = cat && cat.querySelector(".category-header");
+    if (!h) return null;
+    const r = h.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2, collapsed: cat.classList.contains("is-collapsed") };
+  });
+  if (header && header.collapsed) { await p.mouse.click(header.x, header.y); await p.waitForTimeout(600); }
+  const exclude = await (await sidebarHost(p)).evaluate((e) => {
+    const row = [...e.shadowRoot.querySelectorAll(".row")].find((r) => (r.querySelector(".row-value") || {}).textContent === "tanaka@example.co.jp");
+    const btn = row && [...row.querySelectorAll("button")].find((b) => /除外/.test(b.textContent));
+    if (!btn) return null;
+    btn.scrollIntoView({ block: "center" });
+    const r = btn.getBoundingClientRect();
+    return r.width > 0 && r.height > 0 ? { x: r.left + r.width / 2, y: r.top + r.height / 2 } : null;
+  });
+  check(!!exclude, "サイドバーに除外ボタンがある");
+  if (exclude) { await p.mouse.click(exclude.x, exclude.y); await p.waitForTimeout(1200); }
+  const excludedOk = ((await stored(sw, "maskAllowlist")) || []).includes("tanaka@example.co.jp");
+  check(excludedOk, "本物のクリックによる除外リストへの追加は通る");
+  if (!excludedOk) {
+    const btnText = await (await sidebarHost(p)).evaluate((e) => {
+      const row = [...e.shadowRoot.querySelectorAll(".row")].find((r) => (r.querySelector(".row-value") || {}).textContent === "tanaka@example.co.jp");
+      const btn = row && [...row.querySelectorAll("button")].find((b) => /除外/.test(b.textContent));
+      return btn ? btn.textContent : null;
+    });
+    console.log(`    診断: ボタンの文言=${JSON.stringify(btnText)} 座標=${JSON.stringify(exclude)}`);
+    const hit = await (await sidebarHost(p)).evaluate((e, pt) => {
+      const top = document.elementFromPoint(pt.x, pt.y);
+      const inner = e.shadowRoot.elementFromPoint(pt.x, pt.y);
+      const d = (n) => (n ? `${n.tagName.toLowerCase()}.${String(n.className).replace(/\s+/g, ".")}` : null);
+      return { top: d(top), inner: d(inner), viewport: `${innerWidth}x${innerHeight}` };
+    }, exclude);
+    console.log(`    診断: その座標にある要素=${JSON.stringify(hit)}`);
+    for (const l of logs.filter((l) => /ignored|allowlist|除外/.test(l)).slice(-5)) console.log(`    診断: ${l.slice(0, 160)}`);
+  }
   await confirmSidebar(p);
   await p.waitForTimeout(2500);
   const after3 = await composerText(p);
-  check(after3 && !after3.includes("090-1234-5678") && /<[A-Z_]+_\d+>/.test(after3), `contenteditable でも伏せ字に置き換わる (${after3})`);
+  check(after3 && !after3.includes("090-1234-5678") && after3.includes("tanaka@example.co.jp") && /<[A-Z_]+_\d+>/.test(after3), `contenteditable でも伏せ字に置き換わり、除外した値は残る (${after3})`);
 
   check(errs.length === 0, `ページの JS エラーなし${errs.length ? ": " + errs.slice(0, 3).join(" | ") : ""}`);
 } catch (e) {
