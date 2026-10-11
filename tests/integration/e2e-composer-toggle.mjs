@@ -8,7 +8,8 @@
 //   T-05 「オンにする」で設定がオンになり、サイドバーが開き、確定で入力欄が伏せ字になる
 //   T-06 contenteditable の入力欄でも警告と書き戻しが動く
 //   T-07 ピルでオフにすると設定が false になり、送信は素通しになる
-//   T-08 ページのスクリプトが送った set-enabled では設定が変わらない (ピルは isolated world で保存する)
+//   T-08 ページのスクリプトが送った set-enabled では設定が変わらず、add-allowlist は確認なしには保存されない
+//        (保存の確定は isolated world の閉じた UI で行う)
 //
 // 使い方: node tests/integration/e2e-composer-toggle.mjs <unpacked 拡張機能ディレクトリ>
 // モックサーバとブラウザはこのスクリプト自身が起動し、finally で必ず閉じる。
@@ -55,6 +56,23 @@ const clickInPill = async (p, part) => {
     const r = layout && layout[k];
     return r ? { x: r[0] + r[2] / 2, y: r[1] + r[3] / 2 } : null;
   }, [HOST, part]);
+  if (!box) return false;
+  await p.mouse.click(box.x, box.y);
+  return true;
+};
+// 保存の確認バブル (別の閉じた Shadow DOM ホスト)。状態と位置は data 属性で読む
+const CONFIRM = 'div[data-pii-guard="persist-confirm"]';
+const confirmState = (p) => p.evaluate((sel) => {
+  const h = document.querySelector(sel);
+  return h ? { pending: h.dataset.pending || "", layout: h.dataset.layout || "" } : null;
+}, CONFIRM);
+const clickConfirm = async (p, part) => {
+  const box = await p.evaluate(([sel, k]) => {
+    const h = document.querySelector(sel);
+    const layout = h && h.dataset.layout ? JSON.parse(h.dataset.layout) : null;
+    const r = layout && layout[k];
+    return r ? { x: r[0] + r[2] / 2, y: r[1] + r[3] / 2 } : null;
+  }, [CONFIRM, part]);
   if (!box) return false;
   await p.mouse.click(box.x, box.y);
   return true;
@@ -125,8 +143,15 @@ try {
   console.log("T-08 ページのスクリプトからの偽の設定変更:");
   await p.waitForTimeout(1500); // 直前の本物のクリックの受け付け窓 (0.5 秒) を過ぎてから送る
   await p.evaluate(() => window.postMessage({ source: "mask-mcp-inpage", type: "set-enabled", value: true }, "*"));
+  await p.evaluate(() => window.postMessage({ source: "mask-mcp-inpage", type: "add-allowlist", value: "forged@example.com" }, "*"));
   await p.waitForTimeout(1200);
   check((await stored(sw, "enabled")) === false, "ページからの set-enabled では設定が変わらない");
+  check(!((await stored(sw, "maskAllowlist")) || []).includes("forged@example.com"), "ページからの add-allowlist は確認なしには保存されない");
+  let cs = await confirmState(p);
+  check(cs && cs.pending === "add-allowlist", `保存の確認が利用者に見える形で出る (${cs && cs.pending})`);
+  await clickConfirm(p, "cancel");
+  await p.waitForTimeout(600);
+  check(!((await stored(sw, "maskAllowlist")) || []).includes("forged@example.com"), "キャンセルすれば保存されない");
   st = await pillState(p);
   check(st && st.on === "false", "ピルもオフのまま");
 
@@ -205,8 +230,13 @@ try {
   });
   check(!!exclude, "サイドバーに除外ボタンがある");
   if (exclude) { await p.mouse.click(exclude.x, exclude.y); await p.waitForTimeout(1200); }
+  check(!((await stored(sw, "maskAllowlist")) || []).includes("tanaka@example.co.jp"), "「除外」を押しただけでは、まだ保存されない");
+  cs = await confirmState(p);
+  check(cs && cs.pending === "add-allowlist", `保存の確認が出る (${cs && cs.pending})`);
+  await clickConfirm(p, "confirm");
+  await p.waitForTimeout(800);
   const excludedOk = ((await stored(sw, "maskAllowlist")) || []).includes("tanaka@example.co.jp");
-  check(excludedOk, "本物のクリックによる除外リストへの追加は通る");
+  check(excludedOk, "確認の「追加」を本物のクリックで押すと保存される");
   if (!excludedOk) {
     const btnText = await (await sidebarHost(p)).evaluate((e) => {
       const row = [...e.shadowRoot.querySelectorAll(".row")].find((r) => (r.querySelector(".row-value") || {}).textContent === "tanaka@example.co.jp");

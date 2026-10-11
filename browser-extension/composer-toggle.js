@@ -58,6 +58,9 @@
   const api = { summarizeWarning };
   if (typeof module === "object" && module.exports) module.exports = api;
   if (typeof window === "undefined" || typeof document === "undefined" || typeof chrome === "undefined" || !chrome.storage) return;
+  // content.js (同じ isolated world) が保存の確認を頼むための公開点
+  window.__localMaskMCP = window.__localMaskMCP || {};
+  window.__localMaskMCP.composerToggle = api;
 
   // ---- 設定 ---------------------------------------------------------------
   const TAG_IN = "mask-mcp-inpage";   // ページ → content script
@@ -67,7 +70,7 @@
   const TICK_MS = 1000;
   const REVIEW_TIMEOUT_MS = 10 * 60 * 1000;
   const LOG = (...a) => console.debug("[pii-guard] composer:", ...a);
-  const NS = window.__localMaskMCP || {}; // isolated world のエンジン
+  const NS = window.__localMaskMCP; // isolated world のエンジン
 
   // サービスごとの入力欄のヒント。外れていても下の汎用の判定で拾う
   const HINTS = [
@@ -406,6 +409,133 @@
       if (!state.enabled) scheduleScan(0);
     }
   }
+
+  // ---- 保存の確認 (除外リスト・常に伏せる語) -------------------------------------------
+  // サイドバーは MAIN world にあるので、その「除外」やドラッグ登録のメッセージは
+  // サイトのスクリプトにも送れる。保存の確定だけを、ページが触れないこの世界の
+  // 閉じた UI で行う。確認が無ければ何も保存しない。
+  const PERSIST_TIMEOUT_MS = 20000;
+  const persistQueue = [];
+  let persistHost = null;
+  let persistUi = null;
+  let persistCurrent = null;
+  let persistTimer = null;
+  const PERSIST_STYLE = `
+    :host { all: initial; }
+    * { box-sizing: border-box; }
+    .box { position: fixed; right: 16px; bottom: 16px; min-width: 280px; max-width: 420px; padding: 12px 14px; border-radius: 10px;
+      background: #ffffff; color: #374151; border: 1px solid #d1d5db; box-shadow: 0 8px 24px rgba(0,0,0,.2);
+      font: 13px/1.45 -apple-system, "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif; }
+    .box.dark { background: #1f2937; color: #e5e7eb; border-color: #4b5563; }
+    .box[hidden] { display: none; }
+    .head { display: flex; align-items: center; gap: 6px; font-weight: 700; margin-bottom: 6px; }
+    .head svg { width: 14px; height: 14px; }
+    .value { font-family: ui-monospace, Menlo, Consolas, monospace; word-break: break-all; padding: 4px 6px; border-radius: 6px;
+      background: rgba(99,102,241,.1); margin: 4px 0 8px; }
+    .sub { color: #6b7280; margin-bottom: 10px; }
+    .box.dark .sub { color: #9ca3af; }
+    .actions { display: flex; gap: 6px; justify-content: flex-end; }
+    .actions button { height: 28px; padding: 0 12px; border-radius: 6px; border: 1px solid #d1d5db; background: #f9fafb; color: #374151; cursor: pointer; font: inherit; }
+    .box.dark .actions button { background: #374151; border-color: #4b5563; color: #e5e7eb; }
+    .actions button.primary { background: #6366f1; border-color: #6366f1; color: #fff; font-weight: 600; }
+  `;
+  const PERSIST_TEXT = {
+    "add-allowlist": { title: "除外リストに追加しますか？", sub: "追加すると、この値は今後どの送信でも伏せられなくなります。", ok: "追加" },
+    "add-forcelist": { title: "常に伏せる語に追加しますか？", sub: "追加すると、この値は今後どの送信でも伏せられます。", ok: "追加" },
+    "remove-forcelist": { title: "常に伏せる語から削除しますか？", sub: "削除すると、この値は以後、通常の判定に戻ります。", ok: "削除" },
+  };
+  function ensurePersistHost() {
+    if (persistHost) return;
+    persistHost = document.createElement("div");
+    persistHost.setAttribute("data-pii-guard", "persist-confirm");
+    persistHost.style.cssText = "position:fixed;top:0;left:0;z-index:2147483647;isolation:isolate;";
+    const shadow = persistHost.attachShadow({ mode: "closed" });
+    shadow.innerHTML = `<style>${PERSIST_STYLE}</style>
+      <div class="box" hidden role="dialog" aria-label="PII Guard の確認">
+        <div class="head">${SHIELD}<span class="title"></span></div>
+        <div class="value"></div>
+        <div class="sub"></div>
+        <div class="actions"><button type="button" class="cancel">キャンセル</button><button type="button" class="primary confirm"></button></div>
+      </div>`;
+    persistUi = {
+      box: shadow.querySelector(".box"), title: shadow.querySelector(".title"), value: shadow.querySelector(".value"),
+      sub: shadow.querySelector(".sub"), confirm: shadow.querySelector(".confirm"), cancel: shadow.querySelector(".cancel"),
+    };
+    try {
+      const bg = getComputedStyle(document.body || document.documentElement).backgroundColor;
+      const m = (bg || "").match(/\d+/g);
+      if (m && (0.299 * +m[0] + 0.587 * +m[1] + 0.114 * +m[2]) / 255 < 0.5) persistUi.box.classList.add("dark");
+    } catch (_) { /* 既定の明るい配色 */ }
+    persistUi.confirm.addEventListener("click", () => finishPersist(true));
+    persistUi.cancel.addEventListener("click", () => finishPersist(false));
+    document.documentElement.appendChild(persistHost);
+  }
+  function exportPersistLayout() {
+    if (!persistHost || !persistUi) return;
+    persistHost.dataset.pending = persistCurrent ? persistCurrent.type : "";
+    const rect = (el) => {
+      if (!el || persistUi.box.hidden) return null;
+      const r = el.getBoundingClientRect();
+      return [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)];
+    };
+    persistHost.dataset.layout = JSON.stringify({ confirm: rect(persistUi.confirm), cancel: rect(persistUi.cancel) });
+  }
+  function showNextPersist() {
+    if (persistCurrent || !persistQueue.length) return;
+    ensurePersistHost();
+    persistCurrent = persistQueue.shift();
+    const text = PERSIST_TEXT[persistCurrent.type];
+    persistUi.title.textContent = text.title;
+    persistUi.value.textContent = persistCurrent.value + (persistCurrent.category && persistCurrent.type !== "add-allowlist" ? ` (${persistCurrent.category})` : "");
+    persistUi.sub.textContent = text.sub;
+    persistUi.confirm.textContent = text.ok;
+    persistUi.box.hidden = false;
+    exportPersistLayout();
+    clearTimeout(persistTimer);
+    persistTimer = setTimeout(() => finishPersist(false), PERSIST_TIMEOUT_MS);
+  }
+  async function finishPersist(accepted) {
+    const req = persistCurrent;
+    if (!req) return;
+    clearTimeout(persistTimer);
+    persistCurrent = null;
+    persistUi.box.hidden = true;
+    exportPersistLayout();
+    if (accepted) {
+      try { await persist(req); } catch (e) { LOG("persist failed:", e && e.message); }
+    }
+    showNextPersist();
+  }
+  async function persist(req) {
+    const v = req.value.trim();
+    if (!v) return;
+    if (req.type === "add-allowlist") {
+      const { maskAllowlist = [] } = await chrome.storage.local.get("maskAllowlist");
+      if (!maskAllowlist.includes(v)) await chrome.storage.local.set({ maskAllowlist: [...maskAllowlist, v] });
+      return;
+    }
+    const { maskForceList = [] } = await chrome.storage.local.get("maskForceList");
+    const normalized = maskForceList.map((e) => (typeof e === "string" ? { value: e, category: "OTHER" } : { value: e.value, category: e.category || "OTHER" }));
+    if (req.type === "add-forcelist") {
+      const cat = req.category || "OTHER";
+      if (!normalized.some((e) => e.value === v && e.category === cat)) normalized.push({ value: v, category: cat });
+      await chrome.storage.local.set({ maskForceList: normalized });
+      return;
+    }
+    if (req.type === "remove-forcelist") {
+      const cat = req.category;
+      const next = normalized.filter((e) => !(e.value === v && (cat == null || e.category === cat)));
+      await chrome.storage.local.set({ maskForceList: next });
+    }
+  }
+  // content.js から呼ばれる。利用者が確認を押したときだけ保存する
+  api.confirmPersist = function confirmPersist(req) {
+    if (!req || !PERSIST_TEXT[req.type] || typeof req.value !== "string" || !req.value.trim()) return;
+    if (req.value.length > 500) return;
+    if (persistQueue.length >= 5) return; // サイトからの連投を抑える
+    persistQueue.push({ type: req.type, value: req.value, category: typeof req.category === "string" ? req.category : null });
+    showNextPersist();
+  };
 
   // ---- 入力欄への取り付けと追従 -------------------------------------------------
   const onInput = () => { if (!state.enabled) scheduleScan(); };
