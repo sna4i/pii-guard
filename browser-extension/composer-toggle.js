@@ -72,6 +72,62 @@
   const LOG = (...a) => console.debug("[pii-guard] composer:", ...a);
   const NS = window.__localMaskMCP; // isolated world のエンジン
 
+  // ---- クリックジャッキングへの防御 ----------------------------------------------
+  // ホスト要素はページの DOM にあるので、サイトのスクリプトはホストを透明にしたり
+  // 動かしたり、pointer-events: none の偽の見た目をかぶせたりできる。そこで、
+  //  - 部品が「完全に見えていて、何にも覆われていない」ことを Intersection Observer v2
+  //    (trackVisibility) で追い、そのときだけクリックを受け付ける
+  //  - ホストの属性をサイトが書き換えたら、元に戻し、保留中の確認は取り消す
+  //  - 位置と状態の data 属性は、テスト用のフラグが保存されているときだけ出す
+  const E2E_FLAG = "__pii_guard_e2e";
+  let exposeForTests = false;
+  const IOV2 = typeof IntersectionObserver === "function" && typeof IntersectionObserverEntry !== "undefined" &&
+    "isVisible" in IntersectionObserverEntry.prototype;
+  const visibility = new WeakMap();
+  let visibilityObserver = null;
+  function watchVisibility(el) {
+    if (!IOV2 || !el) return;
+    if (!visibilityObserver) {
+      visibilityObserver = new IntersectionObserver((entries) => {
+        for (const en of entries) visibility.set(en.target, en.isVisible === true && en.intersectionRatio >= 0.99);
+      }, { threshold: [0, 0.99, 1], trackVisibility: true, delay: 100 });
+    }
+    visibilityObserver.observe(el);
+  }
+  // 本物の入力で、部品が完全に見えているときだけ true
+  function clickIsSafe(event, el, host) {
+    if (!event || event.isTrusted !== true) return false;
+    if (IOV2) return visibility.get(el) === true;
+    // 古いブラウザ向けの代替: ホストのスタイルが改変されていないことだけ確かめる
+    const cs = getComputedStyle(host);
+    return cs.opacity === "1" && cs.visibility === "visible" && cs.filter === "none" && cs.clipPath === "none" && cs.pointerEvents !== "none";
+  }
+  // ホストの属性 (style など) がこのスクリプト以外から変えられたら元に戻す
+  function guardHost(host, baseCss, onTamper) {
+    // MutationObserver の通知は非同期なので、自分の書き込みかどうかはフラグではなく
+    // 「今の属性が期待どおりか」で判断する (フラグ方式だと自分の書き込みに反応して無限に繰り返した)
+    const expected = () => baseCss + (host.__pos || "");
+    let mo = null;
+    const apply = () => {
+      if (host.getAttribute("style") !== expected()) host.setAttribute("style", expected());
+      if (mo) mo.takeRecords();
+    };
+    host.__applyStyle = apply;
+    apply();
+    mo = new MutationObserver((muts) => {
+      const tampered = muts.some((m) => m.type === "attributes" && (
+        (m.attributeName === "style" && host.getAttribute("style") !== expected()) ||
+        m.attributeName === "class" || m.attributeName === "hidden"));
+      if (!tampered) return;
+      LOG("host attributes were changed by the page; restoring");
+      host.removeAttribute("class");
+      host.removeAttribute("hidden");
+      apply();
+      if (onTamper) onTamper();
+    });
+    mo.observe(host, { attributes: true });
+  }
+
   // サービスごとの入力欄のヒント。外れていても下の汎用の判定で拾う
   const HINTS = [
     { host: /(^|\.)(chatgpt\.com|openai\.com)$/, selectors: ["#prompt-textarea"] },
@@ -183,7 +239,8 @@
     if (host) return;
     host = document.createElement("div");
     host.setAttribute("data-pii-guard", "composer-toggle");
-    host.style.cssText = "position:fixed;top:0;left:0;z-index:2147483647;isolation:isolate;display:none;";
+    host.__pos = "display:none;";
+    guardHost(host, "position:fixed;top:0;left:0;z-index:2147483647;isolation:isolate;margin:0;padding:0;border:0;opacity:1;visibility:visible;filter:none;clip-path:none;transform:none;pointer-events:auto;", () => place());
     // 閉じた Shadow DOM。ページのスクリプトは中の要素を取得も操作もできない。
     // 中身は固定の雛形だけで、入力欄の文章などの外部の値は入れない
     const shadow = host.attachShadow({ mode: "closed" });
@@ -217,15 +274,20 @@
       close: shadow.querySelector('[data-action="close"]'),
     };
     applyTheme();
-    ui.sw.addEventListener("click", () => setEnabled(!state.enabled));
-    ui.warn.addEventListener("click", () => {
+    for (const el of [ui.sw, ui.warn, ui.turnOn, ui.maskOnce, ui.close]) watchVisibility(el);
+    const safe = (el, fn) => (e) => {
+      if (!clickIsSafe(e, el, host)) { LOG("ignored a click on a control that is not fully visible"); return; }
+      fn(e);
+    };
+    ui.sw.addEventListener("click", safe(ui.sw, () => setEnabled(!state.enabled)));
+    ui.warn.addEventListener("click", safe(ui.warn, () => {
       if (ui.popover.hidden) renderItems();
       ui.popover.hidden = !ui.popover.hidden;
       exportLayout();
-    });
-    ui.close.addEventListener("click", () => { ui.popover.hidden = true; exportLayout(); });
-    ui.maskOnce.addEventListener("click", () => { ui.popover.hidden = true; exportLayout(); reviewDraft(); });
-    ui.turnOn.addEventListener("click", () => { ui.popover.hidden = true; setEnabled(true); reviewDraft(); });
+    }));
+    ui.close.addEventListener("click", safe(ui.close, () => { ui.popover.hidden = true; exportLayout(); }));
+    ui.maskOnce.addEventListener("click", safe(ui.maskOnce, () => { ui.popover.hidden = true; exportLayout(); reviewDraft(); }));
+    ui.turnOn.addEventListener("click", safe(ui.turnOn, () => { ui.popover.hidden = true; setEnabled(true); reviewDraft(); }));
     document.documentElement.appendChild(host);
   }
 
@@ -246,6 +308,10 @@
   // テスト用: 状態と部品の位置をホストの data 属性に写す (閉じた Shadow DOM は外から読めない)
   function exportLayout() {
     if (!host || !ui) return;
+    if (!exposeForTests) {
+      for (const k of ["enabled", "warn", "layout"]) delete host.dataset[k];
+      return;
+    }
     host.dataset.enabled = state.enabled ? "true" : "false";
     host.dataset.warn = String(!state.enabled ? state.summary.count : 0);
     const rect = (el) => {
@@ -287,10 +353,16 @@
   }
 
   // 入力欄の右上の少し上に置く。上に余白が無ければ入力欄の内側の右上に重ねる
+  function setHostPos(pos) {
+    if (!host) return;
+    if (host.__pos === pos) return;
+    host.__pos = pos;
+    host.__applyStyle();
+  }
   function place() {
     if (!host || !state.el) return;
-    if (!isVisible(state.el)) { host.style.display = "none"; return; }
-    host.style.display = "block";
+    if (!isVisible(state.el)) { setHostPos("display:none;"); return; }
+    if (host.__pos === "display:none;") setHostPos("display:block;");
     const r = state.el.getBoundingClientRect();
     const w = ui.wrap.offsetWidth || 150;
     const h = ui.wrap.offsetHeight || 24;
@@ -300,7 +372,7 @@
     let left = r.right - w - 8;
     if (left < 4) left = 4;
     ui.wrap.classList.toggle("below", below);
-    host.style.transform = `translate(${Math.round(left)}px, ${Math.round(top)}px)`;
+    setHostPos(`display:block;left:${Math.round(left)}px;top:${Math.round(top)}px;`);
     exportLayout();
   }
 
@@ -326,9 +398,13 @@
     render();
     if (!state.enabled && (prevEnabled !== state.enabled || "maskAllowlist" in stored || "maskForceList" in stored)) scheduleScan(0);
   }
-  chrome.storage.local.get(["enabled", "maskAllowlist", "maskForceList"]).then(applyStored).catch(() => {});
+  chrome.storage.local.get(["enabled", "maskAllowlist", "maskForceList", E2E_FLAG]).then((s) => {
+    exposeForTests = s[E2E_FLAG] === true;
+    applyStored(s);
+  }).catch(() => {});
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== "local") return;
+    if (E2E_FLAG in changes) { exposeForTests = changes[E2E_FLAG].newValue === true; exportLayout(); exportPersistLayout(); }
     const stored = {};
     for (const k of ["enabled", "maskAllowlist", "maskForceList"]) if (k in changes) stored[k] = changes[k].newValue;
     if (Object.keys(stored).length) applyStored(stored);
@@ -415,6 +491,8 @@
   // サイトのスクリプトにも送れる。保存の確定だけを、ページが触れないこの世界の
   // 閉じた UI で行う。確認が無ければ何も保存しない。
   const PERSIST_TIMEOUT_MS = 20000;
+  const PERSIST_MIN_VISIBLE_MS = 500; // 表示した瞬間のクリック (カーソルの下に出す攻撃) を受け付けない
+  let persistShownAt = 0;
   const persistQueue = [];
   let persistHost = null;
   let persistUi = null;
@@ -448,7 +526,8 @@
     if (persistHost) return;
     persistHost = document.createElement("div");
     persistHost.setAttribute("data-pii-guard", "persist-confirm");
-    persistHost.style.cssText = "position:fixed;top:0;left:0;z-index:2147483647;isolation:isolate;";
+    guardHost(persistHost, "position:fixed;top:0;left:0;z-index:2147483647;isolation:isolate;margin:0;padding:0;border:0;opacity:1;visibility:visible;filter:none;clip-path:none;transform:none;pointer-events:auto;",
+      () => { if (persistCurrent) { LOG("cancelling the pending confirmation after tampering"); finishPersist(false); } });
     const shadow = persistHost.attachShadow({ mode: "closed" });
     shadow.innerHTML = `<style>${PERSIST_STYLE}</style>
       <div class="box" hidden role="dialog" aria-label="PII Guard の確認">
@@ -466,12 +545,22 @@
       const m = (bg || "").match(/\d+/g);
       if (m && (0.299 * +m[0] + 0.587 * +m[1] + 0.114 * +m[2]) / 255 < 0.5) persistUi.box.classList.add("dark");
     } catch (_) { /* 既定の明るい配色 */ }
-    persistUi.confirm.addEventListener("click", () => finishPersist(true));
-    persistUi.cancel.addEventListener("click", () => finishPersist(false));
+    watchVisibility(persistUi.confirm);
+    watchVisibility(persistUi.cancel);
+    persistUi.confirm.addEventListener("click", (e) => {
+      if (!clickIsSafe(e, persistUi.confirm, persistHost)) { LOG("ignored a confirm click: the dialog is not fully visible"); return; }
+      if (Date.now() - persistShownAt < PERSIST_MIN_VISIBLE_MS) { LOG("ignored a confirm click: the dialog has just appeared"); return; }
+      finishPersist(true);
+    });
+    persistUi.cancel.addEventListener("click", (e) => { if (e.isTrusted) finishPersist(false); });
     document.documentElement.appendChild(persistHost);
   }
   function exportPersistLayout() {
     if (!persistHost || !persistUi) return;
+    if (!exposeForTests) {
+      for (const k of ["pending", "layout"]) delete persistHost.dataset[k];
+      return;
+    }
     persistHost.dataset.pending = persistCurrent ? persistCurrent.type : "";
     const rect = (el) => {
       if (!el || persistUi.box.hidden) return null;
@@ -490,6 +579,7 @@
     persistUi.sub.textContent = text.sub;
     persistUi.confirm.textContent = text.ok;
     persistUi.box.hidden = false;
+    persistShownAt = Date.now();
     exportPersistLayout();
     clearTimeout(persistTimer);
     persistTimer = setTimeout(() => finishPersist(false), PERSIST_TIMEOUT_MS);
@@ -543,7 +633,7 @@
     if (state.el === el) return;
     if (state.el) state.el.removeEventListener("input", onInput);
     state.el = el;
-    if (!el) { if (host) host.style.display = "none"; return; }
+    if (!el) { setHostPos("display:none;"); return; }
     ensureHost();
     el.addEventListener("input", onInput);
     render();
@@ -555,7 +645,7 @@
     if (!state.el || !state.el.isConnected || !isVisible(state.el)) {
       const el = findComposer();
       if (el !== state.el) attachTo(el);
-      else if (host) host.style.display = el ? "block" : "none";
+      else if (host && !el) setHostPos("display:none;");
     } else {
       place();
     }

@@ -8,6 +8,7 @@
 //   T-05 「オンにする」で設定がオンになり、サイドバーが開き、確定で入力欄が伏せ字になる
 //   T-06 contenteditable の入力欄でも警告と書き戻しが動く
 //   T-07 ピルでオフにすると設定が false になり、送信は素通しになる
+//   T-09 クリックジャッキング: 偽の見た目に覆われた「追加」やスイッチは効かない。ホストを透明にされると確認を取り消す
 //   T-08 ページのスクリプトが送った set-enabled では設定が変わらず、add-allowlist は確認なしには保存されない
 //        (保存の確定は isolated world の閉じた UI で行う)
 //
@@ -120,6 +121,8 @@ try {
   });
   const sw = ctx.serviceWorkers()[0] || (await ctx.waitForEvent("serviceworker", { timeout: 25000 }));
   await sw.evaluate(async () => { for (let i = 0; i < 100; i++) { const s = await chrome.storage.local.get(["enabled"]); if (typeof s.enabled === "boolean") return; await new Promise((r) => setTimeout(r, 100)); } });
+  // 閉じた Shadow DOM の中の位置と状態は、このフラグがあるときだけホストの data 属性に出る (ページには出さない)
+  await sw.evaluate(() => chrome.storage.local.set({ __pii_guard_e2e: true }));
   const errs = [];
   const logs = [];
   const p = await ctx.newPage();
@@ -257,6 +260,55 @@ try {
   await p.waitForTimeout(2500);
   const after3 = await composerText(p);
   check(after3 && !after3.includes("090-1234-5678") && after3.includes("tanaka@example.co.jp") && /<[A-Z_]+_\d+>/.test(after3), `contenteditable でも伏せ字に置き換わり、除外した値は残る (${after3})`);
+
+  console.log("T-09 クリックジャッキングへの耐性:");
+  await p.goto("https://chatgpt.com/ta"); await p.waitForTimeout(3500);
+  await sw.evaluate(() => chrome.storage.local.set({ enabled: false }));
+  await p.waitForTimeout(800);
+  // (a) サイトが pointer-events: none の偽の見た目をかぶせ、その下の「追加」を押させる
+  await p.evaluate(() => window.postMessage({ source: "mask-mcp-inpage", type: "add-allowlist", value: "jacked@example.com" }, "*"));
+  await p.waitForTimeout(1200);
+  const decoy = await p.evaluate((sel) => {
+    const h = document.querySelector(sel);
+    const r = JSON.parse(h.dataset.layout).confirm;
+    const d = document.createElement("div");
+    d.id = "decoy";
+    d.style.cssText = `position:fixed;left:${r[0] - 10}px;top:${r[1] - 10}px;width:${r[2] + 20}px;height:${r[3] + 20}px;z-index:2147483647;background:#16a34a;color:#fff;display:flex;align-items:center;justify-content:center;pointer-events:none;`;
+    d.textContent = "送信";
+    document.documentElement.appendChild(d);
+    return { x: r[0] + r[2] / 2, y: r[1] + r[3] / 2 };
+  }, CONFIRM);
+  await p.waitForTimeout(800);
+  await p.mouse.click(decoy.x, decoy.y);
+  await p.waitForTimeout(800);
+  check(!((await stored(sw, "maskAllowlist")) || []).includes("jacked@example.com"), "偽の見た目に覆われた「追加」のクリックは受け付けない");
+  await p.evaluate(() => document.getElementById("decoy").remove());
+  await p.waitForTimeout(800);
+  // (b) サイトがホストを透明にする → 保留中の確認は取り消され、スタイルは元に戻る
+  await p.evaluate((sel) => { document.querySelector(sel).style.opacity = "0"; }, CONFIRM);
+  await p.waitForTimeout(800);
+  const tampered = await p.evaluate((sel) => { const h = document.querySelector(sel); return { opacity: getComputedStyle(h).opacity, pending: h.dataset.pending || "" }; }, CONFIRM);
+  check(tampered.opacity === "1" && tampered.pending === "", `ホストを透明にされると、スタイルを戻して確認を取り消す (opacity=${tampered.opacity}, pending=${JSON.stringify(tampered.pending)})`);
+  check(!((await stored(sw, "maskAllowlist")) || []).includes("jacked@example.com"), "取り消された確認は保存されない");
+  // (c) ピルのスイッチに偽の見た目をかぶせて押させても、設定は変わらない
+  const sw2 = await p.evaluate((sel) => {
+    const h = document.querySelector(sel);
+    const r = JSON.parse(h.dataset.layout).switch;
+    const d = document.createElement("div");
+    d.id = "decoy2";
+    d.style.cssText = `position:fixed;left:${r[0] - 6}px;top:${r[1] - 6}px;width:${r[2] + 12}px;height:${r[3] + 12}px;z-index:2147483647;background:#16a34a;pointer-events:none;`;
+    document.documentElement.appendChild(d);
+    return { x: r[0] + r[2] / 2, y: r[1] + r[3] / 2 };
+  }, HOST);
+  await p.waitForTimeout(800);
+  await p.mouse.click(sw2.x, sw2.y);
+  await p.waitForTimeout(800);
+  check((await stored(sw, "enabled")) === false, "偽の見た目に覆われたスイッチのクリックは受け付けない");
+  await p.evaluate(() => document.getElementById("decoy2").remove());
+  await p.waitForTimeout(800);
+  await clickInPill(p, "switch");
+  await p.waitForTimeout(800);
+  check((await stored(sw, "enabled")) === true, "覆いを外せば、本物のクリックでスイッチが効く");
 
   check(errs.length === 0, `ページの JS エラーなし${errs.length ? ": " + errs.slice(0, 3).join(" | ") : ""}`);
 } catch (e) {
