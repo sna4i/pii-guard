@@ -704,6 +704,7 @@ pii-guard/
 │   ├── content.js              isolated-world bridge + LLM_FETCH routing
 │   ├── injected.js             main-world fetch/XHR/WebSocket hooks
 │   ├── sidebar.js              Shadow DOM sidebar UI
+│   ├── composer-toggle.js      In-composer on/off switch and off-state warning
 │   ├── review-modal.js         Shadow DOM review modal UI
 │   ├── background.js           service worker (badge + per-tab count + LLM proxy)
 │   ├── options.html/css/js     options page (allowlist, LLM config, UI mode)

@@ -43,6 +43,14 @@ The interface is in Japanese.
 
 In sentences that contain words such as 機密 (confidential), 未公開 (unreleased) or "confidential", the items for people, companies and amounts are locked. Press and hold an item to unlock it. The slider at the top of the sidebar sets how long you need to hold.
 
+### The switch next to the input box
+
+On supported services, a small PII Guard switch appears at the top right of the input box. Turning it off skips the review at send time, and your message is sent as is.
+
+Even when it is off, a warning mark with a count appears next to the switch when the text in the input box may contain personal data. Pressing the mark shows what was found, and choosing "オンにする" (turn on) or "マスキングする" (mask) opens the review panel right away. What you confirm is written back into the input box. "マスキングする" is a one-time action that leaves the switch off.
+
+While the switch is off, the check runs only inside your browser, and the text in the input box is not sent anywhere.
+
 ## What it detects
 
 | Kind | Examples |

@@ -573,6 +573,19 @@
     }
   }
 
+  // 下書きの確認 (composer-toggle.js から呼ばれる)。送信時と同じ検出を行い、
+  // LLM が有効ならその統合も始める。サイドバーには llmPending を渡す
+  NS.reviewDraft = async function reviewDraft(text) {
+    const aggResp = await sanitizeAggregated(text, "draft", location.href);
+    if (!aggResp) return null;
+    let llmPending = null;
+    try {
+      const cfgResp = await request("llm-config", {});
+      if (cfgResp && cfgResp.config) llmPending = mergeLlmDetect(aggResp, text);
+    } catch (_) { llmPending = null; }
+    return { aggResp, llmPending };
+  };
+
   async function isEnabled() {
     const resp = await request("is-enabled", {});
     if (!resp || resp.type !== "is-enabled-result") return true;

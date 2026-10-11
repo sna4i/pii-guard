@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "PII Guard",
-  "version": "1.5.1",
+  "version": "1.6.0",
   "description": "AIチャットへの送信前に、個人情報や機密の数値を端末内で自動検出してマスキング。入力内容を第三者のサーバーへ送信しません。",
   "permissions": [
     "storage",
@@ -51,6 +51,7 @@
         "injected.js",
         "review-modal.js",
         "sidebar.js",
+        "composer-toggle.js",
         "engine/dictionaries.js",
         "engine/patterns.js",
         "engine/classification.js",

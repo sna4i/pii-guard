@@ -136,10 +136,11 @@
   for (const f of ENGINE_FILES) injectScript(f);
   injectScript("review-modal.js");
   injectScript("sidebar.js");
+  injectScript("composer-toggle.js");
   injectScript("injected.js");
   console.debug(
     "[pii-guard] injected",
-    ENGINE_FILES.length + 3,
+    ENGINE_FILES.length + 4,
     "scripts (engine + ui + hook)"
   );
 
@@ -154,16 +155,18 @@
     let uiMode = "sidebar";
     let maskAllowlist = [];
     let maskForceList = [];
+    let enabled = true;
     let mlEnabled = false;
     try {
       const stored = await chrome.storage.local.get([
-        "interactive", "uiMode", "maskAllowlist", "maskForceList", "mlEnabled",
+        "interactive", "uiMode", "maskAllowlist", "maskForceList", "mlEnabled", "enabled",
       ]);
       if (typeof stored.mlEnabled === "boolean") mlEnabled = stored.mlEnabled;
       interactive = stored.interactive !== false;
       if (stored.uiMode === "modal" || stored.uiMode === "sidebar") {
         uiMode = stored.uiMode;
       }
+      enabled = stored.enabled !== false;
       if (Array.isArray(stored.maskAllowlist)) {
         maskAllowlist = stored.maskAllowlist.filter((v) => typeof v === "string");
       }
@@ -187,7 +190,7 @@
       {
         source: TAG_OUT,
         type: "settings",
-        settings: { interactive, uiMode, maskAllowlist, maskForceList, mlEnabled },
+        settings: { interactive, uiMode, maskAllowlist, maskForceList, mlEnabled, enabled },
       },
       "*"
     );
@@ -196,7 +199,7 @@
   try {
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area !== "local") return;
-      if ("interactive" in changes || "uiMode" in changes || "maskAllowlist" in changes || "maskForceList" in changes || "mlEnabled" in changes) {
+      if ("interactive" in changes || "uiMode" in changes || "maskAllowlist" in changes || "maskForceList" in changes || "mlEnabled" in changes || "enabled" in changes) {
         broadcastSettings();
       }
     });
@@ -273,6 +276,11 @@
     // 常に伏せる語も効かなかった。id を持たない要求なので、下の id 判定より前で受ける
     if (data.type === "request-settings") {
       broadcastSettings();
+      return;
+    }
+    // 入力欄のピルからのオン/オフ。保存すると onChanged で全タブに配信される
+    if (data.type === "set-enabled" && typeof data.value === "boolean") {
+      chrome.storage.local.set({ enabled: data.value }).catch(() => {});
       return;
     }
 

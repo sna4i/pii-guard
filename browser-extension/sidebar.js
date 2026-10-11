@@ -1368,6 +1368,9 @@
    */
   async function show(aggregatedResponse, originalText, opts) {
     opts = opts || {};
+    // 入力中の文章を対象にした確認 (composer-toggle.js)。確定しても送信はせず、
+    // 伏せた文章を入力欄に書き戻す。送信を示す文言を変える
+    const isDraft = !!opts.draft;
     // Promise resolved when background LLM augmentation finishes. When
     // provided, we open the sidebar immediately with the regex-only
     // snapshot and re-render after the LLM merges in.
@@ -2388,7 +2391,7 @@
         const lead = document.createElement("p");
         lead.className = "confidential-warning-lead";
         lead.textContent =
-          "以下はマスクされません。送信してよいか確認してください。";
+          isDraft ? "以下はマスクされません。確認してください。" : "以下はマスクされません。送信してよいか確認してください。";
         warn.appendChild(lead);
 
         for (const hit of confidentialHits) {
@@ -2527,7 +2530,7 @@
         if (categoryOrder.length === 0) {
           const emptyMsg = document.createElement("div");
           emptyMsg.className = "empty";
-          emptyMsg.textContent = "✓ PII は検出されませんでした — そのまま送信できます";
+          emptyMsg.textContent = isDraft ? "✓ PII は検出されませんでした" : "✓ PII は検出されませんでした — そのまま送信できます";
           categoriesWrap.appendChild(emptyMsg);
         }
         applySevFilter();
@@ -2744,7 +2747,7 @@
       const confirmBtn = document.createElement("button");
       confirmBtn.type = "button";
       confirmBtn.className = "primary";
-      confirmBtn.textContent = "選択したものをマスクして送信 (Enter)";
+      confirmBtn.textContent = isDraft ? "選択したものをマスクする (Enter)" : "選択したものをマスクして送信 (Enter)";
       footer.appendChild(cancelBtn);
       footer.appendChild(confirmBtn);
 
