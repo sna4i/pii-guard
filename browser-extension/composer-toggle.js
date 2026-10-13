@@ -1,19 +1,21 @@
-// composer-toggle.js — チャット入力欄のそばに置く PII Guard のオン/オフのピルと、
-// オフのときの警告マーク。設計は docs/composer-toggle.md。
+// composer-toggle.js — チャット入力欄のそばに置く PII Guard のオン/オフのアイコンと、
+// オフのときの警告マーク、オンのときのチャットの背景色。設計は docs/composer-toggle.md。
 //
 // - content script (isolated world) として動く。manifest の content_scripts で、
-//   エンジン一式と content.js の後に読み込まれる
+//   エンジン一式、content.js、tint.js の後に読み込まれる
 // - オン/オフの保存 (`enabled`) は、このスクリプトが chrome.storage.local に直接書く。
 //   ページ側 (MAIN world) のスクリプトは isolated world にも、閉じた Shadow DOM の
 //   中にも触れないので、サイトのスクリプトが PII Guard をオフにすることはできない
-// - ホストページの DOM ツリーには要素を挿入しない。<html> 直下に position: fixed の
-//   Shadow DOM ホストを 1 つ置き、入力欄の矩形に追従させる
+// - アイコン本体は <html> 直下の閉じた Shadow DOM に置き、入力欄に追従させる。
+//   ChatGPT では、入力欄の下の段の「+」の直後に中身の無い場所取りの要素だけを入れ、
+//   アイコンをその位置に重ねる (D-18)。見つからなければ入力欄の右上に浮かせる
 // - オフのときだけ、入力が止まって 400ms 後に入力欄の文章を読み、isolated world に
 //   読み込んだ正規表現と辞書で検出する。LLM にも ML モデルにも渡さない
 // - 警告の「オンにする」「マスキングする」は、ページ側 (injected.js) に下書きの確認を
 //   頼んでサイドバーを開き、返ってきた承認結果をこのスクリプトが入力欄に書き戻す
-// - テストのために、ホスト要素の data 属性に状態 (data-enabled, data-warn) と
-//   部品の位置 (data-layout) を写す。閉じた Shadow DOM の中は外から読めないため
+// - オンのときは、設定画面で選んだ色をチャットの背景に混ぜる (D-24, D-25)
+// - テストのために、ホスト要素の data 属性に状態 (data-enabled, data-warn, data-docked) と
+//   部品の位置 (data-layout) を写す。テスト用のフラグが保存されているときだけ
 "use strict";
 
 (function attach() {
@@ -71,6 +73,10 @@
   const REVIEW_TIMEOUT_MS = 10 * 60 * 1000;
   const LOG = (...a) => console.debug("[pii-guard] composer:", ...a);
   const NS = window.__localMaskMCP; // isolated world のエンジン
+  const T = window.PiiGuardTint;    // tint.js (色の計算)
+  const STABLE_MS = 500;            // アイコンが動いてからクリックを受け付けるまで (D-22)
+  const FLOAT_SIZE = 28;            // 浮かせるときのアイコンの一辺 (px)
+  const HOST_CSS = "position:fixed;top:0;left:0;z-index:2147483647;isolation:isolate;margin:0;padding:0;border:0;opacity:1;visibility:visible;filter:none;clip-path:none;transform:none;pointer-events:auto;";
 
   // ---- クリックジャッキングへの防御 ----------------------------------------------
   // ホスト要素はページの DOM にあるので、サイトのスクリプトはホストを透明にしたり
@@ -130,10 +136,16 @@
 
   // サービスごとの入力欄のヒント。外れていても下の汎用の判定で拾う
   const HINTS = [
-    { host: /(^|\.)(chatgpt\.com|openai\.com)$/, selectors: ["#prompt-textarea"] },
+    { host: /(^|\.)(chatgpt\.com|openai\.com)$/, selectors: ["#prompt-textarea", 'div.ProseMirror[contenteditable="true"]', "textarea#mobile-composer-prompt"] },
     { host: /(^|\.)claude\.(ai|com)$/, selectors: ['div[contenteditable="true"].ProseMirror'] },
     { host: /(^|\.)gemini\.google\.com$/, selectors: ["rich-textarea .ql-editor", 'div[contenteditable="true"][aria-label]'] },
     { host: /(^|\.)manus\.im$/, selectors: ["textarea"] },
+  ];
+
+  // 入力欄の下の段の「+」ボタン (D-19)。ChatGPT のログイン後の画面だけ。ログインなしの画面は
+  // 入力欄の段が列の幅を決め打ちした CSS Grid で、場所取りを入れる隙間が無いので浮かせる
+  const DOCKS = [
+    { host: /(^|\.)(chatgpt\.com|openai\.com)$/, anchors: ['[data-composer-navigation-target="add-context"]'] },
   ];
 
   // ---- 入力欄の特定と読み書き ----------------------------------------------
@@ -142,6 +154,14 @@
     if (!el || !el.isConnected) return false;
     const r = el.getBoundingClientRect();
     if (r.width < 40 || r.height < 16 || r.bottom <= 0 || r.top >= window.innerHeight) return false;
+    const cs = getComputedStyle(el);
+    return cs.visibility !== "hidden" && cs.display !== "none";
+  }
+  // 小さなボタン向けの「見えている」判定 (isVisible は入力欄向けで、幅 40px 未満を除く)
+  function isShown(el) {
+    if (!el || !el.isConnected) return false;
+    const r = el.getBoundingClientRect();
+    if (r.width < 12 || r.height < 12 || r.bottom <= 0 || r.top >= window.innerHeight || r.right <= 0 || r.left >= window.innerWidth) return false;
     const cs = getComputedStyle(el);
     return cs.visibility !== "hidden" && cs.display !== "none";
   }
@@ -187,8 +207,12 @@
 
   // ---- 状態と UI ------------------------------------------------------------
   const state = {
-    el: null, enabled: true, allowlist: [], forceList: [],
+    el: null, enabled: true, allowlist: [], forceList: [], tint: null,
     summary: { count: 0, items: [] }, reviewing: false, scanSeq: 0,
+    dock: null,          // { spacer, anchor, after } 下の段に置いているとき
+    size: FLOAT_SIZE,    // アイコンの一辺 (px)。下の段では「+」に合わせる
+    haloColor: "",       // アイコンの縁取り (入力欄の箱の色)
+    lastMovedAt: 0, lastSpot: "",
   };
   let host = null;
   let ui = null;
@@ -198,25 +222,38 @@
   const STYLE = `
     :host { all: initial; }
     * { box-sizing: border-box; }
-    .wrap { position: relative; display: inline-flex; align-items: center; gap: 6px;
+    .wrap { position: relative; display: inline-flex; align-items: center; gap: 4px;
+      --size: 28px; --glyph: 16px; --fg: #374151; --fg-off: #9ca3af; --halo: #ffffff; --hover: rgba(0,0,0,.06);
+      --float-bg: #ffffff; --float-border: #d1d5db;
       font: 12px/1 -apple-system, "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif; color: #374151; }
-    .pill { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 6px 0 8px;
-      border-radius: 12px; background: #ffffff; border: 1px solid #d1d5db; box-shadow: 0 1px 3px rgba(0,0,0,.12); }
-    .wrap.dark .pill { background: #1f2937; border-color: #4b5563; color: #e5e7eb; }
-    .shield { width: 13px; height: 13px; flex: none; }
-    .name { font-weight: 600; letter-spacing: .01em; white-space: nowrap; }
-    .switch { position: relative; width: 28px; height: 16px; border-radius: 8px; border: 0; padding: 0; cursor: pointer;
-      background: #9ca3af; transition: background .15s; }
-    .switch[aria-checked="true"] { background: #6366f1; }
-    .knob { position: absolute; top: 2px; left: 2px; width: 12px; height: 12px; border-radius: 50%; background: #fff; transition: transform .15s; }
-    .switch[aria-checked="true"] .knob { transform: translateX(12px); }
-    .warn { display: inline-flex; align-items: center; gap: 4px; height: 24px; padding: 0 8px; border-radius: 12px; border: 0;
+    .wrap.dark { color: #e5e7eb; --fg: #d1d5db; --fg-off: #6b7280; --halo: #2f2f2f; --hover: rgba(255,255,255,.08);
+      --float-bg: #1f2937; --float-border: #4b5563; }
+    .wrap.floating { flex-direction: row-reverse; --halo: var(--float-bg); }
+    .toggle { width: var(--size); height: var(--size); flex: none; margin: 0; padding: 0; border: 0; border-radius: 50%;
+      background: transparent; color: var(--fg); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
+    .toggle:hover { background: var(--hover); }
+    .toggle:focus-visible { outline: 2px solid #6366f1; outline-offset: 1px; }
+    .wrap.floating .toggle { background: var(--float-bg); border: 1px solid var(--float-border); box-shadow: 0 1px 3px rgba(0,0,0,.14); }
+    .logo { width: var(--glyph); height: var(--glyph); display: block; overflow: visible; }
+    .logo .shield, .logo .aster { fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+    .logo .shackle { fill: none; stroke: #2563eb; stroke-width: 2; }
+    .logo .lock { fill: #2563eb; stroke: var(--halo); stroke-width: 1.8; paint-order: stroke; }
+    .logo .hole { fill: #ffffff; }
+    .logo .slash-halo { stroke: var(--halo); stroke-width: 5; stroke-linecap: round; display: none; }
+    .logo .slash { stroke: var(--fg-off); stroke-width: 2.4; stroke-linecap: round; display: none; }
+    .toggle[aria-checked="false"] { color: var(--fg-off); }
+    .toggle[aria-checked="false"] .shackle { stroke: var(--fg-off); }
+    .toggle[aria-checked="false"] .lock { fill: var(--fg-off); }
+    .toggle[aria-checked="false"] .slash, .toggle[aria-checked="false"] .slash-halo { display: inline; }
+    .warn { display: inline-flex; align-items: center; gap: 4px; height: 24px; padding: 0 8px; border-radius: 12px; border: 0; flex: none;
       cursor: pointer; background: #f59e0b; color: #1f2937; font-weight: 700; box-shadow: 0 1px 3px rgba(0,0,0,.18); }
     .warn[hidden] { display: none; }
     .warn .icon { width: 14px; height: 14px; }
-    .popover { position: absolute; right: 0; bottom: calc(100% + 6px); min-width: 240px; padding: 10px 12px; border-radius: 10px;
+    .popover { position: absolute; right: 0; bottom: calc(100% + 6px); width: max-content; min-width: 240px;
+      max-width: min(360px, calc(100vw - 16px)); padding: 10px 12px; border-radius: 10px;
       background: #ffffff; color: #374151; border: 1px solid #d1d5db; box-shadow: 0 6px 20px rgba(0,0,0,.18); z-index: 1; }
     .wrap.below .popover { bottom: auto; top: calc(100% + 6px); }
+    .wrap.align-left .popover, .wrap.align-left .notice { right: auto; left: 0; }
     .wrap.dark .popover { background: #1f2937; color: #e5e7eb; border-color: #4b5563; }
     .popover[hidden] { display: none; }
     .popover .title { font-weight: 700; margin-bottom: 6px; }
@@ -225,13 +262,26 @@
     .popover ul { margin: 0 0 10px; padding: 0; list-style: none; line-height: 1.6; }
     .popover li { display: flex; justify-content: space-between; gap: 12px; }
     .actions { display: flex; gap: 6px; justify-content: flex-end; }
-    .actions button { height: 26px; padding: 0 10px; border-radius: 6px; border: 1px solid #d1d5db; background: #f9fafb; color: #374151; cursor: pointer; font: inherit; }
+    .actions button { height: 26px; padding: 0 10px; border-radius: 6px; border: 1px solid #d1d5db; background: #f9fafb; color: #374151; cursor: pointer; font: inherit; white-space: nowrap; }
     .wrap.dark .actions button { background: #374151; border-color: #4b5563; color: #e5e7eb; }
     .actions button.primary { background: #6366f1; border-color: #6366f1; color: #fff; font-weight: 600; }
     .notice { position: absolute; right: 0; bottom: calc(100% + 6px); padding: 6px 10px; border-radius: 8px; background: #dc2626; color: #fff;
       white-space: nowrap; box-shadow: 0 2px 8px rgba(0,0,0,.2); }
+    .wrap.below .notice { bottom: auto; top: calc(100% + 6px); }
     .notice[hidden] { display: none; }
   `;
+  // PII Guard のアイコン (盾、「*」、青い錠前)。画像ファイルにしないのは、サイトの CSP で
+  // 画像の読み込みが止められても表示できるようにするため (D-20)。オフでは灰色に斜線
+  const ICON = '<svg class="logo" viewBox="0 0 32 32" aria-hidden="true" focusable="false">' +
+    '<path class="shield" d="M16 3.4 26.2 7.3v7.4c0 6.5-4.2 11.1-10.2 13.8C10 25.8 5.8 21.2 5.8 14.7V7.3Z"/>' +
+    '<path class="aster" d="M16 9.6v7.8M12.6 11.55l6.8 3.9M12.6 15.45l6.8-3.9"/>' +
+    '<path class="shackle" d="M13.3 22.6v-2a2.7 2.7 0 0 1 5.4 0v2"/>' +
+    '<rect class="lock" x="11.4" y="22.2" width="9.2" height="7.4" rx="1.6"/>' +
+    '<circle class="hole" cx="16" cy="25.6" r="1.15"/>' +
+    '<path class="slash-halo" d="M5.5 5.5 26.5 26.5"/>' +
+    '<path class="slash" d="M5.5 5.5 26.5 26.5"/>' +
+    "</svg>";
+  // 保存の確認の見出しに使う小さな盾
   const SHIELD = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v5c0 5-3.5 8.5-7 10-3.5-1.5-7-5-7-10V6l7-3z"/><path d="M9 12l2 2 4-4"/></svg>';
   const BANG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 9v5"/><path d="M12 17.5h.01"/><path d="M10.3 4.3L2.6 17.6c-.7 1.2.2 2.7 1.6 2.7h15.6c1.4 0 2.3-1.5 1.6-2.7L13.7 4.3c-.7-1.3-2.6-1.3-3.4 0z"/></svg>';
 
@@ -240,15 +290,14 @@
     host = document.createElement("div");
     host.setAttribute("data-pii-guard", "composer-toggle");
     host.__pos = "display:none;";
-    guardHost(host, "position:fixed;top:0;left:0;z-index:2147483647;isolation:isolate;margin:0;padding:0;border:0;opacity:1;visibility:visible;filter:none;clip-path:none;transform:none;pointer-events:auto;", () => place());
+    guardHost(host, HOST_CSS, () => place(true));
     // 閉じた Shadow DOM。ページのスクリプトは中の要素を取得も操作もできない。
     // 中身は固定の雛形だけで、入力欄の文章などの外部の値は入れない
     const shadow = host.attachShadow({ mode: "closed" });
     shadow.innerHTML = `<style>${STYLE}</style>
-      <div class="wrap">
+      <div class="wrap floating">
+        <button class="toggle" type="button" role="switch" aria-checked="true" aria-label="PII Guard">${ICON}</button>
         <button class="warn" type="button" hidden title="個人情報の可能性があります"><span class="icon">${BANG}</span><span class="count">0</span></button>
-        <div class="pill"><span class="shield">${SHIELD}</span><span class="name">PII Guard</span>
-          <button class="switch" type="button" role="switch" aria-checked="true" aria-label="PII Guard のオン/オフ"><span class="knob"></span></button></div>
         <div class="popover" hidden role="dialog" aria-label="個人情報の可能性があります">
           <div class="title">個人情報の可能性があります</div>
           <div class="sub">PII Guard はオフです。このまま送ると伏せられません。</div>
@@ -263,9 +312,9 @@
       </div>`;
     ui = {
       wrap: shadow.querySelector(".wrap"),
+      toggle: shadow.querySelector(".toggle"),
       warn: shadow.querySelector(".warn"),
       count: shadow.querySelector(".warn .count"),
-      sw: shadow.querySelector(".switch"),
       popover: shadow.querySelector(".popover"),
       items: shadow.querySelector(".items"),
       notice: shadow.querySelector(".notice"),
@@ -274,12 +323,14 @@
       close: shadow.querySelector('[data-action="close"]'),
     };
     applyTheme();
-    for (const el of [ui.sw, ui.warn, ui.turnOn, ui.maskOnce, ui.close]) watchVisibility(el);
+    for (const el of [ui.toggle, ui.warn, ui.turnOn, ui.maskOnce, ui.close]) watchVisibility(el);
+    // 本物の入力で、部品が完全に見えていて、アイコンが動いてから 0.5 秒以上たったときだけ
     const safe = (el, fn) => (e) => {
       if (!clickIsSafe(e, el, host)) { LOG("ignored a click on a control that is not fully visible"); return; }
+      if (Date.now() - state.lastMovedAt < STABLE_MS) { LOG("ignored a click: the control has just moved"); return; }
       fn(e);
     };
-    ui.sw.addEventListener("click", safe(ui.sw, () => setEnabled(!state.enabled)));
+    ui.toggle.addEventListener("click", safe(ui.toggle, () => setEnabled(!state.enabled)));
     ui.warn.addEventListener("click", safe(ui.warn, () => {
       if (ui.popover.hidden) renderItems();
       ui.popover.hidden = !ui.popover.hidden;
@@ -291,17 +342,44 @@
     document.documentElement.appendChild(host);
   }
 
-  // サイドバーと同じ輝度判定で明暗を決める
-  function applyTheme() {
+  // 色を { r, g, b, a } にする。getComputedStyle が oklch() などで返す色は、
+  // canvas に塗って sRGB で読み直す
+  let colorCtx = null;
+  function toRgb(color) {
+    const direct = T.parseColor(color);
+    if (direct) return direct;
+    if (typeof color !== "string" || !color.trim()) return null;
     try {
-      let bg = "rgb(255, 255, 255)";
-      for (const el of [document.body, document.documentElement]) {
-        const c = el && getComputedStyle(el).backgroundColor;
-        if (c && c !== "rgba(0, 0, 0, 0)" && c !== "transparent") { bg = c; break; }
+      if (!colorCtx) {
+        const cv = document.createElement("canvas");
+        cv.width = 1; cv.height = 1;
+        colorCtx = cv.getContext("2d", { willReadFrequently: true });
       }
-      const m = bg.match(/\d+/g) || ["255", "255", "255"];
-      const lum = (0.299 * +m[0] + 0.587 * +m[1] + 0.114 * +m[2]) / 255;
-      ui.wrap.classList.toggle("dark", lum < 0.5);
+      colorCtx.fillStyle = "#010203";
+      const sentinel = colorCtx.fillStyle;
+      colorCtx.fillStyle = color;
+      if (colorCtx.fillStyle === sentinel) return null;
+      colorCtx.clearRect(0, 0, 1, 1);
+      colorCtx.fillRect(0, 0, 1, 1);
+      const d = colorCtx.getImageData(0, 0, 1, 1).data;
+      return { r: d[0], g: d[1], b: d[2], a: d[3] / 255 };
+    } catch (_) { return null; }
+  }
+  // el から祖先へたどって、最初の不透明な背景色
+  function surfaceColor(start) {
+    for (let el = start; el && el.nodeType === 1; el = el.parentElement) {
+      const c = toRgb(getComputedStyle(el).backgroundColor);
+      if (c && c.a >= 0.99) return c;
+    }
+    return null;
+  }
+  // 入力欄のまわりの背景から、明暗とアイコンの縁取りの色を決める
+  function applyTheme() {
+    if (!ui) return;
+    try {
+      const near = (state.el && surfaceColor(state.el)) || surfaceColor(document.body) || { r: 255, g: 255, b: 255, a: 1 };
+      ui.wrap.classList.toggle("dark", T.luminance(near) < 0.5);
+      state.haloColor = `rgb(${near.r}, ${near.g}, ${near.b})`;
     } catch (_) { /* 既定の明るい配色のまま */ }
   }
 
@@ -309,30 +387,32 @@
   function exportLayout() {
     if (!host || !ui) return;
     if (!exposeForTests) {
-      for (const k of ["enabled", "warn", "layout"]) delete host.dataset[k];
+      for (const k of ["enabled", "warn", "layout", "docked"]) delete host.dataset[k];
       return;
     }
     host.dataset.enabled = state.enabled ? "true" : "false";
     host.dataset.warn = String(!state.enabled ? state.summary.count : 0);
+    host.dataset.docked = ui.wrap.classList.contains("floating") ? "false" : "true";
     const rect = (el) => {
       if (!el || el.hidden || el.offsetParent === null) return null;
       const r = el.getBoundingClientRect();
       return [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)];
     };
     host.dataset.layout = JSON.stringify({
-      switch: rect(ui.sw), warn: rect(ui.warn),
+      toggle: rect(ui.toggle), warn: rect(ui.warn),
       turnOn: rect(ui.turnOn), maskOnce: rect(ui.maskOnce), close: rect(ui.close),
     });
   }
 
   function render() {
     if (!ui) return;
-    ui.sw.setAttribute("aria-checked", state.enabled ? "true" : "false");
+    ui.toggle.setAttribute("aria-checked", state.enabled ? "true" : "false");
+    ui.toggle.title = state.enabled ? "PII Guard はオンです。押すとオフにします" : "PII Guard はオフです。押すとオンにします";
     const show = !state.enabled && state.summary.count > 0;
     ui.warn.hidden = !show;
     ui.count.textContent = String(state.summary.count);
     if (!show) ui.popover.hidden = true;
-    exportLayout();
+    place(false);
   }
   function renderItems() {
     ui.items.textContent = "";
@@ -352,27 +432,132 @@
     noticeTimer = setTimeout(() => { ui.notice.hidden = true; }, 4000);
   }
 
-  // 入力欄の右上の少し上に置く。上に余白が無ければ入力欄の内側の右上に重ねる
   function setHostPos(pos) {
     if (!host) return;
     if (host.__pos === pos) return;
     host.__pos = pos;
     host.__applyStyle();
   }
-  function place() {
-    if (!host || !state.el) return;
+
+  // ---- 入力欄の下の段への配置 (D-18, D-19) ---------------------------------------
+  // 入力欄のそばにある「+」ボタン (同じ段か、すぐ下の段)
+  function findDockAnchor() {
+    const d = DOCKS.find((x) => x.host.test(location.hostname));
+    if (!d || !state.el) return null;
+    const er = state.el.getBoundingClientRect();
+    for (const sel of d.anchors) {
+      for (const a of document.querySelectorAll(sel)) {
+        if (!isShown(a)) continue;
+        const ar = a.getBoundingClientRect();
+        const nearY = ar.bottom > er.top - 40 && ar.top < er.bottom + 80;
+        const nearX = ar.right > er.left - 160 && ar.left < er.right + 160;
+        if (nearY && nearX) return a;
+      }
+    }
+    return null;
+  }
+  // 「+」から見て最も近い flex の入れ物の子。この直後に場所取りを入れる
+  function dockSlot(anchor) {
+    let a = anchor;
+    for (let i = 0; i < 4 && a.parentElement && a.parentElement !== document.body; i++) {
+      if (/flex/.test(getComputedStyle(a.parentElement).display)) return a;
+      a = a.parentElement;
+    }
+    return null;
+  }
+  function removeDock() {
+    if (state.dock) { state.dock.spacer.remove(); state.dock = null; }
+    state.size = FLOAT_SIZE;
+  }
+  function ensureDock() {
+    const anchor = findDockAnchor();
+    const after = anchor && dockSlot(anchor);
+    if (!after) { removeDock(); return false; }
+    if (!state.dock) {
+      const spacer = document.createElement("span");
+      spacer.setAttribute("data-pii-guard", "dock");
+      spacer.setAttribute("aria-hidden", "true");
+      state.dock = { spacer };
+    }
+    state.dock.anchor = anchor;
+    state.dock.after = after;
+    const ar = anchor.getBoundingClientRect();
+    state.size = Math.max(24, Math.min(44, Math.round(Math.min(ar.width, ar.height))));
+    if (after.nextSibling !== state.dock.spacer) after.after(state.dock.spacer);
+    sizeSpacer();
+    return true;
+  }
+  // 場所取りの幅はアイコンと警告のチップの幅
+  function sizeSpacer() {
+    if (!state.dock || !ui) return;
+    const w = Math.max(state.size, Math.ceil(ui.wrap.getBoundingClientRect().width));
+    const css = `display:inline-block;flex:none;width:${w}px;height:${state.size}px;margin:0;padding:0;border:0;vertical-align:middle;`;
+    if (state.dock.spacer.getAttribute("style") !== css) state.dock.spacer.setAttribute("style", css);
+  }
+  // 場所取りが「+」のすぐ右にあるか。サイトが場所取りだけを別の場所へ動かしたら浮かせる
+  function dockAdjacent() {
+    if (!state.dock || !state.dock.spacer.isConnected || !state.dock.anchor.isConnected) return false;
+    const ar = state.dock.anchor.getBoundingClientRect();
+    const sr = state.dock.spacer.getBoundingClientRect();
+    return sr.left >= ar.right - 2 && sr.left - ar.right <= 24 && Math.abs((ar.top + ar.bottom) / 2 - (sr.top + sr.bottom) / 2) <= 12;
+  }
+
+  // 入力欄を囲む箱 (背景か枠線があり、入力欄より少しだけ大きい祖先)。浮かせる位置の基準。
+  // 見つからなければ入力欄そのもの
+  function composerBox(el) {
+    const er = el.getBoundingClientRect();
+    let a = el.parentElement;
+    for (let i = 0; a && i < 8 && a !== document.body && a !== document.documentElement; i++, a = a.parentElement) {
+      const r = a.getBoundingClientRect();
+      if (r.width === 0 && r.height === 0) continue; // display: contents
+      if (r.height > er.height + 160 || r.width > er.width + 480) break;
+      const cs = getComputedStyle(a);
+      const bg = toRgb(cs.backgroundColor);
+      const border = parseFloat(cs.borderTopWidth) > 0 && cs.borderTopStyle !== "none";
+      if ((bg && bg.a >= 0.99) || border) return r;
+    }
+    return er;
+  }
+
+  // full: 下の段の場所取りを探し直す (1 秒ごとと DOM の変化時)。スクロールや大きさの
+  // 変化では、今の場所取りの位置を読むだけにする
+  function place(full) {
+    if (!host || !ui || !state.el) return;
     if (!isVisible(state.el)) { setHostPos("display:none;"); return; }
-    if (host.__pos === "display:none;") setHostPos("display:block;");
-    const r = state.el.getBoundingClientRect();
-    const w = ui.wrap.offsetWidth || 150;
-    const h = ui.wrap.offsetHeight || 24;
-    let top = r.top - h - 6;
-    const below = top < 4;
-    if (below) top = r.top + 6;
-    let left = r.right - w - 8;
-    if (left < 4) left = 4;
+    if (host.__pos === "display:none;") setHostPos("display:block;left:-9999px;top:-9999px;");
+    if (full || (state.dock && !state.dock.spacer.isConnected)) ensureDock();
+    const docked = !!state.dock && dockAdjacent();
+    const size = docked ? state.size : FLOAT_SIZE;
+    ui.wrap.classList.toggle("floating", !docked);
+    ui.wrap.style.setProperty("--size", `${size}px`);
+    ui.wrap.style.setProperty("--glyph", `${Math.round(size * 0.58)}px`);
+    if (docked && state.haloColor) ui.wrap.style.setProperty("--halo", state.haloColor);
+    else ui.wrap.style.removeProperty("--halo");
+    if (docked) sizeSpacer();
+    const w = ui.wrap.offsetWidth || size;
+    const h = ui.wrap.offsetHeight || size;
+    let left, top, below;
+    if (docked) {
+      const sr = state.dock.spacer.getBoundingClientRect();
+      left = sr.left;
+      top = sr.top + (sr.height - h) / 2;
+      below = sr.top < 240;
+    } else {
+      // 入力欄の箱の右上の少し上に置く。上に余白が無ければ箱の内側の右上に重ねる
+      const r = composerBox(state.el);
+      top = r.top - h - 6;
+      below = top < 4;
+      if (below) top = r.top + 6;
+      left = r.right - w - 8;
+      if (left < 4) left = 4;
+    }
     ui.wrap.classList.toggle("below", below);
+    ui.wrap.classList.toggle("align-left", left + w / 2 < window.innerWidth / 2);
     setHostPos(`display:block;left:${Math.round(left)}px;top:${Math.round(top)}px;`);
+    // アイコン自体が動いたら、しばらくクリックを受け付けない (D-22)
+    const tr = ui.toggle.getBoundingClientRect();
+    const spot = `${Math.round(tr.left)},${Math.round(tr.top)},${Math.round(tr.width)}`;
+    if (spot !== state.lastSpot) { state.lastSpot = spot; state.lastMovedAt = Date.now(); }
     exportLayout();
   }
 
@@ -381,12 +566,18 @@
     state.enabled = !!value;
     if (state.enabled) state.summary = { count: 0, items: [] };
     render();
+    applyTint(false);
     chrome.storage.local.set({ enabled: !!value }).catch((e) => LOG("storage write failed:", e && e.message));
     if (!state.enabled) scheduleScan(0);
   }
   function applyStored(stored) {
     const prevEnabled = state.enabled;
+    let tintChanged = false;
     if ("enabled" in stored) state.enabled = stored.enabled !== false;
+    if ("chatTint" in stored) {
+      const next = T.normalizeTint(stored.chatTint);
+      if (next !== state.tint) { state.tint = next; tintChanged = true; }
+    }
     if (Array.isArray(stored.maskAllowlist)) state.allowlist = stored.maskAllowlist.filter((v) => typeof v === "string");
     if (Array.isArray(stored.maskForceList)) {
       state.forceList = stored.maskForceList
@@ -396,9 +587,10 @@
     }
     if (state.enabled) state.summary = { count: 0, items: [] };
     render();
+    applyTint(tintChanged);
     if (!state.enabled && (prevEnabled !== state.enabled || "maskAllowlist" in stored || "maskForceList" in stored)) scheduleScan(0);
   }
-  chrome.storage.local.get(["enabled", "maskAllowlist", "maskForceList", E2E_FLAG]).then((s) => {
+  chrome.storage.local.get(["enabled", "maskAllowlist", "maskForceList", "chatTint", E2E_FLAG]).then((s) => {
     exposeForTests = s[E2E_FLAG] === true;
     applyStored(s);
   }).catch(() => {});
@@ -406,7 +598,7 @@
     if (area !== "local") return;
     if (E2E_FLAG in changes) { exposeForTests = changes[E2E_FLAG].newValue === true; exportLayout(); exportPersistLayout(); }
     const stored = {};
-    for (const k of ["enabled", "maskAllowlist", "maskForceList"]) if (k in changes) stored[k] = changes[k].newValue;
+    for (const k of ["enabled", "maskAllowlist", "maskForceList", "chatTint"]) if (k in changes) stored[k] = changes[k].newValue;
     if (Object.keys(stored).length) applyStored(stored);
   });
 
@@ -431,7 +623,6 @@
       state.summary = { count: 0, items: [] };
     }
     render();
-    place();
   }
 
   // ---- 下書きの確認 (ページ側にサイドバーを開いてもらい、承認結果を書き戻す) ---------
@@ -486,6 +677,106 @@
     }
   }
 
+  // ---- オンのときのチャットの背景色 (D-23〜D-25) ----------------------------------
+  // チャットの部分の背景を塗っている要素を探し、印を付けて、追加したスタイルで背景色を
+  // 上書きする。基本の背景色と違う色の要素 (入力欄の箱、吹き出し、サイドバー) は変えない
+  const TINT_ATTR = "data-pii-guard-tint";
+  let tintStyle = null;
+  let tintOriginal = new WeakMap(); // 印を付けた要素 → 印を付ける前の背景色
+  let tintBase = null;
+  let themeTimer = null;
+  const tintActive = () => state.enabled && !!state.tint && !!T;
+  const isOurs = (el) => !!(el && el.closest && el.closest("[data-pii-guard]"));
+  function opaqueBg(el) {
+    if (!el || el.nodeType !== 1) return null;
+    const c = toRgb(getComputedStyle(el).backgroundColor);
+    return c && c.a >= 0.99 ? c : null;
+  }
+  function originalBg(el) {
+    if (el && el.hasAttribute && el.hasAttribute(TINT_ATTR) && tintOriginal.has(el)) return tintOriginal.get(el);
+    return opaqueBg(el);
+  }
+  function bigEnough(el) {
+    const r = el.getBoundingClientRect();
+    return r.width >= window.innerWidth * 0.4 && r.height >= window.innerHeight * 0.4;
+  }
+  // 入力欄の上と、画面の上のほう、画面の中央
+  function tintPoints() {
+    const pts = [];
+    const r = state.el && state.el.isConnected ? state.el.getBoundingClientRect() : null;
+    const cx = r ? (r.left + r.right) / 2 : window.innerWidth / 2;
+    if (r) pts.push([cx, Math.max(8, r.top - 120)]);
+    pts.push([cx, window.innerHeight * 0.25]);
+    pts.push([window.innerWidth / 2, window.innerHeight * 0.5]);
+    return pts.filter(([x, y]) => x >= 0 && y >= 0 && x < window.innerWidth && y < window.innerHeight);
+  }
+  function clearTint() {
+    for (const el of document.querySelectorAll(`[${TINT_ATTR}]`)) el.removeAttribute(TINT_ATTR);
+    tintOriginal = new WeakMap();
+    tintBase = null;
+    if (tintStyle) { tintStyle.remove(); tintStyle = null; }
+  }
+  // 基本の背景色: body、無ければ html。どちらも透明なら、チャットの部分を塗っている大きな要素
+  function findBase() {
+    const fromRoot = originalBg(document.body) || originalBg(document.documentElement);
+    if (fromRoot) return fromRoot;
+    for (const [x, y] of tintPoints()) {
+      for (const el of document.elementsFromPoint(x, y)) {
+        if (isOurs(el)) continue;
+        const c = originalBg(el);
+        if (c && bigEnough(el)) return c;
+      }
+    }
+    return null;
+  }
+  // reset: 印を付け直す (色の設定やテーマが変わったとき)
+  function applyTint(reset) {
+    if (!tintActive()) { if (tintStyle || tintBase) clearTint(); return; }
+    if (reset) clearTint();
+    const base = findBase();
+    const value = base && T.tintedBackground(state.tint, base);
+    if (!value) return;
+    const targets = [];
+    for (const el of [document.documentElement, document.body]) {
+      if (el && T.sameColor(originalBg(el), base)) targets.push(el);
+    }
+    for (const [x, y] of tintPoints()) {
+      for (const el of document.elementsFromPoint(x, y)) {
+        if (targets.includes(el) || isOurs(el)) continue;
+        if (T.sameColor(originalBg(el), base) && bigEnough(el)) targets.push(el);
+      }
+    }
+    for (const el of targets) {
+      if (!el.hasAttribute(TINT_ATTR)) { tintOriginal.set(el, originalBg(el)); el.setAttribute(TINT_ATTR, ""); }
+    }
+    tintBase = base;
+    if (!tintStyle || !tintStyle.isConnected) {
+      tintStyle = document.createElement("style");
+      tintStyle.setAttribute("data-pii-guard", "tint-style");
+      (document.head || document.documentElement).appendChild(tintStyle);
+    }
+    // value は tint.js が数値から組み立てた "rgb(r, g, b)" だけで、外部の文字列は入らない
+    const css = `[${TINT_ATTR}]{background-color:${value} !important;transition:background-color .25s ease}`;
+    if (tintStyle.textContent !== css) tintStyle.textContent = css;
+  }
+  // 画面の遷移で塗る要素が入れ替わっていないか (1 秒ごと)
+  function checkTint() {
+    if (!tintActive()) { if (tintStyle || tintBase) clearTint(); return; }
+    if (!tintBase || !tintStyle || !tintStyle.isConnected) { applyTint(true); return; }
+    const pts = tintPoints();
+    if (!pts.length) return;
+    for (const el of document.elementsFromPoint(pts[0][0], pts[0][1])) {
+      if (isOurs(el) || el.hasAttribute(TINT_ATTR)) continue;
+      const c = opaqueBg(el);
+      if (c && T.sameColor(c, tintBase) && bigEnough(el)) { applyTint(false); return; }
+    }
+  }
+  // テーマの切り替え: 元の色が変わるので、印を付け直す
+  function scheduleThemeRefresh() {
+    clearTimeout(themeTimer);
+    themeTimer = setTimeout(() => { applyTheme(); applyTint(true); place(false); }, 150);
+  }
+
   // ---- 保存の確認 (除外リスト・常に伏せる語) -------------------------------------------
   // サイドバーは MAIN world にあるので、その「除外」やドラッグ登録のメッセージは
   // サイトのスクリプトにも送れる。保存の確定だけを、ページが触れないこの世界の
@@ -526,7 +817,7 @@
     if (persistHost) return;
     persistHost = document.createElement("div");
     persistHost.setAttribute("data-pii-guard", "persist-confirm");
-    guardHost(persistHost, "position:fixed;top:0;left:0;z-index:2147483647;isolation:isolate;margin:0;padding:0;border:0;opacity:1;visibility:visible;filter:none;clip-path:none;transform:none;pointer-events:auto;",
+    guardHost(persistHost, HOST_CSS,
       () => { if (persistCurrent) { LOG("cancelling the pending confirmation after tampering"); finishPersist(false); } });
     const shadow = persistHost.attachShadow({ mode: "closed" });
     shadow.innerHTML = `<style>${PERSIST_STYLE}</style>
@@ -633,11 +924,12 @@
     if (state.el === el) return;
     if (state.el) state.el.removeEventListener("input", onInput);
     state.el = el;
-    if (!el) { setHostPos("display:none;"); return; }
+    if (!el) { setHostPos("display:none;"); removeDock(); return; }
     ensureHost();
     el.addEventListener("input", onInput);
+    applyTheme();
     render();
-    place();
+    place(true);
     if (!state.enabled) scheduleScan(0);
     LOG("attached to", el.tagName.toLowerCase() + (el.id ? "#" + el.id : ""));
   }
@@ -645,10 +937,11 @@
     if (!state.el || !state.el.isConnected || !isVisible(state.el)) {
       const el = findComposer();
       if (el !== state.el) attachTo(el);
-      else if (host && !el) setHostPos("display:none;");
+      else if (!el) { setHostPos("display:none;"); removeDock(); }
     } else {
-      place();
+      place(true);
     }
+    checkTint();
   }
   let mutationTimer = null;
   const observer = new MutationObserver(() => {
@@ -659,13 +952,20 @@
     tick();
     observer.observe(document.documentElement, { childList: true, subtree: true });
     setInterval(tick, TICK_MS);
-    window.addEventListener("scroll", () => place(), { passive: true, capture: true });
-    window.addEventListener("resize", () => place(), { passive: true });
+    window.addEventListener("scroll", () => place(false), { passive: true, capture: true });
+    window.addEventListener("resize", () => place(false), { passive: true });
     if (window.ResizeObserver) {
-      const ro = new ResizeObserver(() => place());
+      const ro = new ResizeObserver(() => place(false));
       const observed = new WeakSet();
       setInterval(() => { if (state.el && !observed.has(state.el)) { observed.add(state.el); ro.observe(state.el); } }, TICK_MS);
     }
+    // テーマの切り替え (D-25)。自分の印 (data-pii-guard-tint) の変化は拾わない
+    const themeAttrs = ["class", "style", "data-theme", "data-color-scheme", "data-mode"];
+    const themeObserver = new MutationObserver(scheduleThemeRefresh);
+    themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: themeAttrs });
+    if (document.body) themeObserver.observe(document.body, { attributes: true, attributeFilter: themeAttrs });
+    try { window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", scheduleThemeRefresh); } catch (_) { /* 古いブラウザ */ }
+    applyTint(false);
   }
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", start, { once: true });
   else start();

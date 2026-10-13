@@ -43,13 +43,21 @@ The interface is in Japanese.
 
 In sentences that contain words such as 機密 (confidential), 未公開 (unreleased) or "confidential", the items for people, companies and amounts are locked. Press and hold an item to unlock it. The slider at the top of the sidebar sets how long you need to hold.
 
-### The switch next to the input box
+### The icon next to the input box
 
-On supported services, a small PII Guard switch appears at the top right of the input box. Turning it off skips the review at send time, and your message is sent as is.
+On supported services, the PII Guard icon appears next to the input box. Each press turns PII Guard on or off. When it is off, the icon turns grey with a slash, the review at send time is skipped, and your message is sent as is.
 
-Even when it is off, a warning mark with a count appears next to the switch when the text in the input box may contain personal data. Pressing the mark shows what was found, and choosing "オンにする" (turn on) or "マスキングする" (mask) opens the review panel right away. What you confirm is written back into the input box. "マスキングする" is a one-time action that leaves the switch off.
+In ChatGPT, the icon sits in the row below the input box, to the right of the "+" button. On the other services, and in ChatGPT when you are not logged in, it appears at the top right of the input box.
 
-While the switch is off, the check runs only inside your browser, and the text in the input box is not sent anywhere.
+Even when it is off, a warning mark with a count appears next to the icon when the text in the input box may contain personal data. Pressing the mark shows what was found, and choosing "オンにする" (turn on) or "マスキングする" (mask) opens the review panel right away. What you confirm is written back into the input box. "マスキングする" is a one-time action that leaves PII Guard off.
+
+While PII Guard is off, the check runs only inside your browser, and the text in the input box is not sent anywhere.
+
+### Background colour while on
+
+Choose a colour under "マスキングがオンのときの背景色" (background colour while masking is on) on the settings page, and the chat background is lightly tinted with it while PII Guard is on, so you can tell at a glance. The colour is mixed in lightly enough that text stays readable in both light and dark themes. The default is none.
+
+The colour is a reminder, not a guarantee of protection. A site can change its own colours freely, so check the icon for the actual state.
 
 ## What it detects
 
@@ -94,6 +102,7 @@ Click the PII Guard icon in the toolbar to open the popup. The popup has a link,
 | UI モード (UI mode) | Popup, settings page | Sidebar (recommended) or a dialog in the middle of the page |
 | このタブのマスク件数 (masked in this tab) | Popup | How many items were masked in the current tab |
 | マスキング除外リスト (exclusion list) | Settings page | Add or remove values that are never masked; export and import as JSON |
+| マスキングがオンのときの背景色 (background colour while on) | Settings page | Choose the colour mixed into the chat background while PII Guard is on |
 | ブラウザ内 ML 検出 (in-browser ML) | Settings page | See Optional features |
 | ローカル LLM 連携 (local LLM) | Settings page | See Optional features |
 

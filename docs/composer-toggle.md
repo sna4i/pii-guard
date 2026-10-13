@@ -87,12 +87,15 @@
 |---|---|
 | `data-pii-guard="composer-toggle"` | ピルのホスト (`html` 直下) |
 | `data-pii-guard="persist-confirm"` | 保存の確認のホスト (`html` 直下) |
-| `data-enabled` | `"true"` / `"false"` (ピル) |
+| `data-enabled` | `"true"` / `"false"` (アイコン) |
+| `data-docked` | 下の段に置いているか (`"true"` / `"false"`) |
 | `data-warn` | 警告の件数。オンのときは `"0"` (ピル) |
 | `data-pending` | 保留中の確認の種類 (確認)。無ければ空 |
-| `data-layout` | 部品の矩形 `[x, y, w, h]` の JSON。ピルは `switch`、`warn`、`turnOn`、`maskOnce`、`close`、確認は `confirm`、`cancel`。隠れている部品は `null` |
+| `data-layout` | 部品の矩形 `[x, y, w, h]` の JSON。アイコンの側は `toggle`、`warn`、`turnOn`、`maskOnce`、`close`、確認は `confirm`、`cancel`。隠れている部品は `null` |
 
 `data-pii-guard` 以外は、テスト用のフラグ `__pii_guard_e2e` が保存されているときだけ出る (D-17)。
+
+ページの DOM に入れるもの: 下の段の場所取り `span[data-pii-guard="dock"]` (D-18)、背景色を付けた要素の印 `data-pii-guard-tint` と、その色を書いた `style[data-pii-guard="tint-style"]` (D-24)。
 
 ## 検証
 
@@ -136,7 +139,7 @@
 | 対象 | 分かったこと |
 |---|---|
 | ログイン後の ChatGPT (利用者が貼った HTML) | 下の段は `[data-composer-footer-responsive]`。「+」は `[data-composer-navigation-target="add-context"]`、入力欄は `div.ProseMirror[contenteditable]`。クラス名の末尾 (`-_8IVRO` など) はビルドごとに変わるので使わない |
-| ログインなしの ChatGPT (自動操作のブラウザで実際に開いた) | 作りが別物。クラス名は `x138l3gd` のような記号の列。入力欄は `textarea#mobile-composer-prompt`、「+」は `button[data-composer-action]`、送信は `button[data-composer-submit]` |
+| ログインなしの ChatGPT (自動操作のブラウザで実際に開いた) | 作りが別物。クラス名は `x138l3gd` のような記号の列。入力欄は `textarea#mobile-composer-prompt`、「+」は `button[data-composer-action]`、送信は `button[data-composer-submit]`。入力欄の段は `form` の CSS Grid で、列の幅が決め打ち (`36px 630px 80px`、`leading primary trailing`)。flex の行が無く、場所取りを入れる隙間が無い |
 | 背景 (ログインなし) | チャットの部分は `main`、`body`、`html` の 3 つが同じ色で塗る。明るい表示で `rgb(252, 252, 252)`、暗い表示で `rgb(0, 0, 0)`。背景の CSS 変数は無い |
 
 ログイン後の画面は自動操作では開けないので、背景を塗る要素の構造は未確認。サイトの作りに依存しない探し方にする (D-24)。
@@ -159,11 +162,12 @@
 | ID | 決定 | 対応 |
 |---|---|---|
 | D-18 | 下の段への配置は「場所取り」で行う。「+」ボタンから見て最も近い flex の入れ物の中で、「+」の直後に中身の無い要素 (`span[data-pii-guard="dock"]`) を 1 つ入れて幅を確保する。アイコン本体はこれまでどおり `<html>` 直下の閉じた Shadow DOM に置き、場所取りの要素の位置に重ねる。本体をサイトの DOM の中に入れないのは、サイト側の祖先要素の `transform` や `opacity` で Intersection Observer v2 の判定が崩れることと、サイトの CSS の影響を避けるため。場所取りの要素が React の再描画で消えたら、次の確認 (1 秒ごとと DOM の変化時) で入れ直す | R-14, R-21 |
-| D-19 | 場所取りの目印: ログイン後は `[data-composer-navigation-target="add-context"]`、ログインなしは `button[data-composer-action]`。どちらも無ければ、従来の浮かせる位置 | R-14, R-17 |
+| D-19 | 場所取りの目印は、ログイン後の `[data-composer-navigation-target="add-context"]` だけ。ログインなしの画面は入力欄の段が決め打ちの CSS Grid で、場所取りを入れるにはサイトの列の定義を書き換えることになり壊れやすいので、浮かせる位置 (D-28) にする。実サイトで確かめて決めた (T-18) | R-14, R-17 |
+| D-28 | 浮かせる位置の基準は、入力欄を囲む箱 (背景か枠線があり、入力欄より少しだけ大きい祖先)。その右上の 6px 上に置く。上に余白が無ければ箱の内側の右上。最初は入力欄そのものを基準にしていたが、実サイトで箱の上の縁に重なった | R-17 |
 | D-20 | アイコンは PII Guard のアイコン (盾、「*」、青い錠前) を SVG で描く。画像ファイルにしないのは、サイトの CSP で画像の読み込みが止められても表示できるようにするため。大きさは「+」ボタンを測って合わせる。浮かせる位置でも同じアイコンだけにし、「PII Guard」の文字とスイッチは無くす | R-14, R-15, R-17 |
 | D-21 | 警告はアイコンの右に出す橙のチップ。出ている間は場所取りの幅も広げる | R-16 |
 | D-22 | アイコンの位置が変わってから 0.5 秒は、アイコンと警告へのクリックを受け付けない。サイトが場所取りの要素を動かして、別のボタンを押すつもりのクリックを受けさせるのを防ぐ | R-21 |
-| D-23 | 背景色の設定は `chatTint` (`null` か `#RRGGBB`)。設定画面 (拡張機能のページ) だけが書き、content script は読むだけ | R-19, R-21 |
+| D-23 | 背景色の設定は `chatTint` (`null` か `#RRGGBB`)。設定画面 (拡張機能のページ) だけが書き、content script は読むだけ。色の計算は `browser-extension/tint.js` に置き、content script と設定画面の両方が読み込む | R-19, R-21 |
 | D-24 | 塗る要素の探し方: 入力欄の上の数点で `elementsFromPoint` を使い、ページの基本の背景色 (`body`、無ければ `html` の背景色) と同じ色で塗っている大きな要素 (画面の幅と高さの半分以上) を選ぶ。`html` と `body` も含める。選んだ要素に印 (`data-pii-guard-tint`) を付け、追加したスタイルで背景色を上書きする。入力欄の箱、吹き出し、サイドバーのように基本と違う色の要素は変えない | R-18 |
 | D-25 | 選んだ色そのものではなく、元の背景色に混ぜた色を付ける。明るい表示は 15%、暗い表示は 25%。文字の色はサイトのまま使えるので、どちらの表示でも読める。テーマの切り替えや画面の遷移で塗る要素や基本の色が変わったら、塗り直す | R-18, R-20 |
 | D-26 | 設定画面のパレット: 「なし」と 8 色 (青、水色、緑、黄、橙、赤、桃、紫) の色見本と、任意の色 (`input[type=color]`)。見本は、明るい表示と暗い表示で実際に付く色を左右に並べて見せる。押すとすぐ保存する | R-19 |
@@ -173,11 +177,11 @@
 
 | ID | 確かめること | 場所 |
 |---|---|---|
-| T-12 | 色を混ぜる関数: 明るい背景と暗い背景で期待どおりの色になる。不正な値は「なし」として扱う | `tests/engine/composer-summary.test.mjs` |
+| T-12 | 色を混ぜる関数: 明るい背景と暗い背景で期待どおりの色になる。不正な値は「なし」として扱う | `tests/engine/tint.test.mjs` |
 | T-13 | 貼ってもらった HTML を元にしたモックで、場所取りの要素が「+」の直後に入り、アイコンがその位置に重なる。本物のクリックでオン/オフが切り替わる。場所取りの要素を消されると入れ直す | `tests/integration/e2e-composer-toggle.mjs` |
 | T-14 | 警告のチップが出ると場所取りの幅が広がり、チップを押すと従来の内訳が出る | 同上 |
 | T-15 | 場所取りの要素を動かした直後のクリックは受け付けない。0.5 秒待てば受け付ける | 同上 |
 | T-16 | 背景色: オンで `main` の背景が混ぜた色になり、オフで元に戻る。暗い表示では暗い側の色になる。入力欄の箱の色は変わらない | 同上 |
 | T-17 | 設定画面で色見本を本物のクリックで押すと `chatTint` が保存され、開いているタブにすぐ反映する | 同上 |
-| T-18 | 実際のログインなしの ChatGPT で、場所取りと背景色が効く (送信はしない) | リリース前の確認 |
+| T-18 | 実際のログインなしの ChatGPT で、アイコンが入力欄の箱の右上に重ならずに出て、背景色とアイコンでのオン/オフが効く (入力も送信もしない) | `tests/integration/verify-chatgpt-loggedout.mjs` (リリース前) |
 | T-19 | ログイン後の ChatGPT と、ほかの 3 サービスでの見た目 | 利用者の環境での目視 |

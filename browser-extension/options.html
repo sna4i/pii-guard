@@ -69,6 +69,23 @@
       </section>
 
       <section class="card">
+        <h2>マスキングがオンのときの背景色</h2>
+        <p class="hint">
+          マスキングがオンのとき、チャットの背景にこの色を薄く混ぜます。オンかオフかがひと目で分かります。
+          色見本の左は明るい表示、右は暗い表示で実際に付く色です。
+        </p>
+        <p class="hint">
+          背景色は目印で、保護されていることの保証ではありません。サイトは自分の画面の色を自由に変えられるので、
+          正しい状態は入力欄のそばの PII Guard のアイコンで確かめてください。
+        </p>
+        <fieldset class="tint-palette" id="chat-tint-palette" aria-label="背景色"></fieldset>
+        <div class="tint-custom">
+          <label><input type="radio" name="chat-tint" value="custom" id="chat-tint-custom-radio" /> 任意の色</label>
+          <input type="color" id="chat-tint-custom" value="#6366f1" aria-label="任意の色" />
+        </div>
+      </section>
+
+      <section class="card">
         <h2>
           ローカル LLM 連携
           <span class="badge-experimental">v0.5.0 dev</span>
@@ -181,6 +198,7 @@
       </section>
     </main>
 
+    <script src="tint.js"></script>
     <script src="options.js"></script>
   </body>
 </html>

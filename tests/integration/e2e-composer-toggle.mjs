@@ -11,8 +11,14 @@
 //   T-09 クリックジャッキング: 偽の見た目に覆われた「追加」やスイッチは効かない。ホストを透明にされると確認を取り消す
 //   T-08 ページのスクリプトが送った set-enabled では設定が変わらず、add-allowlist は確認なしには保存されない
 //        (保存の確定は isolated world の閉じた UI で行う)
+//   T-13 ログイン後の ChatGPT の下の段を再現したモックで、場所取りが「+」の直後に入り、アイコンが重なる
+//   T-14 警告のチップが出ると場所取りの幅が広がり、チップを押すと内訳が出る
+//   T-15 アイコンが動いた直後のクリックは受け付けない
+//   T-16 オンのとき、チャットの背景に選んだ色を混ぜる。オフと暗い表示にも追従する
+//   T-17 設定画面のパレットで選んだ色が保存され、開いているタブにすぐ反映する
 //
 // 使い方: node tests/integration/e2e-composer-toggle.mjs <unpacked 拡張機能ディレクトリ>
+// 環境変数 PII_E2E_SHOTS=<ディレクトリ> を付けると、下の段に置いたときの見た目を保存する
 // モックサーバとブラウザはこのスクリプト自身が起動し、finally で必ず閉じる。
 // 終了コード: 0 = 全検査合格 / 1 = 失敗
 import { chromium } from "playwright";
@@ -21,6 +27,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+const TINT = require("../../browser-extension/tint.js");
 
 const EXT_ARG = process.argv[2];
 if (!EXT_ARG) { console.error("usage: node tests/integration/e2e-composer-toggle.mjs <unpacked-dir>"); process.exit(2); }
@@ -29,6 +39,7 @@ const EXT = path.resolve(EXT_ARG);
 const PII = "田中様 (090-1234-5678, tanaka@example.co.jp) に見積もりを送ります";
 const CLEAN = "明日の天気を教えてください";
 const HOST = 'div[data-pii-guard="composer-toggle"]';
+const ED = '#prompt-textarea, div.ProseMirror[contenteditable="true"]';
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pii-composer-"));
 let server, ctx;
@@ -43,6 +54,24 @@ const page = (kind) => {
   return `<!doctype html><title>mock</title><style>body{margin:0;height:100vh;display:flex;flex-direction:column}main{flex:1}footer{padding:16px}</style>
 <h1>mock chatgpt.com</h1><main></main><footer>${editor}</footer>`;
 };
+// ログイン後の ChatGPT の入力欄 (利用者が貼った HTML の構造と data 属性を残し、クラス名は必要なものだけにしたもの)
+const footerPage = () => `<!doctype html><title>mock</title><style>
+html,body{margin:0;height:100%;background:#fcfcfc;color:#0d0d0d}
+body{display:flex;flex-direction:column}
+main{flex:1;background:#fcfcfc;display:flex;flex-direction:column;justify-content:flex-end;padding:0 24px 24px}
+.surface{background:#ffffff;border:1px solid #e5e5e5;border-radius:28px;padding:8px 10px;max-width:760px;margin:0 auto;width:100%;box-sizing:border-box}
+[data-composer-footer-responsive]{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:4px}
+.flex{display:flex}.items-center{align-items:center}.gap5{gap:5px}.contents{display:contents}.min-w-0{min-width:0}
+.btn{width:36px;height:36px;border-radius:50%;border:0;background:transparent;font-size:18px;cursor:pointer;color:inherit}
+.ProseMirror{min-height:24px;outline:none;padding:6px 4px}.ProseMirror p{margin:0}
+@media (prefers-color-scheme: dark){html,body,main{background:#000;color:#ececec}.surface{background:#303030;border-color:#444}}
+</style>
+<main><h1 style="font-size:16px">mock chatgpt.com (logged-in composer)</h1>
+<div class="surface"><div class="ComposerLayoutFooter-_8IVRO" data-composer-footer-responsive="" data-composer-layout="single-line">
+<div class="min-w-0"><div class="flex min-w-0 items-center gap5"><div class="flex items-center"><span data-state="closed" class="contents"><button type="button" class="btn" aria-label="ファイルなどを追加" data-composer-navigation-target="add-context">+</button></span></div></div></div>
+<div class="min-w-0"><div data-composer-input=""><div contenteditable="true" role="textbox" class="ProseMirror" aria-label="ChatGPT に聞く"><p><br></p></div></div></div>
+<div class="min-w-0"><div class="flex items-center"><button type="button" aria-label="ChatGPT モデルを選択" data-composer-navigation-target="reasoning" style="height:36px;border:0;background:transparent;color:inherit">思考量 中程度</button><button type="button" class="btn" aria-label="音声入力">🎤</button><button type="button" class="btn" aria-label="音声会話を開始">◉</button></div></div>
+</div></div></main>`;
 
 // ピルは閉じた Shadow DOM なので、ホストの data 属性 (状態と部品の位置) を読み、本物のマウスで押す
 const pillState = (p) => p.evaluate((sel) => {
@@ -87,13 +116,30 @@ const confirmSidebar = async (p) => {
   const h = await sidebarHost(p);
   return h.evaluate((e) => { const b = [...e.shadowRoot.querySelectorAll("button")].find((x) => /選択したものをマスク/.test(x.textContent)); if (b) b.click(); return b ? b.textContent.trim() : null; });
 };
-const composerText = (p) => p.evaluate(() => { const el = document.querySelector("#prompt-textarea"); return el ? (el.tagName === "TEXTAREA" ? el.value : el.innerText) : null; });
+const composerText = (p) => p.evaluate((sel) => { const el = document.querySelector(sel); return el ? (el.tagName === "TEXTAREA" ? el.value : el.innerText).replace(/\n+$/, "") : null; }, ED);
 const typeInto = async (p, text) => {
-  await p.click("#prompt-textarea");
-  await p.evaluate(() => { const el = document.querySelector("#prompt-textarea"); if (el.tagName === "TEXTAREA") { el.value = ""; el.dispatchEvent(new Event("input", { bubbles: true })); } else el.textContent = ""; });
+  await p.click(ED);
+  await p.evaluate((sel) => { const el = document.querySelector(sel); if (el.tagName === "TEXTAREA") { el.value = ""; el.dispatchEvent(new Event("input", { bubbles: true })); } else el.textContent = ""; }, ED);
   await p.keyboard.type(text);
   await p.waitForTimeout(900); // debounce 400ms + 検出
 };
+const layoutOf = (p) => p.evaluate((sel) => { const h = document.querySelector(sel); return h && h.dataset.layout ? JSON.parse(h.dataset.layout) : null; }, HOST);
+const dockState = (p) => p.evaluate((sel) => {
+  const add = document.querySelector('[data-composer-navigation-target="add-context"]');
+  const sp = document.querySelector('span[data-pii-guard="dock"]');
+  const h = document.querySelector(sel);
+  const lay = h && h.dataset.layout ? JSON.parse(h.dataset.layout) : null;
+  const r = (el) => { if (!el) return null; const b = el.getBoundingClientRect(); return [Math.round(b.left), Math.round(b.top), Math.round(b.width), Math.round(b.height)]; };
+  const slot = add && add.closest("span.contents");
+  return { docked: h ? h.dataset.docked : null, spacer: r(sp), add: r(add), toggle: lay && lay.toggle, afterAdd: !!(sp && slot && slot.nextElementSibling === sp) };
+}, HOST);
+const SHOTS = process.env.PII_E2E_SHOTS ? path.resolve(process.env.PII_E2E_SHOTS) : null;
+const shotFooter = async (p, name) => {
+  if (!SHOTS) return;
+  const box = await p.evaluate(() => { const b = document.querySelector(".surface").getBoundingClientRect(); return [b.left, b.top, b.width, b.height]; });
+  await p.screenshot({ path: path.join(SHOTS, `${name}.png`), clip: { x: box[0] - 16, y: Math.max(0, box[1] - 220), width: box[2] + 32, height: box[3] + 236 } });
+};
+const bgOf = (p, sel) => p.evaluate((s) => getComputedStyle(document.querySelector(s)).backgroundColor, sel);
 const send = async (p) => {
   await p.evaluate((t) => {
     fetch("/backend-api/conversation", { method: "POST", headers: { "content-type": "application/json" },
@@ -111,8 +157,10 @@ try {
       let b = ""; req.on("data", (c) => (b += c)); req.on("end", () => { received.push(JSON.parse(b).messages[0].content.parts[0]); res.writeHead(200, { "content-type": "application/json" }); res.end("{}"); });
       return;
     }
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    if (req.url.startsWith("/footer")) { res.end(footerPage()); return; }
     const kind = req.url.startsWith("/ce") ? "ce" : req.url.startsWith("/none") ? "none" : "ta";
-    res.writeHead(200, { "content-type": "text/html; charset=utf-8" }); res.end(page(kind));
+    res.end(page(kind));
   });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
   ctx = await chromium.launchPersistentContext(path.join(tmp, "profile"), {
@@ -134,10 +182,12 @@ try {
   check((await pillState(p)) === null, "入力欄が無いページではピルが出ない");
   await p.goto("https://chatgpt.com/ta"); await p.waitForTimeout(3500);
   let st = await pillState(p);
-  check(st && st.on === "true", `入力欄があるページではピルが出て、オン (${JSON.stringify(st)})`);
+  check(st && st.on === "true", `入力欄があるページではアイコンが出て、オン (${JSON.stringify(st)})`);
+  const lay0 = await layoutOf(p);
+  check(lay0 && lay0.toggle && lay0.toggle[2] <= 40 && lay0.toggle[3] <= 40, `表示はアイコンだけ (${lay0 && lay0.toggle && lay0.toggle.slice(2).join("x")})`);
 
   console.log("T-07 ピルでオフ:");
-  await clickInPill(p, "switch");
+  await clickInPill(p, "toggle");
   await p.waitForTimeout(800);
   check((await stored(sw, "enabled")) === false, "保存された enabled が false になる");
   st = await pillState(p);
@@ -293,7 +343,7 @@ try {
   // (c) ピルのスイッチに偽の見た目をかぶせて押させても、設定は変わらない
   const sw2 = await p.evaluate((sel) => {
     const h = document.querySelector(sel);
-    const r = JSON.parse(h.dataset.layout).switch;
+    const r = JSON.parse(h.dataset.layout).toggle;
     const d = document.createElement("div");
     d.id = "decoy2";
     d.style.cssText = `position:fixed;left:${r[0] - 6}px;top:${r[1] - 6}px;width:${r[2] + 12}px;height:${r[3] + 12}px;z-index:2147483647;background:#16a34a;pointer-events:none;`;
@@ -306,9 +356,119 @@ try {
   check((await stored(sw, "enabled")) === false, "偽の見た目に覆われたスイッチのクリックは受け付けない");
   await p.evaluate(() => document.getElementById("decoy2").remove());
   await p.waitForTimeout(800);
-  await clickInPill(p, "switch");
+  await clickInPill(p, "toggle");
   await p.waitForTimeout(800);
   check((await stored(sw, "enabled")) === true, "覆いを外せば、本物のクリックでスイッチが効く");
+
+  console.log("T-13 下の段への配置 (ログイン後の ChatGPT を再現したモック):");
+  await sw.evaluate(() => chrome.storage.local.set({ enabled: true, chatTint: null }));
+  await p.goto("https://chatgpt.com/footer"); await p.waitForTimeout(3500);
+  let d = await dockState(p);
+  check(d.spacer && d.afterAdd, `場所取りの要素が「+」の直後に入る (${JSON.stringify(d.spacer)})`);
+  check(d.docked === "true" && d.toggle && d.spacer && Math.abs(d.toggle[0] - d.spacer[0]) <= 2 && Math.abs((d.toggle[1] + d.toggle[3] / 2) - (d.spacer[1] + d.spacer[3] / 2)) <= 2,
+    `アイコンが場所取りの位置に重なる (toggle=${JSON.stringify(d.toggle)})`);
+  check(d.toggle && d.add && d.toggle[2] === d.add[2] && d.toggle[3] === d.add[3], `アイコンの大きさが「+」と同じ (${d.toggle && d.toggle.slice(2).join("x")})`);
+  await shotFooter(p, "footer-on");
+  await clickInPill(p, "toggle"); await p.waitForTimeout(800);
+  check((await stored(sw, "enabled")) === false, "アイコンを本物のクリックで押すとオフになる");
+  await clickInPill(p, "toggle"); await p.waitForTimeout(800);
+  check((await stored(sw, "enabled")) === true, "もう一度押すとオンに戻る");
+  await p.evaluate(() => document.querySelector('span[data-pii-guard="dock"]').remove());
+  await p.waitForTimeout(1800);
+  d = await dockState(p);
+  check(d.spacer && d.afterAdd, "場所取りの要素を消されても入れ直す");
+
+  console.log("T-14 警告のチップ:");
+  await clickInPill(p, "toggle"); await p.waitForTimeout(800);
+  check((await stored(sw, "enabled")) === false, "オフにする");
+  const w0 = (await dockState(p)).spacer[2];
+  const x0 = (await dockState(p)).toggle[0];
+  await typeInto(p, PII);
+  st = await pillState(p);
+  d = await dockState(p);
+  check(st && st.warn, `オフで個人情報を入力すると警告が出る (${st && st.count})`);
+  check(d.spacer && d.spacer[2] > w0 + 10, `警告が出ている間は場所取りの幅が広がる (${w0}px → ${d.spacer && d.spacer[2]}px)`);
+  check(d.toggle && Math.abs(d.toggle[0] - x0) <= 1, "警告が出てもアイコンの位置は変わらない");
+  await clickInPill(p, "warn"); await p.waitForTimeout(500);
+  let lay = await layoutOf(p);
+  check(lay && lay.turnOn && lay.maskOnce && lay.close, "チップを押すと内訳と「オンにする」「マスキングする」が出る");
+  await shotFooter(p, "footer-off-warning");
+  await clickInPill(p, "close"); await p.waitForTimeout(400);
+
+  console.log("T-15 動いた直後のクリック:");
+  const before = (await dockState(p)).toggle;
+  await p.evaluate(() => { document.querySelector("[data-composer-footer-responsive]").style.paddingLeft = "120px"; });
+  let moved = null;
+  for (let i = 0; i < 40 && !moved; i++) {
+    await p.waitForTimeout(50);
+    const tg = (await dockState(p)).toggle;
+    if (tg && Math.abs(tg[0] - before[0]) > 50) moved = tg;
+  }
+  check(!!moved, "下の段が動くと、アイコンもついていく");
+  if (moved) {
+    await p.mouse.click(moved[0] + moved[2] / 2, moved[1] + moved[3] / 2);
+    await p.waitForTimeout(300);
+    check((await stored(sw, "enabled")) === false, "動いた直後のクリックは受け付けない");
+    await p.waitForTimeout(700);
+    await clickInPill(p, "toggle"); await p.waitForTimeout(800);
+    check((await stored(sw, "enabled")) === true, "止まって 0.5 秒たてば受け付ける");
+  }
+  await p.evaluate(() => { document.querySelector("[data-composer-footer-responsive]").style.paddingLeft = ""; });
+  await p.waitForTimeout(1200);
+
+  console.log("T-16 オンのときの背景色:");
+  check(await bgOf(p, "main") === "rgb(252, 252, 252)", "色を選んでいなければ背景は元のまま");
+  await sw.evaluate(() => chrome.storage.local.set({ chatTint: "#3b82f6" }));
+  await p.waitForTimeout(1200);
+  const lightTint = TINT.tintedBackground("#3b82f6", "rgb(252, 252, 252)");
+  check(await bgOf(p, "main") === lightTint, `オンで、チャットの背景が選んだ色を混ぜた色になる (${await bgOf(p, "main")})`);
+  check(await bgOf(p, "body") === lightTint, "body も同じ色になる");
+  check(await bgOf(p, ".surface") === "rgb(255, 255, 255)", "入力欄の箱の色は変わらない");
+  await shotFooter(p, "footer-tinted-light");
+  await clickInPill(p, "toggle"); await p.waitForTimeout(1000);
+  check((await stored(sw, "enabled")) === false && await bgOf(p, "main") === "rgb(252, 252, 252)", "オフにすると元の色に戻る");
+  await clickInPill(p, "toggle"); await p.waitForTimeout(1000);
+  check(await bgOf(p, "main") === lightTint, "オンに戻すとまた色が付く");
+  await p.emulateMedia({ colorScheme: "dark" }); await p.waitForTimeout(1500);
+  const darkTint = TINT.tintedBackground("#3b82f6", "rgb(0, 0, 0)");
+  check(await bgOf(p, "main") === darkTint, `暗い表示では、暗い背景に混ぜた色になる (${await bgOf(p, "main")})`);
+  check(await bgOf(p, ".surface") === "rgb(48, 48, 48)", "暗い表示でも入力欄の箱の色は変わらない");
+  await shotFooter(p, "footer-tinted-dark");
+  await p.emulateMedia({ colorScheme: "light" }); await p.waitForTimeout(1500);
+  check(await bgOf(p, "main") === lightTint, "明るい表示に戻すと明るい側の色に戻る");
+
+  console.log("T-17 設定画面のパレット:");
+  const extId = new URL(sw.url()).host;
+  const opt = await ctx.newPage();
+  await opt.goto(`chrome-extension://${extId}/options.html`); await opt.waitForTimeout(1200);
+  const swatchAt = (value) => opt.evaluate((v) => {
+    const input = [...document.querySelectorAll('input[name="chat-tint"]')].find((i) => i.value === v);
+    const label = input && input.closest("label");
+    if (!label) return null;
+    label.scrollIntoView({ block: "center" });
+    const r = label.getBoundingClientRect();
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+  }, value);
+  const green = await swatchAt("#22c55e");
+  check(!!green, "設定画面に色見本がある");
+  if (green) { await opt.mouse.click(green.x, green.y); await opt.waitForTimeout(600); }
+  check((await stored(sw, "chatTint")) === "#22c55e", "色見本を押すと保存される");
+  check(await opt.evaluate(() => (document.querySelector('input[name="chat-tint"]:checked') || {}).value) === "#22c55e", "押した色見本が選ばれた表示になる");
+  await p.bringToFront(); await p.waitForTimeout(800);
+  check(await bgOf(p, "main") === TINT.tintedBackground("#22c55e", "rgb(252, 252, 252)"), "開いているタブにすぐ反映する");
+  await opt.bringToFront();
+  const none = await swatchAt("");
+  if (none) { await opt.mouse.click(none.x, none.y); await opt.waitForTimeout(600); }
+  check((await stored(sw, "chatTint")) == null, "「なし」を押すと色の設定が消える");
+  await opt.evaluate(() => { const c = document.getElementById("chat-tint-custom"); c.value = "#123456"; c.dispatchEvent(new Event("input", { bubbles: true })); c.dispatchEvent(new Event("change", { bubbles: true })); });
+  await opt.waitForTimeout(600);
+  check((await stored(sw, "chatTint")) === "#123456", "任意の色も保存される");
+  await opt.close();
+  await p.bringToFront(); await p.waitForTimeout(800);
+  check(await bgOf(p, "main") === TINT.tintedBackground("#123456", "rgb(252, 252, 252)"), "任意の色も開いているタブに反映する");
+  await sw.evaluate(() => chrome.storage.local.set({ chatTint: null }));
+  await p.waitForTimeout(800);
+  check(await bgOf(p, "main") === "rgb(252, 252, 252)", "色の設定を消すと元の色に戻る");
 
   check(errs.length === 0, `ページの JS エラーなし${errs.length ? ": " + errs.slice(0, 3).join(" | ") : ""}`);
 } catch (e) {
