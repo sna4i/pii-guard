@@ -1,7 +1,7 @@
 // tests/integration/verify-chatgpt-loggedout.mjs — 実際の ChatGPT (ログインなし) で、
 // アイコンの位置と、オンのときの背景色と、アイコンでのオン/オフを確かめる
 // (docs/composer-toggle.md T-18)。ログインなしの画面は入力欄の段に隙間が無いので、
-// アイコンは下の段ではなく入力欄の箱の右上に浮かせる。
+// アイコンは下の段ではなく入力欄の箱の右の外側に浮かせる (D-30)。
 //
 // ログインなしの https://chatgpt.com/ を、拡張機能を読み込んだブラウザで開く。
 // 入力欄には何も書かず、何も送信しない。ログイン後の画面は作りが違うので、
@@ -60,7 +60,7 @@ try {
 
   console.log("アイコンの位置:");
   // ログインなしの画面は、入力欄の段が列の幅を決め打ちした CSS Grid で、下の段に場所取りを
-  // 入れる隙間が無い。入力欄の箱の右上に浮かせる (下の段への配置はログイン後の画面だけ)
+  // 入れる隙間が無い。入力欄の箱の右の外側に浮かせる (下の段への配置はログイン後の画面だけ)
   let s = await state(p);
   const box = await p.evaluate(() => {
     const ta = document.querySelector("textarea#mobile-composer-prompt");
@@ -71,10 +71,10 @@ try {
   });
   check(s.host, "アイコンが出る");
   check(s.docked === "false" && !s.spacer, `下の段には何も入れず、浮かせる (docked=${s.docked})`);
-  check(s.toggle && box && s.toggle[1] + s.toggle[3] <= box[1] - 2, `入力欄の箱に重ならず、その上に出る (toggle=${JSON.stringify(s.toggle)} 箱=${JSON.stringify(box)})`);
-  check(s.toggle && box && Math.abs((s.toggle[0] + s.toggle[2]) - (box[0] + box[2])) <= 24, "入力欄の箱の右端にそろう");
+  check(s.toggle && box && s.toggle[0] >= box[0] + box[2], `入力欄の箱に重ならず、その右の外側に出る (toggle=${JSON.stringify(s.toggle)} 箱=${JSON.stringify(box)})`);
+  check(s.toggle && box && Math.abs((s.toggle[1] + s.toggle[3] / 2) - (box[1] + box[3] / 2)) <= 2, "縦は入力欄の箱の中央にそろう");
   if (SHOT_DIR && box) {
-    await p.screenshot({ path: path.join(SHOT_DIR, "chatgpt-on.png"), clip: { x: box[0] - 20, y: Math.max(0, box[1] - 60), width: box[2] + 40, height: box[3] + 80 } });
+    await p.screenshot({ path: path.join(SHOT_DIR, "chatgpt-on.png"), clip: { x: box[0] - 20, y: Math.max(0, box[1] - 60), width: box[2] + 80, height: box[3] + 80 } });
   }
 
   console.log("オンのときの背景色:");
@@ -94,7 +94,7 @@ try {
   check(s.enabled === "false" && (await sw.evaluate(() => chrome.storage.local.get("enabled").then((x) => x.enabled))) === false, "本物のクリックでオフになる");
   check(s.mainBg === base, `オフにすると背景が元に戻る (${s.mainBg})`);
   if (SHOT_DIR && box) {
-    await p.screenshot({ path: path.join(SHOT_DIR, "chatgpt-off.png"), clip: { x: box[0] - 20, y: Math.max(0, box[1] - 60), width: box[2] + 40, height: box[3] + 80 } });
+    await p.screenshot({ path: path.join(SHOT_DIR, "chatgpt-off.png"), clip: { x: box[0] - 20, y: Math.max(0, box[1] - 60), width: box[2] + 80, height: box[3] + 80 } });
   }
   check(errs.length === 0, `拡張機能による JS エラーなし${errs.length ? ": " + errs.slice(0, 2).join(" | ") : ""}`);
 } catch (e) {

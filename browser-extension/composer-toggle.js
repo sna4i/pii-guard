@@ -7,8 +7,10 @@
 //   ページ側 (MAIN world) のスクリプトは isolated world にも、閉じた Shadow DOM の
 //   中にも触れないので、サイトのスクリプトが PII Guard をオフにすることはできない
 // - アイコン本体は <html> 直下の閉じた Shadow DOM に置き、入力欄に追従させる。
-//   ChatGPT では、入力欄の下の段の「+」の直後に中身の無い場所取りの要素だけを入れ、
-//   アイコンをその位置に重ねる (D-18)。見つからなければ入力欄の右上に浮かせる
+//   ChatGPT では、入力欄の下の段の音声入力 (マイク) の左に中身の無い場所取りの要素だけを
+//   入れ、アイコンをその位置に重ねる (D-18, D-19)。見つからなければ入力欄の箱の右に浮かせる
+// - オフのときに個人情報の可能性があれば、アイコンを黄色にする。黄色のアイコンを押すと
+//   内訳と「オンにする」「マスキングする」を出す (D-21, D-29)
 // - オフのときだけ、入力が止まって 400ms 後に入力欄の文章を読み、isolated world に
 //   読み込んだ正規表現と辞書で検出する。LLM にも ML モデルにも渡さない
 // - 警告の「オンにする」「マスキングする」は、ページ側 (injected.js) に下書きの確認を
@@ -142,10 +144,16 @@
     { host: /(^|\.)manus\.im$/, selectors: ["textarea"] },
   ];
 
-  // 入力欄の下の段の「+」ボタン (D-19)。ChatGPT のログイン後の画面だけ。ログインなしの画面は
-  // 入力欄の段が列の幅を決め打ちした CSS Grid で、場所取りを入れる隙間が無いので浮かせる
+  // 入力欄の下の段の置き場所 (D-19)。上から順に試す。ChatGPT のログイン後の画面だけ。
+  // マイクはアイコン画像の名前で見分ける (読み上げ用の名前は表示の言語で変わる)。
+  // ログインなしの画面は入力欄の段が列の幅を決め打ちした CSS Grid で、場所取りを入れる
+  // 隙間が無いので浮かせる
   const DOCKS = [
-    { host: /(^|\.)(chatgpt\.com|openai\.com)$/, anchors: ['[data-composer-navigation-target="add-context"]'] },
+    { host: /(^|\.)(chatgpt\.com|openai\.com)$/, slots: [
+      { sel: 'button:has(svg use[href*="#microphone"])', where: "before" },   // 音声入力の左
+      { sel: '[data-composer-navigation-target="reasoning"]', where: "after" }, // モデル選択の右 (= 音声入力の左)
+      { sel: '[data-composer-navigation-target="add-context"]', where: "after" }, // 「+」の右
+    ] },
   ];
 
   // ---- 入力欄の特定と読み書き ----------------------------------------------
@@ -209,7 +217,7 @@
   const state = {
     el: null, enabled: true, allowlist: [], forceList: [], tint: null,
     summary: { count: 0, items: [] }, reviewing: false, scanSeq: 0,
-    dock: null,          // { spacer, anchor, after } 下の段に置いているとき
+    dock: null,          // { spacer, anchor, slot, where } 下の段に置いているとき
     size: FLOAT_SIZE,    // アイコンの一辺 (px)。下の段では「+」に合わせる
     haloColor: "",       // アイコンの縁取り (入力欄の箱の色)
     lastMovedAt: 0, lastSpot: "",
@@ -224,10 +232,10 @@
     * { box-sizing: border-box; }
     .wrap { position: relative; display: inline-flex; align-items: center; gap: 4px;
       --size: 28px; --glyph: 16px; --fg: #374151; --fg-off: #9ca3af; --halo: #ffffff; --hover: rgba(0,0,0,.06);
-      --float-bg: #ffffff; --float-border: #d1d5db;
+      --float-bg: #ffffff; --float-border: #d1d5db; --warn-fg: #ca8a04; --warn-bg: rgba(234,179,8,.18);
       font: 12px/1 -apple-system, "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif; color: #374151; }
     .wrap.dark { color: #e5e7eb; --fg: #d1d5db; --fg-off: #6b7280; --halo: #2f2f2f; --hover: rgba(255,255,255,.08);
-      --float-bg: #1f2937; --float-border: #4b5563; }
+      --float-bg: #1f2937; --float-border: #4b5563; --warn-fg: #facc15; --warn-bg: rgba(250,204,21,.18); }
     .wrap.floating { flex-direction: row-reverse; --halo: var(--float-bg); }
     .toggle { width: var(--size); height: var(--size); flex: none; margin: 0; padding: 0; border: 0; border-radius: 50%;
       background: transparent; color: var(--fg); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
@@ -241,14 +249,15 @@
     .logo .hole { fill: #ffffff; }
     .logo .slash-halo { stroke: var(--halo); stroke-width: 5; stroke-linecap: round; display: none; }
     .logo .slash { stroke: var(--fg-off); stroke-width: 2.4; stroke-linecap: round; display: none; }
-    .toggle[aria-checked="false"] { color: var(--fg-off); }
-    .toggle[aria-checked="false"] .shackle { stroke: var(--fg-off); }
-    .toggle[aria-checked="false"] .lock { fill: var(--fg-off); }
-    .toggle[aria-checked="false"] .slash, .toggle[aria-checked="false"] .slash-halo { display: inline; }
-    .warn { display: inline-flex; align-items: center; gap: 4px; height: 24px; padding: 0 8px; border-radius: 12px; border: 0; flex: none;
-      cursor: pointer; background: #f59e0b; color: #1f2937; font-weight: 700; box-shadow: 0 1px 3px rgba(0,0,0,.18); }
-    .warn[hidden] { display: none; }
-    .warn .icon { width: 14px; height: 14px; }
+    .toggle[data-state="off"] { color: var(--fg-off); }
+    .toggle[data-state="off"] .shackle { stroke: var(--fg-off); }
+    .toggle[data-state="off"] .lock { fill: var(--fg-off); }
+    .toggle[data-state="off"] .slash, .toggle[data-state="off"] .slash-halo,
+    .toggle[data-state="warning"] .slash, .toggle[data-state="warning"] .slash-halo { display: inline; }
+    /* 警告: オフのまま個人情報の可能性があるとき、アイコンを黄色にする (D-21) */
+    .wrap .toggle[data-state="warning"] { color: var(--warn-fg); background: var(--warn-bg); }
+    .toggle[data-state="warning"] .shackle, .toggle[data-state="warning"] .slash { stroke: var(--warn-fg); }
+    .toggle[data-state="warning"] .lock { fill: var(--warn-fg); }
     .popover { position: absolute; right: 0; bottom: calc(100% + 6px); width: max-content; min-width: 240px;
       max-width: min(360px, calc(100vw - 16px)); padding: 10px 12px; border-radius: 10px;
       background: #ffffff; color: #374151; border: 1px solid #d1d5db; box-shadow: 0 6px 20px rgba(0,0,0,.18); z-index: 1; }
@@ -283,7 +292,6 @@
     "</svg>";
   // 保存の確認の見出しに使う小さな盾
   const SHIELD = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v5c0 5-3.5 8.5-7 10-3.5-1.5-7-5-7-10V6l7-3z"/><path d="M9 12l2 2 4-4"/></svg>';
-  const BANG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 9v5"/><path d="M12 17.5h.01"/><path d="M10.3 4.3L2.6 17.6c-.7 1.2.2 2.7 1.6 2.7h15.6c1.4 0 2.3-1.5 1.6-2.7L13.7 4.3c-.7-1.3-2.6-1.3-3.4 0z"/></svg>';
 
   function ensureHost() {
     if (host) return;
@@ -296,8 +304,7 @@
     const shadow = host.attachShadow({ mode: "closed" });
     shadow.innerHTML = `<style>${STYLE}</style>
       <div class="wrap floating">
-        <button class="toggle" type="button" role="switch" aria-checked="true" aria-label="PII Guard">${ICON}</button>
-        <button class="warn" type="button" hidden title="個人情報の可能性があります"><span class="icon">${BANG}</span><span class="count">0</span></button>
+        <button class="toggle" type="button" role="switch" aria-checked="true" data-state="on" aria-label="PII Guard">${ICON}</button>
         <div class="popover" hidden role="dialog" aria-label="個人情報の可能性があります">
           <div class="title">個人情報の可能性があります</div>
           <div class="sub">PII Guard はオフです。このまま送ると伏せられません。</div>
@@ -313,8 +320,6 @@
     ui = {
       wrap: shadow.querySelector(".wrap"),
       toggle: shadow.querySelector(".toggle"),
-      warn: shadow.querySelector(".warn"),
-      count: shadow.querySelector(".warn .count"),
       popover: shadow.querySelector(".popover"),
       items: shadow.querySelector(".items"),
       notice: shadow.querySelector(".notice"),
@@ -323,18 +328,23 @@
       close: shadow.querySelector('[data-action="close"]'),
     };
     applyTheme();
-    for (const el of [ui.toggle, ui.warn, ui.turnOn, ui.maskOnce, ui.close]) watchVisibility(el);
+    for (const el of [ui.toggle, ui.turnOn, ui.maskOnce, ui.close]) watchVisibility(el);
     // 本物の入力で、部品が完全に見えていて、アイコンが動いてから 0.5 秒以上たったときだけ
     const safe = (el, fn) => (e) => {
       if (!clickIsSafe(e, el, host)) { LOG("ignored a click on a control that is not fully visible"); return; }
       if (Date.now() - state.lastMovedAt < STABLE_MS) { LOG("ignored a click: the control has just moved"); return; }
       fn(e);
     };
-    ui.toggle.addEventListener("click", safe(ui.toggle, () => setEnabled(!state.enabled)));
-    ui.warn.addEventListener("click", safe(ui.warn, () => {
-      if (ui.popover.hidden) renderItems();
-      ui.popover.hidden = !ui.popover.hidden;
-      exportLayout();
+    // 黄色 (オフで個人情報の可能性あり) のときは内訳を開く。それ以外はオン/オフの切り替え (D-29)
+    ui.toggle.addEventListener("click", safe(ui.toggle, () => {
+      if (warning()) {
+        if (ui.popover.hidden) renderItems();
+        ui.popover.hidden = !ui.popover.hidden;
+        ui.toggle.setAttribute("aria-expanded", ui.popover.hidden ? "false" : "true");
+        exportLayout();
+        return;
+      }
+      setEnabled(!state.enabled);
     }));
     ui.close.addEventListener("click", safe(ui.close, () => { ui.popover.hidden = true; exportLayout(); }));
     ui.maskOnce.addEventListener("click", safe(ui.maskOnce, () => { ui.popover.hidden = true; exportLayout(); reviewDraft(); }));
@@ -387,31 +397,48 @@
   function exportLayout() {
     if (!host || !ui) return;
     if (!exposeForTests) {
-      for (const k of ["enabled", "warn", "layout", "docked"]) delete host.dataset[k];
+      for (const k of ["enabled", "warn", "layout", "docked", "tone"]) delete host.dataset[k];
       return;
     }
     host.dataset.enabled = state.enabled ? "true" : "false";
     host.dataset.warn = String(!state.enabled ? state.summary.count : 0);
     host.dataset.docked = ui.wrap.classList.contains("floating") ? "false" : "true";
+    host.dataset.tone = ui.toggle.getAttribute("data-state");
     const rect = (el) => {
       if (!el || el.hidden || el.offsetParent === null) return null;
       const r = el.getBoundingClientRect();
       return [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)];
     };
     host.dataset.layout = JSON.stringify({
-      toggle: rect(ui.toggle), warn: rect(ui.warn),
+      toggle: rect(ui.toggle),
       turnOn: rect(ui.turnOn), maskOnce: rect(ui.maskOnce), close: rect(ui.close),
     });
   }
 
+  const warning = () => !state.enabled && state.summary.count > 0;
   function render() {
     if (!ui) return;
-    ui.toggle.setAttribute("aria-checked", state.enabled ? "true" : "false");
-    ui.toggle.title = state.enabled ? "PII Guard はオンです。押すとオフにします" : "PII Guard はオフです。押すとオンにします";
-    const show = !state.enabled && state.summary.count > 0;
-    ui.warn.hidden = !show;
-    ui.count.textContent = String(state.summary.count);
-    if (!show) ui.popover.hidden = true;
+    const t = ui.toggle;
+    if (warning()) {
+      // 押すと内訳を開くボタン。読み上げ用の役割もそれに合わせる
+      const n = state.summary.count;
+      t.setAttribute("data-state", "warning");
+      t.setAttribute("role", "button");
+      t.removeAttribute("aria-checked");
+      t.setAttribute("aria-haspopup", "dialog");
+      t.setAttribute("aria-expanded", ui.popover.hidden ? "false" : "true");
+      t.setAttribute("aria-label", `PII Guard はオフです。個人情報の可能性 ${n} 件`);
+      t.title = `PII Guard はオフです。個人情報の可能性が ${n} 件あります。押すと選べます`;
+    } else {
+      t.setAttribute("data-state", state.enabled ? "on" : "off");
+      t.setAttribute("role", "switch");
+      t.setAttribute("aria-checked", state.enabled ? "true" : "false");
+      t.removeAttribute("aria-haspopup");
+      t.removeAttribute("aria-expanded");
+      t.setAttribute("aria-label", "PII Guard");
+      t.title = state.enabled ? "PII Guard はオンです。押すとオフにします" : "PII Guard はオフです。押すとオンにします";
+      ui.popover.hidden = true;
+    }
     place(false);
   }
   function renderItems() {
@@ -440,23 +467,23 @@
   }
 
   // ---- 入力欄の下の段への配置 (D-18, D-19) ---------------------------------------
-  // 入力欄のそばにある「+」ボタン (同じ段か、すぐ下の段)
+  // 入力欄のそばにある目印のボタン (同じ段か、すぐ下の段)。{ anchor, where } か null
   function findDockAnchor() {
     const d = DOCKS.find((x) => x.host.test(location.hostname));
     if (!d || !state.el) return null;
     const er = state.el.getBoundingClientRect();
-    for (const sel of d.anchors) {
+    for (const { sel, where } of d.slots) {
       for (const a of document.querySelectorAll(sel)) {
         if (!isShown(a)) continue;
         const ar = a.getBoundingClientRect();
         const nearY = ar.bottom > er.top - 40 && ar.top < er.bottom + 80;
         const nearX = ar.right > er.left - 160 && ar.left < er.right + 160;
-        if (nearY && nearX) return a;
+        if (nearY && nearX) return { anchor: a, where };
       }
     }
     return null;
   }
-  // 「+」から見て最も近い flex の入れ物の子。この直後に場所取りを入れる
+  // 目印から見て最も近い flex の入れ物の子。この前か後に場所取りを入れる
   function dockSlot(anchor) {
     let a = anchor;
     for (let i = 0; i < 4 && a.parentElement && a.parentElement !== document.body; i++) {
@@ -470,36 +497,37 @@
     state.size = FLOAT_SIZE;
   }
   function ensureDock() {
-    const anchor = findDockAnchor();
-    const after = anchor && dockSlot(anchor);
-    if (!after) { removeDock(); return false; }
+    const found = findDockAnchor();
+    const slot = found && dockSlot(found.anchor);
+    if (!slot) { removeDock(); return false; }
     if (!state.dock) {
       const spacer = document.createElement("span");
       spacer.setAttribute("data-pii-guard", "dock");
       spacer.setAttribute("aria-hidden", "true");
       state.dock = { spacer };
     }
-    state.dock.anchor = anchor;
-    state.dock.after = after;
-    const ar = anchor.getBoundingClientRect();
+    const { spacer } = state.dock;
+    Object.assign(state.dock, { anchor: found.anchor, slot, where: found.where });
+    const ar = found.anchor.getBoundingClientRect();
     state.size = Math.max(24, Math.min(44, Math.round(Math.min(ar.width, ar.height))));
-    if (after.nextSibling !== state.dock.spacer) after.after(state.dock.spacer);
+    if (found.where === "before") { if (slot.previousSibling !== spacer) slot.before(spacer); }
+    else if (slot.nextSibling !== spacer) slot.after(spacer);
     sizeSpacer();
     return true;
   }
-  // 場所取りの幅はアイコンと警告のチップの幅
+  // 場所取りの大きさはアイコンと同じ
   function sizeSpacer() {
     if (!state.dock || !ui) return;
-    const w = Math.max(state.size, Math.ceil(ui.wrap.getBoundingClientRect().width));
-    const css = `display:inline-block;flex:none;width:${w}px;height:${state.size}px;margin:0;padding:0;border:0;vertical-align:middle;`;
+    const css = `display:inline-block;flex:none;width:${state.size}px;height:${state.size}px;margin:0;padding:0;border:0;vertical-align:middle;`;
     if (state.dock.spacer.getAttribute("style") !== css) state.dock.spacer.setAttribute("style", css);
   }
-  // 場所取りが「+」のすぐ右にあるか。サイトが場所取りだけを別の場所へ動かしたら浮かせる
+  // 場所取りが目印のすぐ隣にあるか。サイトが場所取りだけを別の場所へ動かしたら浮かせる
   function dockAdjacent() {
     if (!state.dock || !state.dock.spacer.isConnected || !state.dock.anchor.isConnected) return false;
     const ar = state.dock.anchor.getBoundingClientRect();
     const sr = state.dock.spacer.getBoundingClientRect();
-    return sr.left >= ar.right - 2 && sr.left - ar.right <= 24 && Math.abs((ar.top + ar.bottom) / 2 - (sr.top + sr.bottom) / 2) <= 12;
+    const gap = state.dock.where === "before" ? ar.left - sr.right : sr.left - ar.right;
+    return gap >= -2 && gap <= 24 && Math.abs((ar.top + ar.bottom) / 2 - (sr.top + sr.bottom) / 2) <= 12;
   }
 
   // 入力欄を囲む箱 (背景か枠線があり、入力欄より少しだけ大きい祖先)。浮かせる位置の基準。
@@ -543,13 +571,20 @@
       top = sr.top + (sr.height - h) / 2;
       below = sr.top < 240;
     } else {
-      // 入力欄の箱の右上の少し上に置く。上に余白が無ければ箱の内側の右上に重ねる
+      // 入力欄の箱の右の外側に置き、縦は箱の中央にそろえる (D-30)。箱の上には注意書きなど
+      // ページの文字があることが多い。右に余白が無いときだけ箱の右上の上 (無ければ内側) に置く
       const r = composerBox(state.el);
-      top = r.top - h - 6;
-      below = top < 4;
-      if (below) top = r.top + 6;
-      left = r.right - w - 8;
-      if (left < 4) left = 4;
+      if (window.innerWidth - r.right - 8 >= w + 4) {
+        left = r.right + 8;
+        top = r.top + (r.height - h) / 2;
+        below = r.top < 240;
+      } else {
+        top = r.top - h - 6;
+        below = top < 4;
+        if (below) top = r.top + 6;
+        left = r.right - w - 8;
+        if (left < 4) left = 4;
+      }
     }
     ui.wrap.classList.toggle("below", below);
     ui.wrap.classList.toggle("align-left", left + w / 2 < window.innerWidth / 2);

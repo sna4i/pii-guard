@@ -11,11 +11,12 @@
 //   T-09 クリックジャッキング: 偽の見た目に覆われた「追加」やスイッチは効かない。ホストを透明にされると確認を取り消す
 //   T-08 ページのスクリプトが送った set-enabled では設定が変わらず、add-allowlist は確認なしには保存されない
 //        (保存の確定は isolated world の閉じた UI で行う)
-//   T-13 ログイン後の ChatGPT の下の段を再現したモックで、場所取りが「+」の直後に入り、アイコンが重なる
-//   T-14 警告のチップが出ると場所取りの幅が広がり、チップを押すと内訳が出る
+//   T-13 ログイン後の ChatGPT の下の段を再現したモックで、場所取りがマイクの直前に入り、アイコンが重なる
+//   T-14 警告ではアイコンが黄色になり、場所取りは変わらない。黄色のアイコンを押すと内訳が出る
 //   T-15 アイコンが動いた直後のクリックは受け付けない
 //   T-16 オンのとき、チャットの背景に選んだ色を混ぜる。オフと暗い表示にも追従する
 //   T-17 設定画面のパレットで選んだ色が保存され、開いているタブにすぐ反映する
+//   T-20 チャットした後の画面で、アイコンが入力欄の上の注意書きに重ならない
 //
 // 使い方: node tests/integration/e2e-composer-toggle.mjs <unpacked 拡張機能ディレクトリ>
 // 環境変数 PII_E2E_SHOTS=<ディレクトリ> を付けると、下の段に置いたときの見た目を保存する
@@ -55,7 +56,7 @@ const page = (kind) => {
 <h1>mock chatgpt.com</h1><main></main><footer>${editor}</footer>`;
 };
 // ログイン後の ChatGPT の入力欄 (利用者が貼った HTML の構造と data 属性を残し、クラス名は必要なものだけにしたもの)
-const footerPage = () => `<!doctype html><title>mock</title><style>
+const COMPOSER_CSS = `
 html,body{margin:0;height:100%;background:#fcfcfc;color:#0d0d0d}
 body{display:flex;flex-direction:column}
 main{flex:1;background:#fcfcfc;display:flex;flex-direction:column;justify-content:flex-end;padding:0 24px 24px}
@@ -64,14 +65,26 @@ main{flex:1;background:#fcfcfc;display:flex;flex-direction:column;justify-conten
 .flex{display:flex}.items-center{align-items:center}.gap5{gap:5px}.contents{display:contents}.min-w-0{min-width:0}
 .btn{width:36px;height:36px;border-radius:50%;border:0;background:transparent;font-size:18px;cursor:pointer;color:inherit}
 .ProseMirror{min-height:24px;outline:none;padding:6px 4px}.ProseMirror p{margin:0}
+.msgs{flex:1;max-width:760px;margin:0 auto;width:100%;padding-top:24px}
+.bubble{background:#1f4380;color:#fff;border-radius:18px;padding:10px 14px;margin-left:auto;max-width:70%}
+.disclaimer{text-align:center;font-size:12px;color:#666;margin:6px 0}
 @media (prefers-color-scheme: dark){html,body,main{background:#000;color:#ececec}.surface{background:#303030;border-color:#444}}
-</style>
-<main><h1 style="font-size:16px">mock chatgpt.com (logged-in composer)</h1>
-<div class="surface"><div class="ComposerLayoutFooter-_8IVRO" data-composer-footer-responsive="" data-composer-layout="single-line">
+`;
+const MIC = '<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><use href="/cdn/assets/icons-9453d99f50597150.svg#microphone-light-16" fill="currentColor"></use></svg>🎤';
+const dockableComposer = () => `<div class="surface"><div class="ComposerLayoutFooter-_8IVRO" data-composer-footer-responsive="" data-composer-layout="single-line">
 <div class="min-w-0"><div class="flex min-w-0 items-center gap5"><div class="flex items-center"><span data-state="closed" class="contents"><button type="button" class="btn" aria-label="ファイルなどを追加" data-composer-navigation-target="add-context">+</button></span></div></div></div>
 <div class="min-w-0"><div data-composer-input=""><div contenteditable="true" role="textbox" class="ProseMirror" aria-label="ChatGPT に聞く"><p><br></p></div></div></div>
-<div class="min-w-0"><div class="flex items-center"><button type="button" aria-label="ChatGPT モデルを選択" data-composer-navigation-target="reasoning" style="height:36px;border:0;background:transparent;color:inherit">思考量 中程度</button><button type="button" class="btn" aria-label="音声入力">🎤</button><button type="button" class="btn" aria-label="音声会話を開始">◉</button></div></div>
-</div></div></main>`;
+<div class="min-w-0"><div class="contents"><div class="flex min-w-0 items-center"><div class="flex min-w-0 justify-end"><div class="flex items-center"><span data-state="closed" class="contents"><button type="button" aria-label="ChatGPT モデルを選択" data-composer-navigation-target="reasoning" style="height:36px;border:0;background:transparent;color:inherit">思考量 中程度</button></span></div></div>
+<div class="flex items-center"><div class="flex items-center"><span data-state="closed" class="contents"><button type="button" class="btn" aria-label="音声入力">${MIC}</button></span></div><div class="flex items-center" style="margin-left:8px"><button type="button" class="btn" aria-label="音声会話を開始">◉</button></div></div></div></div></div>
+</div></div>`;
+// 目印の無い入力欄 (下の段に置けないとき)
+const plainComposer = () => `<div class="surface"><div contenteditable="true" role="textbox" class="ProseMirror" aria-label="ChatGPT に聞く"><p><br></p></div></div>`;
+const footerPage = () => `<!doctype html><title>mock</title><style>${COMPOSER_CSS}</style>
+<main><h1 style="font-size:16px">mock chatgpt.com (logged-in composer)</h1>${dockableComposer()}</main>`;
+// 一回チャットした後の画面: 会話の下に注意書き、その下に入力欄 (利用者のスクリーンショットの並び)
+const chatPage = (composer) => `<!doctype html><title>mock</title><style>${COMPOSER_CSS}</style>
+<main><div class="msgs"><div class="bubble">この記事を要約して、価格がわかるサイトがあったら教えて</div><p>記事の仕様を確認し、公式情報と価格情報を照合します。</p></div>
+<div class="disclaimer" id="disclaimer">ChatGPT は間違えることがあります。重要な情報は確認するようにしてください。</div>${composer}</main>`;
 
 // ピルは閉じた Shadow DOM なので、ホストの data 属性 (状態と部品の位置) を読み、本物のマウスで押す
 const pillState = (p) => p.evaluate((sel) => {
@@ -125,14 +138,16 @@ const typeInto = async (p, text) => {
 };
 const layoutOf = (p) => p.evaluate((sel) => { const h = document.querySelector(sel); return h && h.dataset.layout ? JSON.parse(h.dataset.layout) : null; }, HOST);
 const dockState = (p) => p.evaluate((sel) => {
-  const add = document.querySelector('[data-composer-navigation-target="add-context"]');
+  const mic = document.querySelector('button:has(svg use[href*="#microphone"])');
   const sp = document.querySelector('span[data-pii-guard="dock"]');
   const h = document.querySelector(sel);
   const lay = h && h.dataset.layout ? JSON.parse(h.dataset.layout) : null;
   const r = (el) => { if (!el) return null; const b = el.getBoundingClientRect(); return [Math.round(b.left), Math.round(b.top), Math.round(b.width), Math.round(b.height)]; };
-  const slot = add && add.closest("span.contents");
-  return { docked: h ? h.dataset.docked : null, spacer: r(sp), add: r(add), toggle: lay && lay.toggle, afterAdd: !!(sp && slot && slot.nextElementSibling === sp) };
+  const slot = mic && mic.closest("span.contents");
+  return { docked: h ? h.dataset.docked : null, tone: h ? h.dataset.tone : null, spacer: r(sp), mic: r(mic), toggle: lay && lay.toggle, beforeMic: !!(sp && slot && slot.previousElementSibling === sp) };
 }, HOST);
+const overlaps = (a, b) => !!(a && b && a[0] < b[0] + b[2] && b[0] < a[0] + a[2] && a[1] < b[1] + b[3] && b[1] < a[1] + a[3]);
+const rectOf = (p, sel) => p.evaluate((s) => { const el = document.querySelector(s); if (!el) return null; const b = el.getBoundingClientRect(); return [Math.round(b.left), Math.round(b.top), Math.round(b.width), Math.round(b.height)]; }, sel);
 const SHOTS = process.env.PII_E2E_SHOTS ? path.resolve(process.env.PII_E2E_SHOTS) : null;
 const shotFooter = async (p, name) => {
   if (!SHOTS) return;
@@ -159,6 +174,8 @@ try {
     }
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     if (req.url.startsWith("/footer")) { res.end(footerPage()); return; }
+    if (req.url.startsWith("/chat-plain")) { res.end(chatPage(plainComposer())); return; }
+    if (req.url.startsWith("/chat")) { res.end(chatPage(dockableComposer())); return; }
     const kind = req.url.startsWith("/ce") ? "ce" : req.url.startsWith("/none") ? "none" : "ta";
     res.end(page(kind));
   });
@@ -220,7 +237,7 @@ try {
   check(received.length === 1 && received[0] === PII, "本文はそのまま届く");
 
   console.log("T-04 「マスキングする」:");
-  await clickInPill(p, "warn");
+  await clickInPill(p, "toggle");
   await p.waitForTimeout(500);
   await clickInPill(p, "maskOnce");
   await p.waitForTimeout(3000);
@@ -238,7 +255,7 @@ try {
 
   console.log("T-05 「オンにする」:");
   await typeInto(p, PII);
-  await clickInPill(p, "warn");
+  await clickInPill(p, "toggle");
   await p.waitForTimeout(500);
   await clickInPill(p, "turnOn");
   await p.waitForTimeout(3000);
@@ -259,7 +276,7 @@ try {
   await typeInto(p, PII);
   st = await pillState(p);
   check(st && st.warn, `警告が出る (${st && st.count})`);
-  await clickInPill(p, "warn");
+  await clickInPill(p, "toggle");
   await p.waitForTimeout(500);
   await clickInPill(p, "maskOnce");
   await p.waitForTimeout(3000);
@@ -364,10 +381,11 @@ try {
   await sw.evaluate(() => chrome.storage.local.set({ enabled: true, chatTint: null }));
   await p.goto("https://chatgpt.com/footer"); await p.waitForTimeout(3500);
   let d = await dockState(p);
-  check(d.spacer && d.afterAdd, `場所取りの要素が「+」の直後に入る (${JSON.stringify(d.spacer)})`);
+  check(d.spacer && d.beforeMic, `場所取りの要素がマイクの直前に入る (${JSON.stringify(d.spacer)})`);
   check(d.docked === "true" && d.toggle && d.spacer && Math.abs(d.toggle[0] - d.spacer[0]) <= 2 && Math.abs((d.toggle[1] + d.toggle[3] / 2) - (d.spacer[1] + d.spacer[3] / 2)) <= 2,
     `アイコンが場所取りの位置に重なる (toggle=${JSON.stringify(d.toggle)})`);
-  check(d.toggle && d.add && d.toggle[2] === d.add[2] && d.toggle[3] === d.add[3], `アイコンの大きさが「+」と同じ (${d.toggle && d.toggle.slice(2).join("x")})`);
+  check(d.toggle && d.mic && d.toggle[2] === d.mic[2] && d.toggle[3] === d.mic[3], `アイコンの大きさがマイクと同じ (${d.toggle && d.toggle.slice(2).join("x")})`);
+  check(d.toggle && d.mic && d.toggle[0] + d.toggle[2] <= d.mic[0] + 1, "アイコンはマイクの左にある");
   await shotFooter(p, "footer-on");
   await clickInPill(p, "toggle"); await p.waitForTimeout(800);
   check((await stored(sw, "enabled")) === false, "アイコンを本物のクリックで押すとオフになる");
@@ -376,28 +394,36 @@ try {
   await p.evaluate(() => document.querySelector('span[data-pii-guard="dock"]').remove());
   await p.waitForTimeout(1800);
   d = await dockState(p);
-  check(d.spacer && d.afterAdd, "場所取りの要素を消されても入れ直す");
+  check(d.spacer && d.beforeMic, "場所取りの要素を消されても入れ直す");
 
-  console.log("T-14 警告のチップ:");
+  console.log("T-14 警告はアイコンを黄色にする:");
   await clickInPill(p, "toggle"); await p.waitForTimeout(800);
   check((await stored(sw, "enabled")) === false, "オフにする");
-  const w0 = (await dockState(p)).spacer[2];
-  const x0 = (await dockState(p)).toggle[0];
+  d = await dockState(p);
+  const w0 = d.spacer[2];
+  const x0 = d.toggle[0];
+  check(d.tone === "off", `オフの表示 (${d.tone})`);
   await typeInto(p, PII);
   st = await pillState(p);
   d = await dockState(p);
-  check(st && st.warn, `オフで個人情報を入力すると警告が出る (${st && st.count})`);
-  check(d.spacer && d.spacer[2] > w0 + 10, `警告が出ている間は場所取りの幅が広がる (${w0}px → ${d.spacer && d.spacer[2]}px)`);
-  check(d.toggle && Math.abs(d.toggle[0] - x0) <= 1, "警告が出てもアイコンの位置は変わらない");
-  await clickInPill(p, "warn"); await p.waitForTimeout(500);
-  let lay = await layoutOf(p);
-  check(lay && lay.turnOn && lay.maskOnce && lay.close, "チップを押すと内訳と「オンにする」「マスキングする」が出る");
+  check(st && st.warn && d.tone === "warning", `オフで個人情報を入力すると、アイコンが黄色になる (tone=${d.tone}, 件数=${st && st.count})`);
+  check(d.spacer && d.spacer[2] === w0, `場所取りの幅は変わらない (${w0}px → ${d.spacer && d.spacer[2]}px)`);
+  check(d.toggle && Math.abs(d.toggle[0] - x0) <= 1, "アイコンの位置も変わらない");
   await shotFooter(p, "footer-off-warning");
+  await clickInPill(p, "toggle"); await p.waitForTimeout(500);
+  let lay = await layoutOf(p);
+  check(lay && lay.turnOn && lay.maskOnce && lay.close, "黄色のアイコンを押すと内訳と「オンにする」「マスキングする」が出る");
+  check((await stored(sw, "enabled")) === false, "黄色のアイコンを押してもオン/オフは変わらない");
+  await shotFooter(p, "footer-off-warning-open");
   await clickInPill(p, "close"); await p.waitForTimeout(400);
+  await typeInto(p, CLEAN);
+  d = await dockState(p);
+  check(d.tone === "off", "個人情報を消すと黄色が消える");
 
   console.log("T-15 動いた直後のクリック:");
   const before = (await dockState(p)).toggle;
-  await p.evaluate(() => { document.querySelector("[data-composer-footer-responsive]").style.paddingLeft = "120px"; });
+  // アイコンはマイクの左 (右端の列) にあるので、右の余白で下の段の右端を左へずらす
+  await p.evaluate(() => { document.querySelector("[data-composer-footer-responsive]").style.paddingRight = "120px"; });
   let moved = null;
   for (let i = 0; i < 40 && !moved; i++) {
     await p.waitForTimeout(50);
@@ -413,7 +439,7 @@ try {
     await clickInPill(p, "toggle"); await p.waitForTimeout(800);
     check((await stored(sw, "enabled")) === true, "止まって 0.5 秒たてば受け付ける");
   }
-  await p.evaluate(() => { document.querySelector("[data-composer-footer-responsive]").style.paddingLeft = ""; });
+  await p.evaluate(() => { document.querySelector("[data-composer-footer-responsive]").style.paddingRight = ""; });
   await p.waitForTimeout(1200);
 
   console.log("T-16 オンのときの背景色:");
@@ -469,6 +495,25 @@ try {
   await sw.evaluate(() => chrome.storage.local.set({ chatTint: null }));
   await p.waitForTimeout(800);
   check(await bgOf(p, "main") === "rgb(252, 252, 252)", "色の設定を消すと元の色に戻る");
+
+  console.log("T-20 チャットした後の画面:");
+  await sw.evaluate(() => chrome.storage.local.set({ enabled: true, chatTint: null }));
+  await p.goto("https://chatgpt.com/chat"); await p.waitForTimeout(3500);
+  d = await dockState(p);
+  let disc = await rectOf(p, "#disclaimer");
+  check(d.docked === "true" && d.beforeMic, `会話の後でも、マイクの左に置く (docked=${d.docked})`);
+  check(!overlaps(d.toggle, disc), `アイコンが注意書きに重ならない (toggle=${JSON.stringify(d.toggle)} 注意書き=${JSON.stringify(disc)})`);
+  await shotFooter(p, "chat-docked");
+  await p.goto("https://chatgpt.com/chat-plain"); await p.waitForTimeout(3500);
+  lay = await layoutOf(p);
+  disc = await rectOf(p, "#disclaimer");
+  const box = await rectOf(p, ".surface");
+  const fl = lay && lay.toggle;
+  check((await p.evaluate((s) => { const h = document.querySelector(s); return h && h.dataset.docked; }, HOST)) === "false", "目印が無ければ浮かせる");
+  check(fl && box && fl[0] >= box[0] + box[2], `浮かせたアイコンは入力欄の箱の右の外側に出る (toggle=${JSON.stringify(fl)} 箱=${JSON.stringify(box)})`);
+  check(fl && box && Math.abs((fl[1] + fl[3] / 2) - (box[1] + box[3] / 2)) <= 2, "縦は箱の中央にそろう");
+  check(!overlaps(fl, disc), "浮かせたアイコンも注意書きに重ならない");
+  await shotFooter(p, "chat-plain");
 
   check(errs.length === 0, `ページの JS エラーなし${errs.length ? ": " + errs.slice(0, 3).join(" | ") : ""}`);
 } catch (e) {

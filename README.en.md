@@ -47,9 +47,9 @@ In sentences that contain words such as 機密 (confidential), 未公開 (unrele
 
 On supported services, the PII Guard icon appears next to the input box. Each press turns PII Guard on or off. When it is off, the icon turns grey with a slash, the review at send time is skipped, and your message is sent as is.
 
-In ChatGPT, the icon sits in the row below the input box, to the right of the "+" button. On the other services, and in ChatGPT when you are not logged in, it appears at the top right of the input box.
+In ChatGPT, the icon sits in the row below the input box, to the left of the voice input (microphone) button. On the other services, and in ChatGPT when you are not logged in, it appears to the right of the input box.
 
-Even when it is off, a warning mark with a count appears next to the icon when the text in the input box may contain personal data. Pressing the mark shows what was found, and choosing "オンにする" (turn on) or "マスキングする" (mask) opens the review panel right away. What you confirm is written back into the input box. "マスキングする" is a one-time action that leaves PII Guard off.
+Even when it is off, the icon turns yellow when the text in the input box may contain personal data. Pressing the yellow icon shows what was found, and choosing "オンにする" (turn on) or "マスキングする" (mask) opens the review panel right away. What you confirm is written back into the input box. "マスキングする" is a one-time action that leaves PII Guard off.
 
 While PII Guard is off, the check runs only inside your browser, and the text in the input box is not sent anywhere.
 
