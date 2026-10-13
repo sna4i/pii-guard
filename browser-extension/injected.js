@@ -117,11 +117,35 @@
       return;
     }
     if (typeof data.id !== "string") return;
+    // composer-toggle.js (content script) からの下書きの確認の依頼
+    if (data.type === "review-draft") { handleReviewDraft(data); return; }
     const entry = pending.get(data.id);
     if (!entry) return;
     pending.delete(data.id);
     entry.resolve(data);
   });
+
+  // 入力中の文章を対象にサイドバーを開き、承認結果を content script に返す (1.6.0)。
+  // 入力欄への書き戻しは content script が行う
+  async function handleReviewDraft(data) {
+    const { id, text } = data;
+    const reply = (payload) => window.postMessage({ source: TAG_IN, id, type: "review-draft-result", ...payload }, "*");
+    try {
+      if (typeof text !== "string" || !text.trim()) return reply({ accepted: false });
+      const r = await NS.reviewDraft(text);
+      if (!r || !r.aggResp) return reply({ accepted: false, error: "detect" });
+      const sidebar = NS.sidebar;
+      if (!sidebar || typeof sidebar.show !== "function") return reply({ accepted: false, error: "no-sidebar" });
+      const decision = await sidebar.show(r.aggResp, text, {
+        draft: true,
+        mode: r.llmPending ? "detect" : "regex",
+        llmPending: r.llmPending || undefined,
+      });
+      reply({ accepted: !!(decision && decision.accepted), maskedPositions: (decision && decision.maskedPositions) || [] });
+    } catch (err) {
+      reply({ accepted: false, error: String((err && err.message) || err) });
+    }
+  }
   // 受け取りの準備ができたので、設定 (除外リスト・常に伏せる語を含む) を
   // 取りに行く (1.5.1)。content.js は起動直後にも設定を送るが、このスクリプトの
   // 読み込みより先に届くと失われ、除外リストも常に伏せる語も効かなかった
@@ -200,7 +224,10 @@
       window.removeEventListener("mask-mcp:engine-ready", onReady);
       resolve(value);
     };
-    const onReady = () => finish(NS.engine);
+    // isolated world (composer-toggle.js 用のエンジン) も同じ名前のイベントを
+    // 同じ window に飛ばすので、イベントだけで判断せず、自分の世界のエンジンが
+    // 実際に使える状態かを確かめる (1.6.0)
+    const onReady = () => { if (isEngineReady(NS.engine)) finish(NS.engine); };
     window.addEventListener("mask-mcp:engine-ready", onReady);
     const iv = setInterval(() => {
       if (isEngineReady(NS.engine)) {
@@ -572,6 +599,19 @@
       return aggResp;
     }
   }
+
+  // 下書きの確認 (composer-toggle.js から呼ばれる)。送信時と同じ検出を行い、
+  // LLM が有効ならその統合も始める。サイドバーには llmPending を渡す
+  NS.reviewDraft = async function reviewDraft(text) {
+    const aggResp = await sanitizeAggregated(text, "draft", location.href);
+    if (!aggResp) return null;
+    let llmPending = null;
+    try {
+      const cfgResp = await request("llm-config", {});
+      if (cfgResp && cfgResp.config) llmPending = mergeLlmDetect(aggResp, text);
+    } catch (_) { llmPending = null; }
+    return { aggResp, llmPending };
+  };
 
   async function isEnabled() {
     const resp = await request("is-enabled", {});

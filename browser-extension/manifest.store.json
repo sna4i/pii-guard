@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "PII Guard",
-  "version": "1.5.1",
+  "version": "1.6.0",
   "description": "AIチャットへの送信前に、個人情報や機密の数値を端末内で自動検出してマスキング。入力内容を第三者のサーバーへ送信しません。",
   "permissions": [
     "storage",
@@ -39,9 +39,7 @@
         "https://gemini.google.com/*",
         "https://*.manus.im/*"
       ],
-      "js": [
-        "content.js"
-      ],
+      "js": ["engine/dictionaries.js", "engine/patterns.js", "engine/classification.js", "engine/severity.js", "engine/categories.js", "engine/aggregate.js", "engine/force-mask.js", "engine/blocklist.js", "engine/user-force-mask.js", "engine/confidential.js", "engine/engine.js", "engine/bundle.js", "content.js", "tint.js", "composer-toggle.js"],
       "run_at": "document_start"
     }
   ],

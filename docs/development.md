@@ -718,6 +718,8 @@ pii-guard/
 │   ├── content.js              isolated-world bridge + LLM_FETCH ルーティング
 │   ├── injected.js             main-world fetch/XHR/WebSocket フック
 │   ├── sidebar.js              Shadow DOM サイドバー UI
+│   ├── composer-toggle.js      入力欄のオン/オフスイッチと、オフ時の警告
+│   ├── tint.js                 オンのときの背景色の計算 (content script と設定画面で共用)
 │   ├── review-modal.js         Shadow DOM レビューモーダル UI
 │   ├── background.js           service worker (badge + per-tab count + LLM proxy)
 │   ├── options.html/css/js     設定ページ (allowlist, LLM 設定, UI モード)

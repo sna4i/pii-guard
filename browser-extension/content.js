@@ -154,16 +154,18 @@
     let uiMode = "sidebar";
     let maskAllowlist = [];
     let maskForceList = [];
+    let enabled = true;
     let mlEnabled = false;
     try {
       const stored = await chrome.storage.local.get([
-        "interactive", "uiMode", "maskAllowlist", "maskForceList", "mlEnabled",
+        "interactive", "uiMode", "maskAllowlist", "maskForceList", "mlEnabled", "enabled",
       ]);
       if (typeof stored.mlEnabled === "boolean") mlEnabled = stored.mlEnabled;
       interactive = stored.interactive !== false;
       if (stored.uiMode === "modal" || stored.uiMode === "sidebar") {
         uiMode = stored.uiMode;
       }
+      enabled = stored.enabled !== false;
       if (Array.isArray(stored.maskAllowlist)) {
         maskAllowlist = stored.maskAllowlist.filter((v) => typeof v === "string");
       }
@@ -187,7 +189,7 @@
       {
         source: TAG_OUT,
         type: "settings",
-        settings: { interactive, uiMode, maskAllowlist, maskForceList, mlEnabled },
+        settings: { interactive, uiMode, maskAllowlist, maskForceList, mlEnabled, enabled },
       },
       "*"
     );
@@ -196,7 +198,7 @@
   try {
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area !== "local") return;
-      if ("interactive" in changes || "uiMode" in changes || "maskAllowlist" in changes || "maskForceList" in changes || "mlEnabled" in changes) {
+      if ("interactive" in changes || "uiMode" in changes || "maskAllowlist" in changes || "maskForceList" in changes || "mlEnabled" in changes || "enabled" in changes) {
         broadcastSettings();
       }
     });
@@ -213,58 +215,16 @@
     if (!data || data.source !== TAG_IN) return;
 
     // Allowlist add (no id — fire-and-forget write to chrome.storage).
-    if (data.type === "add-allowlist" && typeof data.value === "string") {
-      (async () => {
-        try {
-          const { maskAllowlist = [] } = await chrome.storage.local.get("maskAllowlist");
-          const v = data.value.trim();
-          if (v && !maskAllowlist.includes(v)) {
-            maskAllowlist.push(v);
-            await chrome.storage.local.set({ maskAllowlist });
-          }
-        } catch (_) {}
-      })();
-      return;
-    }
-
-    // Force-mask list add — drop-and-pick-category flow from the sidebar.
-    if (data.type === "add-forcelist" && typeof data.value === "string") {
-      (async () => {
-        try {
-          const { maskForceList = [] } = await chrome.storage.local.get("maskForceList");
-          const normalized = maskForceList.map((e) =>
-            typeof e === "string"
-              ? { value: e, category: "OTHER" }
-              : { value: e.value, category: e.category || "OTHER" }
-          );
-          const v = data.value;
-          const cat = typeof data.category === "string" ? data.category : "OTHER";
-          if (v && !normalized.some((e) => e.value === v && e.category === cat)) {
-            normalized.push({ value: v, category: cat });
-            await chrome.storage.local.set({ maskForceList: normalized });
-          }
-        } catch (e) {
-          console.warn("[pii-guard] force-mask add failed:", e && e.message ? e.message : e);
-        }
-      })();
-      return;
-    }
-
-    // Force-mask list remove — ( value + category ) ペアで一致を削除。
-    if (data.type === "remove-forcelist" && typeof data.value === "string") {
-      (async () => {
-        try {
-          const { maskForceList = [] } = await chrome.storage.local.get("maskForceList");
-          const v = data.value;
-          const cat = typeof data.category === "string" ? data.category : null;
-          const next = maskForceList.filter((e) => {
-            const ev = typeof e === "string" ? e : e.value;
-            const ec = typeof e === "string" ? "OTHER" : (e.category || "OTHER");
-            return !(ev === v && (cat === null || ec === cat));
-          });
-          await chrome.storage.local.set({ maskForceList: next });
-        } catch (_) {}
-      })();
+    // 除外リストと常に伏せる語の変更 (サイドバーから)。ページ側 (MAIN world) からの
+    // メッセージはサイトのスクリプトにも送れるので、ここでは保存しない。isolated world の
+    // 閉じた UI (composer-toggle.js) が利用者に確認を出し、押されたときだけ保存する (1.6.0)
+    if ((data.type === "add-allowlist" || data.type === "add-forcelist" || data.type === "remove-forcelist") && typeof data.value === "string") {
+      const confirm = window.__localMaskMCP && window.__localMaskMCP.composerToggle && window.__localMaskMCP.composerToggle.confirmPersist;
+      if (typeof confirm === "function") {
+        confirm({ type: data.type, value: data.value, category: typeof data.category === "string" ? data.category : null });
+      } else {
+        console.warn(`[pii-guard] ${data.type} ignored: the confirmation UI is not available`);
+      }
       return;
     }
 

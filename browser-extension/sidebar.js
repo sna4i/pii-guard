@@ -1368,6 +1368,9 @@
    */
   async function show(aggregatedResponse, originalText, opts) {
     opts = opts || {};
+    // 入力中の文章を対象にした確認 (composer-toggle.js)。確定しても送信はせず、
+    // 伏せた文章を入力欄に書き戻す。送信を示す文言を変える
+    const isDraft = !!opts.draft;
     // Promise resolved when background LLM augmentation finishes. When
     // provided, we open the sidebar immediately with the regex-only
     // snapshot and re-render after the LLM merges in.
@@ -1443,6 +1446,7 @@
 
       const host = document.createElement("div");
       host.setAttribute("data-mask-mcp-sidebar", "");
+      host.setAttribute("data-pii-guard", "sidebar");
       host.style.all = "initial";
       host.style.display = "block";
       host.style.height = "100vh";
@@ -2256,7 +2260,12 @@
             timerId = setTimeout(doToggle, ms);
           };
 
+          // 行の中の「除外」ボタンの操作は行の長押しとして扱わない (1.6.0)。pointerdown で
+          // ポインタを捕捉すると click の宛先が行になり、ボタンのハンドラが動かなかった
+          const onExcludeBtn = (event) =>
+            !!(event && event.target && typeof event.target.closest === "function" && event.target.closest(".exclude-btn"));
           const onDown = (event) => {
+            if (onExcludeBtn(event)) return;
             if (timerId !== null) return; // already holding
             holdFired = false;
             if (requiresHold()) {
@@ -2264,7 +2273,8 @@
             }
             // else: wait for pointerup — it's a click path
           };
-          const onUp = () => {
+          const onUp = (event) => {
+            if (onExcludeBtn(event)) return;
             const wasHolding = timerId !== null;
             clearTimers();
             resetFill();
@@ -2388,7 +2398,7 @@
         const lead = document.createElement("p");
         lead.className = "confidential-warning-lead";
         lead.textContent =
-          "以下はマスクされません。送信してよいか確認してください。";
+          isDraft ? "以下はマスクされません。確認してください。" : "以下はマスクされません。送信してよいか確認してください。";
         warn.appendChild(lead);
 
         for (const hit of confidentialHits) {
@@ -2527,7 +2537,7 @@
         if (categoryOrder.length === 0) {
           const emptyMsg = document.createElement("div");
           emptyMsg.className = "empty";
-          emptyMsg.textContent = "✓ PII は検出されませんでした — そのまま送信できます";
+          emptyMsg.textContent = isDraft ? "✓ PII は検出されませんでした" : "✓ PII は検出されませんでした — そのまま送信できます";
           categoriesWrap.appendChild(emptyMsg);
         }
         applySevFilter();
@@ -2744,7 +2754,7 @@
       const confirmBtn = document.createElement("button");
       confirmBtn.type = "button";
       confirmBtn.className = "primary";
-      confirmBtn.textContent = "選択したものをマスクして送信 (Enter)";
+      confirmBtn.textContent = isDraft ? "選択したものをマスクする (Enter)" : "選択したものをマスクして送信 (Enter)";
       footer.appendChild(cancelBtn);
       footer.appendChild(confirmBtn);
 
