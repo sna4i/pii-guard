@@ -154,7 +154,18 @@ export async function launch(opts = {}) {
           await ed.pressSequentially(text, { delay: 3 });
         }
       },
+      // Enter で送信。PII を検出すると iframe 内に送信前確認が出るので、既定フローとして
+      // 「確認が出たら送信ボタンを押す」まで行う (PII 無し・警告 OFF なら確認は出ず素通り)。
+      // 確認をキャンセルする挙動を試すテストは enterNoConfirm + 明示操作を使う。
       async enter(page, frame) {
+        if (!frame) { await page.locator('#prompt-textarea, textarea#mobile-composer-prompt').first().press("Enter"); return; }
+        await frame.locator("textarea").press("Enter");
+        try {
+          await frame.waitForSelector('#confirm[data-show="1"]', { timeout: 1500 });
+          await frame.locator('#confirm-send').click();
+        } catch (_) { /* 確認は出なかった (PII 無し or 警告 OFF) */ }
+      },
+      async enterNoConfirm(page, frame) {
         if (frame) await frame.locator("textarea").press("Enter");
         else await page.locator('#prompt-textarea, textarea#mobile-composer-prompt').first().press("Enter");
       },

@@ -16,9 +16,13 @@
   const leak = window.PiiGuardLeakDetector;
   const editor = document.getElementById("editor");
   const statusEl = document.getElementById("status");
+  const confirmEl = document.getElementById("confirm");
+  const confirmMsg = document.getElementById("confirm-msg");
+  const confirmSendBtn = document.getElementById("confirm-send");
+  const confirmCancelBtn = document.getElementById("confirm-cancel");
   const rootEl = document.documentElement;
 
-  const settings = { enabled: true, maskForceList: [], mlEnabled: false };
+  const settings = { enabled: true, maskForceList: [], mlEnabled: false, piiSendWarning: true };
   let composing = false;         // IME 変換中
   let lastReportedHeight = 0;
 
@@ -31,9 +35,10 @@
   // ---- 設定 (chrome.storage から直接。ページを経由しない) ----------------------
   async function loadSettings() {
     try {
-      const s = await chrome.storage.local.get(["enabled", "maskForceList", "mlEnabled"]);
+      const s = await chrome.storage.local.get(["enabled", "maskForceList", "mlEnabled", "piiSendWarning"]);
       settings.enabled = s.enabled !== false;
       settings.mlEnabled = s.mlEnabled === true;
+      settings.piiSendWarning = s.piiSendWarning !== false; // 既定 ON: PII を見つけたら送信前に確認
       settings.maskForceList = Array.isArray(s.maskForceList)
         ? s.maskForceList.map((e) => (typeof e === "string" ? { value: e, category: "OTHER" }
             : e && typeof e.value === "string" ? { value: e.value, category: typeof e.category === "string" ? e.category : "OTHER" } : null)).filter(Boolean)
@@ -42,7 +47,7 @@
   }
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== "local") return;
-    if ("enabled" in changes || "maskForceList" in changes || "mlEnabled" in changes) loadSettings();
+    if ("enabled" in changes || "maskForceList" in changes || "mlEnabled" in changes || "piiSendWarning" in changes) loadSettings();
   });
 
   // ---- エンジン待ち ----------------------------------------------------------
@@ -71,8 +76,39 @@
     editor.style.height = "auto";
     const h = Math.min(editor.scrollHeight, Math.round(window.innerHeight * 0.45) || 400);
     editor.style.height = h + "px";
-    const total = Math.ceil(h);
+    let total = h;
+    if (confirmEl && !confirmEl.hidden) total += confirmEl.offsetHeight;      // PII 確認バーのぶん伸ばす
+    if (statusEl && getComputedStyle(statusEl).display !== "none") total += statusEl.offsetHeight;
+    total = Math.ceil(total);
     if (total !== lastReportedHeight) { lastReportedHeight = total; boundary.post("resize", { height: total }); }
+  }
+
+  // PII 検出時の送信前確認。表示して iframe を伸ばし、ボタンが押されるまで待つ。
+  function confirmPii(count) {
+    return new Promise((resolve) => {
+      confirmMsg.textContent = settings.enabled
+        ? `個人情報が ${count} 件見つかりました。マスキングして送信しますか?`
+        : `個人情報が ${count} 件含まれています。マスキングせずに送信しますか?`;
+      confirmSendBtn.textContent = settings.enabled ? "マスキングして送信" : "このまま送信";
+      confirmEl.hidden = false;
+      confirmEl.setAttribute("data-show", "1");
+      rootEl.dataset.confirm = "1"; // テスト観測用
+      autosize();
+      const done = (ok) => {
+        confirmSendBtn.removeEventListener("click", onSend);
+        confirmCancelBtn.removeEventListener("click", onCancel);
+        confirmEl.hidden = true;
+        confirmEl.removeAttribute("data-show");
+        delete rootEl.dataset.confirm;
+        autosize();
+        resolve(ok);
+      };
+      // 本物のクリックだけ受ける (iframe はページから触れないが念のため)。
+      const onSend = (e) => { if (e.isTrusted) done(true); };
+      const onCancel = (e) => { if (e.isTrusted) done(false); };
+      confirmSendBtn.addEventListener("click", onSend);
+      confirmCancelBtn.addEventListener("click", onCancel);
+    });
   }
 
   // ---- マスキング ------------------------------------------------------------
@@ -99,15 +135,21 @@
     try {
       machine.to("SUBMIT_REQUESTED");
       machine.to("MASKING");
-      let finalText;
-      let maskedCount = 0;
-      if (settings.enabled) {
-        try { const m = await maskText(text); finalText = m.text; maskedCount = m.count; }
-        catch (e) {
+      // 常に検出する (ON はマスク結果を使い、OFF は件数を警告に使う)。
+      let res;
+      try { res = await maskText(text); }
+      catch (e) {
+        if (settings.enabled) {
           machine.to("MASKING_FAILED", { error: String((e && e.message) || e) });
           setStatus("端末内のマスキングに失敗したよ。送信は止めた。下書きはそのまま。");
           return;
         }
+        res = { text, count: 0 }; // OFF: 検出できなくても原文は送れる (警告は出せない)
+      }
+      const piiCount = res.count;
+      const finalText = settings.enabled ? res.text : text;
+      const maskedCount = settings.enabled ? res.count : 0;
+      if (settings.enabled) {
         // 裏取り: 常に伏せる語の生値が残っていたら送らない (fail-closed, INV-2)
         const residual = leak ? leak.findLeaks(finalText, settings.maskForceList.map((e) => e.value)) : [];
         if (residual.length) {
@@ -115,8 +157,11 @@
           setStatus("マスキングの確認に失敗したよ。送信は止めた。");
           return;
         }
-      } else {
-        finalText = text; // OFF: 送信操作のときだけ原文を渡す
+      }
+      // 個人情報を検出したときは送信前に確認を出す (無いときは無言で送る)。
+      if (piiCount > 0 && settings.piiSendWarning) {
+        const ok = await confirmPii(piiCount);
+        if (!ok) { machine.to("EDITING"); setStatus(""); return; } // 取消: 下書きはそのまま
       }
       machine.to("COMMIT_READY");
       machine.to("SUBMITTING");

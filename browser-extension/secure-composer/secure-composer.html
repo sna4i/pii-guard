@@ -10,6 +10,14 @@
 <!-- 原文を保持してよい唯一の DOM。ページからは contentDocument に触れない (拡張オリジン)。 -->
 <textarea id="editor" rows="1" spellcheck="true" autocapitalize="sentences" autocorrect="on"
   aria-label="PII Guard 保護入力欄 (ChatGPT に送る前に端末内でマスキングします)"></textarea>
+<!-- PII を検出したときだけ送信前に出す確認 (個人情報が無いときは出さない) -->
+<div id="confirm" hidden role="alertdialog" aria-labelledby="confirm-msg">
+  <p id="confirm-msg"></p>
+  <div class="confirm-actions">
+    <button type="button" id="confirm-send" class="primary"></button>
+    <button type="button" id="confirm-cancel">やめる</button>
+  </div>
+</div>
 <div id="status" aria-live="polite"></div>
 <!-- エンジン一式 (content.js と同じ順)。iframe 内でマスキングするので機密設定は MAIN world に出ない。 -->
 <script src="../engine/dictionaries.js"></script>
