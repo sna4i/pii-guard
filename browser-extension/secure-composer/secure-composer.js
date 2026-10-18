@@ -199,6 +199,41 @@
     }
   });
 
+  // ---- ファイルのドラッグ/貼り付け (F-SC-13) ---------------------------------------
+  // iframe はファイルを受けない (ここに落ちたファイルはページ側のマスク経路に乗らない)。
+  // ドラッグが来たら content script に知らせて iframe を透過にしてもらい、drop をページ側
+  // (attachment-guard が先に捕まえてマスクする) に通す。透過になるまでの一瞬は「落とせない」表示。
+  let hintTimer = 0;
+  function flashStatus(msg) {
+    setStatus(msg); autosize();
+    clearTimeout(hintTimer);
+    hintTimer = setTimeout(() => { if (statusEl.textContent === msg) { setStatus(""); autosize(); } }, 6000);
+  }
+  const isFileDrag = (e) => !!e.dataTransfer && Array.prototype.includes.call(e.dataTransfer.types || [], "Files");
+  let lastDragPost = 0;
+  function onFileDrag(e) {
+    if (!isFileDrag(e)) return; // 文字のドラッグは textarea の既定どおり受ける
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "none";
+    const now = Date.now();
+    if (now - lastDragPost > 150) { lastDragPost = now; boundary.post("dragfiles", {}); }
+  }
+  document.addEventListener("dragenter", onFileDrag, true);
+  document.addEventListener("dragover", onFileDrag, true);
+  document.addEventListener("drop", (e) => {
+    if (!isFileDrag(e)) return;
+    e.preventDefault(); e.stopPropagation();
+    flashStatus("ファイルはもう一度ドロップしてね。添付するときにマスクするよ。");
+  }, true);
+  // ファイル/画像の貼り付けは iframe では添付できない。文字も一緒なら文字だけ貼る (Excel のセル等)。
+  editor.addEventListener("paste", (e) => {
+    const cd = e.clipboardData;
+    if (!cd || !cd.files || cd.files.length === 0) return;
+    if (Array.prototype.includes.call(cd.types || [], "text/plain")) return;
+    e.preventDefault();
+    flashStatus("ファイルや画像は ＋ ボタンかドラッグ&ドロップで添付してね。");
+  });
+
   // ---- content script からの要求 ------------------------------------------------
   boundary.on("theme", (t) => { applyTheme(t); return true; });
   boundary.on("focus", () => { try { editor.focus(); } catch (_) {} return true; });

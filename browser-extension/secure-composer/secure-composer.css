@@ -35,10 +35,11 @@ body { overflow: hidden; background: transparent; }
   overflow-wrap: anywhere;
 }
 #editor::placeholder { color: var(--sc-placeholder); opacity: 1; }
-/* マスク失敗で送信を止めた/保護できないときだけ小さく出す。通常時は何も出さない (spec 10.4)。 */
+/* マスク失敗・送信失敗・添付の案内など、伝えることがあるときだけ小さく出す。通常時は何も出さない (spec 10.4)。 */
 #status { display: none; font: 12px/1.4 var(--sc-font); color: #b84a00; padding: 2px var(--sc-pad-x); }
 :root[data-state="MASKING_FAILED"] #status,
-:root[data-state="BLOCKED"] #status { display: block; }
+:root[data-state="BLOCKED"] #status,
+#status:not(:empty) { display: block; }
 
 /* 送信前の PII 確認。PII を検出したときだけ表示する。 */
 #confirm { display: none; box-sizing: border-box; padding: 8px var(--sc-pad-x); background: var(--sc-surface, #fff);

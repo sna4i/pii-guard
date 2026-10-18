@@ -111,6 +111,8 @@
   function mountComposer() {
     if (VARIANT === "loggedout") buildLoggedOut(); else buildLoggedIn();
     const form = root.querySelector("form");
+    form.appendChild(imageInput);  // 実物と同じく、入力欄の form の中に画像用 → 汎用の順
+    form.appendChild(attachInput);
     form.addEventListener("submit", (e) => { e.preventDefault(); submit("button"); });
     if (sendBtn && sendBtn.type !== "submit") sendBtn.addEventListener("click", () => submit("button"));
     editor.addEventListener("input", onInput);
@@ -172,23 +174,53 @@
   // 添付 (実物の ChatGPT を模す): file input → 中身を読んでサーバへ PUT 相当で送る。
   // attachment-guard が change を横取りしてマスク済み File に差し替えていれば、ここで読む
   // 中身はマスク済みになる (実物も input.files を読んでアップロードする)。
-  (function setupAttach() {
-    const inp = document.createElement("input");
-    inp.type = "file";
-    inp.id = "mock-file";
-    inp.multiple = true;
-    inp.setAttribute("data-testid", "file-input");
-    inp.style.cssText = "position:fixed;bottom:4px;left:4px;opacity:0.01;width:40px";
-    document.body.appendChild(inp);
-    inp.addEventListener("change", async () => {
-      const files = Array.from(inp.files || []);
-      for (const f of files) {
-        let text = "";
-        try { text = await f.text(); } catch (_) {}
-        log("attach-upload", { name: f.name, bytes: f.size });
-        // 実物の presigned PUT 相当: 中身をサーバに送る (テストが受信内容を検査する)
-        try { await fetch("/backend-api/files/content", { method: "POST", headers: { "content-type": "text/plain" }, body: text }); } catch (_) {}
-      }
+  // 実物 (2026-10-18 ログイン後) と同じく、入力欄の form の中に「画像だけ」の input が先に並び、
+  // その後ろに accept 無し・multiple の汎用 input がある (mountComposer が form に差し込む)。
+  async function uploadFiles(files, via) {
+    for (const f of files) {
+      let text = "";
+      try { text = await f.text(); } catch (_) {}
+      log(via, { name: f.name, bytes: f.size });
+      // 実物の presigned PUT 相当: 中身をサーバに送る (テストが受信内容を検査する)
+      try { await fetch("/backend-api/files/content", { method: "POST", headers: { "content-type": "text/plain" }, body: text }); } catch (_) {}
+    }
+  }
+  const imageInput = document.createElement("input");
+  imageInput.type = "file";
+  imageInput.accept = "image/*";
+  imageInput.id = "mock-image-file";
+  imageInput.style.display = "none";
+  imageInput.addEventListener("change", () => uploadFiles(Array.from(imageInput.files || []), "image-upload"));
+  const attachInput = document.createElement("input");
+  attachInput.type = "file";
+  attachInput.id = "mock-file";
+  attachInput.multiple = true;
+  attachInput.setAttribute("data-testid", "file-input");
+  attachInput.style.cssText = "position:fixed;bottom:4px;left:4px;opacity:0.01;width:40px";
+  attachInput.addEventListener("change", () => uploadFiles(Array.from(attachInput.files || []), "attach-upload"));
+
+  // ドラッグ&ドロップ (実物を模す): ページ全体で受けてオーバーレイを出し、落ちたファイルを
+  // そのままアップロードする。attachment-guard が drop を先に捕まえなければ原文が出る (F-SC-13)。
+  // オーバーレイは react-dropzone と同じく dragenter/dragleave の対で出し入れする。
+  (function setupDrop() {
+    const overlay = document.createElement("div");
+    overlay.id = "mock-drop-overlay";
+    overlay.textContent = "ここにファイルをドロップすると、会話に追加されます";
+    overlay.style.cssText = "position:fixed;inset:0;z-index:40;pointer-events:none;display:none;background:rgba(0,0,0,.15)";
+    document.body.appendChild(overlay);
+    let targets = [];
+    const hasFiles = (e) => !!e.dataTransfer && Array.from(e.dataTransfer.types || []).includes("Files");
+    const show = (v) => { overlay.style.display = v ? "block" : "none"; };
+    document.addEventListener("dragenter", (e) => { if (!hasFiles(e)) return; e.preventDefault(); if (!targets.includes(e.target)) targets.push(e.target); show(true); });
+    document.addEventListener("dragover", (e) => { if (hasFiles(e)) e.preventDefault(); });
+    document.addEventListener("dragleave", (e) => { e.preventDefault(); targets = targets.filter((t) => t !== e.target && t.isConnected); if (!targets.length) show(false); });
+    document.addEventListener("drop", (e) => {
+      if (!hasFiles(e)) return;
+      e.preventDefault();
+      const files = Array.from(e.dataTransfer.files || []); // イベント中に取り出す
+      targets = []; show(false);
+      log("drop-received", { count: files.length });
+      uploadFiles(files, "drop-upload");
     });
   })();
 

@@ -224,7 +224,7 @@
     el: null, enabled: true, interactive: true, allowlist: [], forceList: [], tint: null,
     summary: { count: 0, items: [] }, reviewing: false, scanSeq: 0,
     scMaskNotice: { count: 0, at: 0 }, // F-SC-10: 確認 OFF のとき SC がマスクした件数 (一定時間だけ黄色)
-    attachNotice: { masked: 0, blocked: 0, at: 0 }, // F-SC-08: 添付のマスク/ブロック通知
+    attachNotice: { masked: 0, blocked: 0, unmasked: 0, reason: "", at: 0 }, // F-SC-08: 添付のマスク/ブロック/未マスク通知
     dock: null,          // { spacer, anchor, slot, where } 下の段に置いているとき
     size: FLOAT_SIZE,    // アイコンの一辺 (px)。下の段では「+」に合わせる
     haloColor: "",       // アイコンの縁取り (入力欄の箱の色)
@@ -428,18 +428,25 @@
   const scMaskWarning = () =>
     state.enabled && scActive && !state.interactive &&
     state.scMaskNotice.count > 0 && (Date.now() - state.scMaskNotice.at) < SC_NOTICE_MS;
-  // F-SC-08: 添付にマスクできないもの(ブロック)があった、または確認 OFF でマスクした添付がある。
+  // F-SC-08: 添付を止めた / マスクせずに通した (マスキング OFF) / 確認 OFF でマスクした、のどれか。
   const attachWarning = () =>
     scActive && (Date.now() - state.attachNotice.at) < SC_NOTICE_MS &&
-    (state.attachNotice.blocked > 0 || (state.attachNotice.masked > 0 && !state.interactive));
+    (state.attachNotice.blocked > 0 || state.attachNotice.unmasked > 0 ||
+      (state.attachNotice.masked > 0 && !state.interactive));
+  function attachMsg(n) {
+    if (n.blocked > 0 && n.reason === "dialog") return "ダイアログへのドロップは止めました。ファイル選択から追加してね";
+    if (n.blocked > 0 && n.reason === "no-target") return `添付先が見つからず ${n.blocked} 件止めました`;
+    if (n.blocked > 0) return `マスクできない添付を ${n.blocked} 件止めました`;
+    if (n.unmasked > 0) return `マスクしていない添付が ${n.unmasked} 件あります`;
+    return `添付を ${n.masked} 件マスクしました`;
+  }
   const warning = () => offWarning() || scMaskWarning() || attachWarning();
   function render() {
     if (!ui) return;
     const t = ui.toggle;
     if (attachWarning() && !offWarning()) {
-      // 添付の通知。マスクできないファイルをブロックしたか、確認 OFF で添付をマスクした。
-      const b = state.attachNotice.blocked, m = state.attachNotice.masked;
-      const msg = b > 0 ? `マスクできない添付を ${b} 件止めました` : `添付を ${m} 件マスクしました`;
+      // 添付の通知。止めた / マスクせずに通した / 確認 OFF でマスクした。
+      const msg = attachMsg(state.attachNotice);
       t.setAttribute("data-state", "warning");
       t.setAttribute("role", "button");
       t.removeAttribute("aria-checked");
@@ -698,13 +705,14 @@
     const d = (ev && ev.detail) || {};
     const masked = Number(d.maskedCount) || 0;
     const blocked = Array.isArray(d.blocked) ? d.blocked.length : 0;
-    if (!scActive || (masked <= 0 && blocked <= 0)) return;
-    state.attachNotice = { masked, blocked, at: Date.now() };
+    const unmasked = Array.isArray(d.unmasked) ? d.unmasked.length : 0;
+    const reason = typeof d.reason === "string" ? d.reason : "";
+    if (!scActive || (masked <= 0 && blocked <= 0 && unmasked <= 0)) return;
+    state.attachNotice = { masked, blocked, unmasked, reason, at: Date.now() };
     render();
-    if (blocked > 0) notice(`マスクできない添付を ${blocked} 件止めました`);
-    else if (masked > 0 && !state.interactive) notice(`添付を ${masked} 件マスクしました`);
+    if (blocked > 0 || unmasked > 0 || !state.interactive) notice(attachMsg(state.attachNotice));
     clearTimeout(attachNoticeTimer);
-    attachNoticeTimer = setTimeout(() => { state.attachNotice = { masked: 0, blocked: 0, at: 0 }; render(); }, SC_NOTICE_MS);
+    attachNoticeTimer = setTimeout(() => { state.attachNotice = { masked: 0, blocked: 0, unmasked: 0, reason: "", at: 0 }; render(); }, SC_NOTICE_MS);
   });
 
   // ---- オフ時の検出 -----------------------------------------------------------

@@ -39,7 +39,8 @@ main{max-width:760px;margin:0 auto;padding:16px;display:flex;flex-direction:colu
 textarea#mobile-composer-prompt{width:100%;font:inherit;border:1px solid #ddd;border-radius:20px;padding:8px 12px;resize:none}
 </style></head>
 <body><nav><a href="/" data-nav="new">新しいチャット</a><a href="/c/abc123" data-nav="c">会話A</a></nav>
-<main><div id="thread"></div><div id="composer-root"></div></main>
+<!-- 実物 (2026-10-18 ログイン後) と同じく、スレッド側の入れ物のクラス名にも "composer" を含む -->
+<main><div class="relative flex group-has-[[data-expanded-composer]]/home-composer-layout:hidden" style="display:contents"><div id="thread"></div></div><div id="composer-root"></div></main>
 <script src="/mock/app.js"></script></body></html>`;
 
 const WORKER = `self.onmessage = (e) => { try { fetch("/ces/v1/w", { method: "POST", body: String(e.data) }); } catch (_) {} };`;

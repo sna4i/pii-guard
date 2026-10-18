@@ -166,7 +166,35 @@
       return true;
     });
     boundary.on("blocked", () => { /* iframe が保護を保証できない: 重ねを外して従来経路に委ねる */ teardownOverlay(); return true; });
+    // iframe の上にファイルのドラッグが来た (iframe はファイルを受けない)。透過にしてページ側へ通す。
+    boundary.on("dragfiles", () => { dragPassthrough(); return true; });
   }
+
+  // ---- ファイルのドラッグ (F-SC-13) ----------------------------------------------
+  // iframe に落ちたファイルは、ページ側のマスク経路 (attachment-guard の drop 横取り) に乗らない。
+  // ファイルのドラッグ中だけ host を pointer-events:none にして、入力欄の上でも drop がページ側
+  // (ネイティブ入力欄) に落ちるようにする。dragover は動かなくても数百 ms ごとに来るので、
+  // 一定時間来なくなったら (ドロップ済み・取消・窓の外) 元に戻す。
+  const DRAG_IDLE_MS = 1000;
+  let dragPassUntil = 0;
+  let dragTimer = 0;
+  function dragPassthrough() {
+    if (!active || !host) return;
+    dragPassUntil = Date.now() + DRAG_IDLE_MS;
+    host.style.pointerEvents = "none";
+    if (exposeForTests) host.setAttribute("data-sc-drag", "1");
+    if (dragTimer) return;
+    dragTimer = setInterval(() => {
+      if (Date.now() < dragPassUntil) return;
+      clearInterval(dragTimer); dragTimer = 0;
+      if (host) { host.style.pointerEvents = "auto"; host.removeAttribute("data-sc-drag"); }
+    }, 200);
+  }
+  // 本物のドラッグだけ (ページの JS が偽の dragover を投げ続けて iframe を透過のままにできないように)
+  const isFileDrag = (e) => e.isTrusted && !!e.dataTransfer && Array.prototype.includes.call(e.dataTransfer.types || [], "Files");
+  window.addEventListener("dragenter", (e) => { if (isFileDrag(e)) dragPassthrough(); }, true);
+  window.addEventListener("dragover", (e) => { if (isFileDrag(e)) dragPassthrough(); }, true);
+  window.addEventListener("drop", () => { dragPassUntil = 0; }, true); // 落とし終えたらすぐ戻す
   function pushTheme() { if (boundary && native) boundary.post("theme", readTheme(native)); }
 
   function attach(el) {
