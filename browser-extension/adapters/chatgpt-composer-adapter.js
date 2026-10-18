@@ -149,6 +149,11 @@
     boundary.on("resize", (p) => { if (p && typeof p.height === "number") { iframeHeight = p.height; schedulePlace(); } return true; });
     boundary.on("ready", () => { pushTheme(); schedulePlace(); return true; });
     boundary.on("state", () => true);
+    // F-SC-10: SC がマスクした件数を同じ ISOLATED world の composer-toggle (ピル) へ渡す。
+    boundary.on("maskinfo", (p) => {
+      try { window.dispatchEvent(new CustomEvent("mask-mcp:sc-maskinfo", { detail: { maskedCount: (p && p.maskedCount) || 0 } })); } catch (_) {}
+      return true;
+    });
     boundary.on("blocked", () => { /* iframe が保護を保証できない: 重ねを外して従来経路に委ねる */ teardownOverlay(); return true; });
   }
   function pushTheme() { if (boundary && native) boundary.post("theme", readTheme(native)); }

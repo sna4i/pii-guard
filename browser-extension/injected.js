@@ -917,7 +917,14 @@
     if (typeof url !== "string") return null;
     for (const s of SERVICES) {
       try {
-        if (s.match(url)) return s;
+        if (s.match(url)) {
+          // F-SC-11: Secure Composer がこのタブの ChatGPT 入力を受け持っているときは、
+          // ネイティブ送信には既にマスク済み本文が載っている。ここで横取りすると、
+          // 二重にサイドバー確認が出たり、再試行の再送で経路が食い違う。SC を唯一の
+          // 経路にするため、chatgpt アダプタは素通しする (他プロバイダ・SC 無効時は従来どおり)。
+          if (s.name === "chatgpt" && NS.settings && NS.settings.scOwnsComposer) return null;
+          return s;
+        }
       } catch (_) {
         // Broken matcher → skip, never brick the page.
       }

@@ -156,6 +156,10 @@
     let maskForceList = [];
     let enabled = true;
     let mlEnabled = false;
+    // scOwnsComposer: このタブで Secure Composer が入力を受け持っているか (ChatGPT かつ
+    // secureComposerEnabled)。MAIN world に配る非機密フラグ。injected.js はこれが true の間、
+    // ChatGPT の送信を横取りしない (SC が唯一の経路。二重確認・再試行バイパスの根治, F-SC-11)。
+    let scOwnsComposer = false;
     // [SECURITY] Secure Composer が入力を受け持つホスト (ChatGPT) では、マスキングは
     // iframe (拡張オリジン) が chrome.storage を直接読んで行う。除外リスト・常に伏せる語
     // といった機密を MAIN world に配ると、ページ JS が読める (V-02)。そこで、このホストでは
@@ -173,6 +177,7 @@
       }
       enabled = stored.enabled !== false;
       const secretsStayLocal = secureComposerHost && stored.secureComposerEnabled !== false;
+      scOwnsComposer = secretsStayLocal;
       if (!secretsStayLocal && Array.isArray(stored.maskAllowlist)) {
         maskAllowlist = stored.maskAllowlist.filter((v) => typeof v === "string");
       }
@@ -196,7 +201,7 @@
       {
         source: TAG_OUT,
         type: "settings",
-        settings: { interactive, uiMode, maskAllowlist, maskForceList, mlEnabled, enabled },
+        settings: { interactive, uiMode, maskAllowlist, maskForceList, mlEnabled, enabled, scOwnsComposer },
       },
       "*"
     );

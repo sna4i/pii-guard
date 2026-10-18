@@ -83,7 +83,8 @@
       mlEnabled: settings.mlEnabled,
     });
     if (!res || typeof res.sanitized_text !== "string") throw new Error("mask produced no text");
-    return res.sanitized_text;
+    const count = Array.isArray(res.detections) ? res.detections.length : 0;
+    return { text: res.sanitized_text, count };
   }
 
   // ---- 送信 ------------------------------------------------------------------
@@ -99,8 +100,9 @@
       machine.to("SUBMIT_REQUESTED");
       machine.to("MASKING");
       let finalText;
+      let maskedCount = 0;
       if (settings.enabled) {
-        try { finalText = await maskText(text); }
+        try { const m = await maskText(text); finalText = m.text; maskedCount = m.count; }
         catch (e) {
           machine.to("MASKING_FAILED", { error: String((e && e.message) || e) });
           setStatus("端末内のマスキングに失敗したよ。送信は止めた。下書きはそのまま。");
@@ -127,6 +129,8 @@
         return;
       }
       machine.to("SENT");
+      // F-SC-10: 確認機能 OFF でも「マスクした件数」をピルに知らせ、黄色+メッセージを出させる。
+      if (settings.enabled && maskedCount > 0) boundary.post("maskinfo", { maskedCount });
       editor.value = "";
       autosize();
       machine.to("SECURE_READY");

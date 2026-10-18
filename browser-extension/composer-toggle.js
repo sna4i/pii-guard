@@ -219,9 +219,11 @@
   }
 
   // ---- 状態と UI ------------------------------------------------------------
+  const SC_NOTICE_MS = 6000;
   const state = {
-    el: null, enabled: true, allowlist: [], forceList: [], tint: null,
+    el: null, enabled: true, interactive: true, allowlist: [], forceList: [], tint: null,
     summary: { count: 0, items: [] }, reviewing: false, scanSeq: 0,
+    scMaskNotice: { count: 0, at: 0 }, // F-SC-10: 確認 OFF のとき SC がマスクした件数 (一定時間だけ黄色)
     dock: null,          // { spacer, anchor, slot, where } 下の段に置いているとき
     size: FLOAT_SIZE,    // アイコンの一辺 (px)。下の段では「+」に合わせる
     haloColor: "",       // アイコンの縁取り (入力欄の箱の色)
@@ -420,11 +422,26 @@
     });
   }
 
-  const warning = () => !state.enabled && state.summary.count > 0;
+  const offWarning = () => !state.enabled && state.summary.count > 0;
+  // F-SC-10: マスキング ON + 確認機能 OFF で、SC が直近でマスクしたデータがあるとき。
+  const scMaskWarning = () =>
+    state.enabled && scActive && !state.interactive &&
+    state.scMaskNotice.count > 0 && (Date.now() - state.scMaskNotice.at) < SC_NOTICE_MS;
+  const warning = () => offWarning() || scMaskWarning();
   function render() {
     if (!ui) return;
     const t = ui.toggle;
-    if (warning()) {
+    if (scMaskWarning() && !offWarning()) {
+      // マスク済みデータの通知 (確認画面を出さない代わりの気づき)。オン表示のまま黄色にする。
+      const n = state.scMaskNotice.count;
+      t.setAttribute("data-state", "warning");
+      t.setAttribute("role", "button");
+      t.removeAttribute("aria-checked");
+      t.setAttribute("aria-haspopup", "dialog");
+      t.setAttribute("aria-expanded", ui.popover.hidden ? "false" : "true");
+      t.setAttribute("aria-label", `マスキングされたデータがあります ${n} 件`);
+      t.title = `マスキングされたデータがあります (${n} 件)。押すと内訳を見られます`;
+    } else if (offWarning()) {
       // 押すと内訳を開くボタン。読み上げ用の役割もそれに合わせる
       const n = state.summary.count;
       t.setAttribute("data-state", "warning");
@@ -614,6 +631,7 @@
     const prevEnabled = state.enabled;
     let tintChanged = false;
     if ("secureComposerEnabled" in stored) scActive = SC_HOST && stored.secureComposerEnabled !== false;
+    if ("interactive" in stored) state.interactive = stored.interactive !== false;
     if ("enabled" in stored) state.enabled = stored.enabled !== false;
     if ("chatTint" in stored) {
       const next = T.normalizeTint(stored.chatTint);
@@ -631,7 +649,7 @@
     applyTint(tintChanged);
     if (!state.enabled && (prevEnabled !== state.enabled || "maskAllowlist" in stored || "maskForceList" in stored)) scheduleScan(0);
   }
-  chrome.storage.local.get(["enabled", "maskAllowlist", "maskForceList", "chatTint", "secureComposerEnabled", E2E_FLAG]).then((s) => {
+  chrome.storage.local.get(["enabled", "interactive", "maskAllowlist", "maskForceList", "chatTint", "secureComposerEnabled", E2E_FLAG]).then((s) => {
     exposeForTests = s[E2E_FLAG] === true;
     // 既定: SC ホストでは secureComposerEnabled 未設定を true 扱い (SC は既定で有効)。
     scActive = SC_HOST && s.secureComposerEnabled !== false;
@@ -641,8 +659,21 @@
     if (area !== "local") return;
     if (E2E_FLAG in changes) { exposeForTests = changes[E2E_FLAG].newValue === true; exportLayout(); exportPersistLayout(); }
     const stored = {};
-    for (const k of ["enabled", "maskAllowlist", "maskForceList", "chatTint", "secureComposerEnabled"]) if (k in changes) stored[k] = changes[k].newValue;
+    for (const k of ["enabled", "interactive", "maskAllowlist", "maskForceList", "chatTint", "secureComposerEnabled"]) if (k in changes) stored[k] = changes[k].newValue;
     if (Object.keys(stored).length) applyStored(stored);
+  });
+
+  // F-SC-10: Secure Composer (iframe) が送信時にマスクした件数を adapter 経由で受け取り、
+  // 確認機能 OFF のときはピルを黄色にして「マスキングされたデータがあります」と気づかせる。
+  let scNoticeTimer = null;
+  window.addEventListener("mask-mcp:sc-maskinfo", (ev) => {
+    const n = (ev && ev.detail && Number(ev.detail.maskedCount)) || 0;
+    if (!scActive || state.interactive || n <= 0) return; // 確認機能 ON のときは不要
+    state.scMaskNotice = { count: n, at: Date.now() };
+    render();
+    notice(`マスキングされたデータがあります (${n} 件)`);
+    clearTimeout(scNoticeTimer);
+    scNoticeTimer = setTimeout(() => { state.scMaskNotice = { count: 0, at: 0 }; render(); }, SC_NOTICE_MS);
   });
 
   // ---- オフ時の検出 -----------------------------------------------------------
