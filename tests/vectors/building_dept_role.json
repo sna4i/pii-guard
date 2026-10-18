@@ -1,0 +1,50 @@
+{
+  "label_groups": ["BUILDING", "DEPARTMENT", "JOB_TITLE"],
+  "cases": [
+    {
+      "name": "建物名+部屋 (住所の後ろ)",
+      "input": "住所：東京都渋谷区神南1-2-3 サンプルレジデンス渋谷1204号室",
+      "expected": [{ "label": "BUILDING", "text": "サンプルレジデンス渋谷1204号室" }]
+    },
+    {
+      "name": "ビル+階",
+      "input": "勤務先住所：東京都港区テスト1-1-1 テストビル8階",
+      "expected": [{ "label": "BUILDING", "text": "テストビル8階" }]
+    },
+    {
+      "name": "単独の号室",
+      "input": "お届け先は305号室です",
+      "expected": [{ "label": "BUILDING", "text": "305号室" }]
+    },
+    {
+      "name": "建物語の無い『3階建て』は拾わない",
+      "input": "3階建ての一戸建てに住んでいます",
+      "expected_absent": [{ "label": "BUILDING" }]
+    },
+    {
+      "name": "部署 (ラベルごと 1 span、課まで含め行末まで)",
+      "input": "部署：システム開発部 Webアプリケーション課\n次へ",
+      "expected": [{ "label": "DEPARTMENT", "text": "部署：システム開発部 Webアプリケーション課" }]
+    },
+    {
+      "name": "ラベル無しの『一部』は部署にしない",
+      "input": "作業は一部だけ完了した",
+      "expected_absent": [{ "label": "DEPARTMENT" }]
+    },
+    {
+      "name": "役職 (ラベルごと 1 span)",
+      "input": "役職：主任",
+      "expected": [{ "label": "JOB_TITLE", "text": "役職：主任" }]
+    },
+    {
+      "name": "明確な役職語はインラインでも拾う",
+      "input": "代表取締役の佐藤さんが出席",
+      "expected": [{ "label": "JOB_TITLE", "text": "代表取締役" }]
+    },
+    {
+      "name": "あいまいな『主任』はラベル無しなら拾わない (過検出回避)",
+      "input": "新人の主任研修を実施",
+      "expected_absent": [{ "label": "JOB_TITLE" }]
+    }
+  ]
+}

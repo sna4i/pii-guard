@@ -24,6 +24,9 @@
     EMAIL_ADDRESS: "high",
     PHONE_NUMBER: "high",
     ADDRESS: "high",
+    BUILDING: "high",
+    DEPARTMENT: "medium",
+    JOB_TITLE: "low",
     PATIENT_ID: "high",
     // ---- medium ---------------------------------------------------------
     LOCATION: "medium",

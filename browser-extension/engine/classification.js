@@ -19,6 +19,8 @@
     PERSON: "proper_noun",
     PROPER_NOUN_PERSON: "proper_noun",
     KATAKANA_NAME: "proper_noun",
+    BUILDING: "proper_noun",
+    DEPARTMENT: "proper_noun",
     JP_SURNAME: "proper_noun",
     WESTERN_FIRST_NAME: "proper_noun",
     LOCATION: "proper_noun",
@@ -91,6 +93,7 @@
     BANK_ACCOUNT: "credential",
     // ---- attribute ------------------------------------------------------
     AGE: "attribute",
+    JOB_TITLE: "attribute",
     GENDER: "attribute",
     DATE: "attribute",
     BLOOD_TYPE: "attribute",
