@@ -14,7 +14,8 @@
 //   format     JSON / ログ / Markdown / CSV / メールヘッダ
 //   composite  多カテゴリの現実文書 (顧客カルテ) とチャット文体
 //   negative   隠してはいけない語 (過検出チェック)
-//   gap        既知の限界 (数字を 1 桁ずつ空白で分断する難読化)。記録はするがゲート対象外
+//   spaced     数字を 1 桁ずつ空白で分断する難読化 (2026-10-18 に F-EG-07 で対応、ゲート対象)
+//   gap        既知の限界。今は無い (見つけたらここに記録し、ゲート対象から外す)
 //
 // 実行: node tests/eval/masking-eval.mjs [--verbose]
 //   PII_EVAL_REPORT=<path> を付けると JSON レポートを書き出す。
@@ -100,7 +101,7 @@ export function buildCases() {
       add(`single:${cat}:plain`, label(v), [v]);
       if (DIGIT_CATS.includes(cat)) {
         add(`single:${cat}:full`, label(toFull(v)), [toFull(v)]);
-        add(`gap:${cat}:spaced`, label(spaceDigits(v)), [spaceDigits(v)], [], { gap: true });
+        add(`spaced:${cat}`, label(spaceDigits(v)), [spaceDigits(v)]);
       }
     }
   }
@@ -167,6 +168,11 @@ export function buildCases() {
   add("negative:css", "style に width: 50% と height: 100% を指定", [], ["width: 50%", "height: 100%"]);
   add("negative:prose-num", "出席者は約30人、会議は3回に分けて実施", [], ["30人", "3回"]);
   add("negative:common", "全部の作業のうち一部が完了。残りは主任研修の後", [], ["全部", "一部", "主任研修"]);
+  // 空白区切りの数字を詰めても (F-EG-07)、数を数えるだけの並びは拾わない
+  for (const n of ["評価は 3 4 5 の順で良い", "数字の並び 0 1 2 3 4 5 6 7 8 9 を数える", "ページ 1 2-3 4 を参照",
+    "解像度は 2 4 0 0 x 1 0 8 0 です", "円周率は 3 1 4 1 5 9 2 6 5 3 5 8 9 7 9", "得点 9 8 7 6 5 4 3 2 1 0"]) {
+    add("negative:spaced-digits", n, [], [n]);
+  }
 
   return cases;
 }
