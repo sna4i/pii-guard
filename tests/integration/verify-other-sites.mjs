@@ -37,7 +37,7 @@ const SITES = {
   },
   gemini: {
     url: "https://gemini.google.com/app",
-    host: /^gemini\.google\.com$/,
+    host: /^(gemini|accounts)\.google\.com$/, // ログインは accounts.google.com で行う
     login: /^https:\/\/accounts\.google\.com\//,
     editor: 'rich-textarea [contenteditable="true"], .ql-editor[contenteditable="true"], [contenteditable="true"][role="textbox"]',
   },
@@ -70,9 +70,10 @@ async function visibleEditor(page, site) {
   } catch (_) { return null; } // 画面遷移中
 }
 
-// そのサイトのタブを探す (無ければブラウザ側で開く: Playwright の newPage は切断時に閉じるので使わない)
+// そのサイトのタブを探す (無ければブラウザ側で開く: Playwright の newPage は切断時に閉じるので使わない)。
+// ホスト名だけで選ぶ (ログイン画面の URL の形は他サイトと同じことがあるので、それでは選ばない)。
 async function findOrOpen(browser, ctx, site) {
-  const mine = () => ctx.pages().filter((p) => site.host.test(hostOf(p.url())) || site.login.test(p.url()));
+  const mine = () => ctx.pages().filter((p) => site.host.test(hostOf(p.url())));
   if (!mine().length) {
     const bs = await browser.newBrowserCDPSession();
     await bs.send("Target.createTarget", { url: site.url });
@@ -94,7 +95,7 @@ async function waitLoggedIn(mine, site) {
       if (editor) return { page: p, editor, waitedSec: Math.round((Date.now() - start) / 1000) };
     }
     // ログイン画面ではないのに入力欄が無い (トップページ等) が続いたら、一度だけ入力欄のページへ移る
-    const off = mine().find((p) => !site.login.test(p.url()) && site.host.test(hostOf(p.url())));
+    const off = mine().find((p) => !site.login.test(p.url()));
     if (off && !navigated) {
       notLoginSince = notLoginSince || Date.now();
       if (Date.now() - notLoginSince > 10000) { navigated = true; await off.goto(site.url, { waitUntil: "domcontentloaded", timeout: 45000 }).catch(() => {}); }
