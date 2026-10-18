@@ -56,11 +56,28 @@
   //
   // map[i] is the original index that normalised character i came from;
   // one trailing sentinel lets a half-open end offset map back too.
+  //
+  // 加えて 2 つの揺れを正規化テキスト側だけで吸収する (元テキストは変えない):
+  //  - 見えない文字 (ゼロ幅スペース・ゼロ幅非結合子/結合子・単語結合子・BOM・
+  //    ソフトハイフン)。Web・PDF・チャットからのコピペで「090​1234​5678」のように
+  //    数字や名前の間に紛れ込み、すべてのパターンをすり抜けていた。正規化テキスト
+  //    からは落とし、map で元の座標を保つので、マスク範囲は見えない文字ごと覆う。
+  //  - 数字に挟まれたハイフン類 (IME の「ー」、‐ ‑ ‒ – — ― − ﹣)。NFKC が「-」に寄せる
+  //    のは全角の「－」だけなので、「090ー1234ー5678」を電話番号として拾えなかった。
+  //    数字の間に限って「-」に揃える (カタカナ語の「ゲーム」の「ー」は触らない)。
+  // どちらも含まない普通の文では norm === text のままで、照合は従来の高速パスを通る。
+  const INVISIBLE_RE = /[­​-‍⁠﻿]/;
+  const DIGIT_DASH_RE = /^[ー‐-―−﹣]$/;
+  function nextIsDigit(text, j) {
+    while (j < text.length && INVISIBLE_RE.test(text[j])) j++;
+    return j < text.length && /^[0-9]/.test(text[j].normalize("NFKC"));
+  }
   function nfkcWithMap(text) {
     let norm = "";
     const map = [];
     let i = 0;
     while (i < text.length) {
+      if (INVISIBLE_RE.test(text[i])) { i += 1; continue; } // 落とす (map に載せない)
       let consumed = 1;
       let n = text[i].normalize("NFKC");
       if (i + 1 < text.length) {
@@ -69,6 +86,7 @@
         const pair = (text[i] + text[i + 1]).normalize("NFKC");
         if (pair.length === 1) { n = pair; consumed = 2; }
       }
+      if (DIGIT_DASH_RE.test(n) && /[0-9]$/.test(norm) && nextIsDigit(text, i + consumed)) n = "-";
       for (let k = 0; k < n.length; k++) map.push(i);
       norm += n;
       i += consumed;
