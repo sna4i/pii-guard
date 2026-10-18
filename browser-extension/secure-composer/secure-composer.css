@@ -1,0 +1,41 @@
+/* secure-composer.css — ネイティブ入力欄に重ねる保護入力欄。背景は透明にして、下の
+   ネイティブ入力欄の見た目 (角丸・枠) をそのまま見せる。文字の見た目は content script が
+   ネイティブ入力欄から測って CSS 変数で渡す (secure-composer.js の applyTheme)。 */
+:root {
+  --sc-font: inherit;
+  --sc-size: 16px;
+  --sc-line: 24px;
+  --sc-color: #0d0d0d;
+  --sc-caret: #0d0d0d;
+  --sc-pad-y: 0px;
+  --sc-pad-x: 0px;
+  --sc-placeholder: #8e8ea0;
+}
+html, body { margin: 0; padding: 0; height: 100%; }
+/* ネイティブ入力欄の「文字を打つ領域」だけに重ねる。枠・ボタンはこの外なので見えたまま。
+   下のネイティブ入力欄の文字が透けないよう、入力面の色 (content script が測って渡す) で覆う。 */
+html { background: var(--sc-surface, transparent); }
+body { overflow: hidden; background: transparent; }
+#editor {
+  box-sizing: border-box;
+  display: block;
+  width: 100%;
+  min-height: var(--sc-line);
+  max-height: 45vh;
+  margin: 0;
+  padding: var(--sc-pad-y) var(--sc-pad-x);
+  border: 0;
+  outline: none;
+  resize: none;
+  background: transparent;
+  color: var(--sc-color);
+  caret-color: var(--sc-caret);
+  font: var(--sc-size) / var(--sc-line) var(--sc-font);
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+}
+#editor::placeholder { color: var(--sc-placeholder); opacity: 1; }
+/* マスク失敗で送信を止めた/保護できないときだけ小さく出す。通常時は何も出さない (spec 10.4)。 */
+#status { display: none; font: 12px/1.4 var(--sc-font); color: #b84a00; padding: 2px var(--sc-pad-x); }
+:root[data-state="MASKING_FAILED"] #status,
+:root[data-state="BLOCKED"] #status { display: block; }

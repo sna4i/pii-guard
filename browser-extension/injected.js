@@ -445,7 +445,7 @@
         aggResp._llmStatus = "failed";
         return aggResp;
       }
-      LOG(`llm detect: querying ${cfg.kind} model="${cfg.model || "(default)"}"`);
+      LOG(`llm detect: querying local model (mode=${cfg.mode})`);
       // No showLoading() here — the sidebar's centered overlay is now
       // the sole LLM progress indicator when regex found ≥1 entity and
       // we opened the sidebar in parallel. For the zero-regex path

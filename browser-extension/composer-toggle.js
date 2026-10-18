@@ -89,6 +89,11 @@
   //  - 位置と状態の data 属性は、テスト用のフラグが保存されているときだけ出す
   const E2E_FLAG = "__pii_guard_e2e";
   let exposeForTests = false;
+  // Secure Composer が入力を受け持つホスト (ChatGPT) で SC が有効なときは、下書きは
+  // iframe 側にある。composer-toggle はネイティブ入力欄の下書き走査・警告を SC に譲り、
+  // ピル (オン/オフ) と背景色だけを担う (二重処理の衝突を避ける)。
+  const SC_HOST = /(^|\.)(chatgpt\.com|openai\.com)$/.test(location.hostname);
+  let scActive = false;
   const IOV2 = typeof IntersectionObserver === "function" && typeof IntersectionObserverEntry !== "undefined" &&
     "isVisible" in IntersectionObserverEntry.prototype;
   const visibility = new WeakMap();
@@ -608,6 +613,7 @@
   function applyStored(stored) {
     const prevEnabled = state.enabled;
     let tintChanged = false;
+    if ("secureComposerEnabled" in stored) scActive = SC_HOST && stored.secureComposerEnabled !== false;
     if ("enabled" in stored) state.enabled = stored.enabled !== false;
     if ("chatTint" in stored) {
       const next = T.normalizeTint(stored.chatTint);
@@ -625,15 +631,17 @@
     applyTint(tintChanged);
     if (!state.enabled && (prevEnabled !== state.enabled || "maskAllowlist" in stored || "maskForceList" in stored)) scheduleScan(0);
   }
-  chrome.storage.local.get(["enabled", "maskAllowlist", "maskForceList", "chatTint", E2E_FLAG]).then((s) => {
+  chrome.storage.local.get(["enabled", "maskAllowlist", "maskForceList", "chatTint", "secureComposerEnabled", E2E_FLAG]).then((s) => {
     exposeForTests = s[E2E_FLAG] === true;
+    // 既定: SC ホストでは secureComposerEnabled 未設定を true 扱い (SC は既定で有効)。
+    scActive = SC_HOST && s.secureComposerEnabled !== false;
     applyStored(s);
   }).catch(() => {});
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== "local") return;
     if (E2E_FLAG in changes) { exposeForTests = changes[E2E_FLAG].newValue === true; exportLayout(); exportPersistLayout(); }
     const stored = {};
-    for (const k of ["enabled", "maskAllowlist", "maskForceList", "chatTint"]) if (k in changes) stored[k] = changes[k].newValue;
+    for (const k of ["enabled", "maskAllowlist", "maskForceList", "chatTint", "secureComposerEnabled"]) if (k in changes) stored[k] = changes[k].newValue;
     if (Object.keys(stored).length) applyStored(stored);
   });
 
@@ -644,6 +652,9 @@
   }
   async function scan() {
     if (state.enabled || !state.el) return;
+    // Secure Composer が有効なホストでは、下書きは iframe 側。ネイティブ入力欄を走査しても
+    // 空なので警告は出さない (SC が入力隔離を担う)。
+    if (scActive) { if (state.summary.count) { state.summary = { count: 0, items: [] }; render(); } return; }
     const engine = NS.engine;
     if (!engine || typeof engine.maskAggregated !== "function" || engine.ready === false) { scheduleScan(1000); return; }
     const text = readText(state.el);

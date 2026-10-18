@@ -74,6 +74,68 @@ async function relayToOffscreen(payload) {
   return chrome.runtime.sendMessage({ target: "offscreen", ...payload });
 }
 
+// --- Secure Composer のペアリング・バス ------------------------------------
+// iframe (拡張オリジン) と content script (ページの ISOLATED world) を、ページから
+// 偽装できない形でつなぐ。両者は chrome.runtime.connect で SW につなぎ、SW が同じ
+// タブのポートをペアにして中継する。secure-composer/privacy-boundary.js と対。
+//
+// 検証 (threat-model INV-3):
+//   - port.sender.id === chrome.runtime.id (自分の拡張のポートだけ)
+//   - role "sc-iframe" は sender.url が拡張の secure-composer ページであること
+//   - ペアは tabId 単位。別タブ・別オリジンのポートは混ぜない
+const SC_IFRAME_PREFIX = chrome.runtime.getURL("secure-composer/secure-composer.html");
+/** tabId -> { iframe?: Port, content?: Port } */
+const scPairs = new Map();
+
+function scPeerOf(tabId, role) {
+  const pair = scPairs.get(tabId);
+  if (!pair) return null;
+  return role === "sc-iframe" ? pair.content : pair.iframe;
+}
+
+function scNotifyReady(tabId) {
+  const pair = scPairs.get(tabId);
+  if (pair && pair.iframe && pair.content) {
+    try { pair.iframe.postMessage({ __sc: "peer-ready" }); } catch (_) {}
+    try { pair.content.postMessage({ __sc: "peer-ready" }); } catch (_) {}
+  }
+}
+
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== "sc-iframe" && port.name !== "sc-content") return;
+  const sender = port.sender || {};
+  // 自分の拡張のポートだけ受ける。
+  if (sender.id && sender.id !== chrome.runtime.id) { try { port.disconnect(); } catch (_) {} return; }
+  const tabId = sender.tab && sender.tab.id;
+  if (typeof tabId !== "number") { try { port.disconnect(); } catch (_) {} return; }
+  // iframe 側は拡張の secure-composer ページであることを必須にする。
+  if (port.name === "sc-iframe" && !(typeof sender.url === "string" && sender.url.startsWith(SC_IFRAME_PREFIX))) {
+    try { port.disconnect(); } catch (_) {} return;
+  }
+  const role = port.name;
+  const slot = role === "sc-iframe" ? "iframe" : "content";
+  let pair = scPairs.get(tabId);
+  if (!pair) { pair = {}; scPairs.set(tabId, pair); }
+  // 同じ役割の古いポートがあれば捨てる (タブ内の作り直し)。
+  if (pair[slot]) { try { pair[slot].disconnect(); } catch (_) {} }
+  pair[slot] = port;
+
+  port.onMessage.addListener((msg) => {
+    if (msg && msg.__sc === "hello") { scNotifyReady(tabId); return; }
+    const peer = scPeerOf(tabId, role);
+    if (peer) { try { peer.postMessage(msg); } catch (_) {} }
+  });
+  port.onDisconnect.addListener(() => {
+    const p = scPairs.get(tabId);
+    if (!p) return;
+    if (p[slot] === port) p[slot] = null;
+    const peer = role === "sc-iframe" ? p.content : p.iframe;
+    if (peer) { try { peer.postMessage({ __sc: "peer-gone" }); } catch (_) {} }
+    if (!p.iframe && !p.content) scPairs.delete(tabId);
+  });
+  scNotifyReady(tabId);
+});
+
 const BADGE_BG_OK = "#2166cc";
 const BADGE_BG_WARN = "#b84a00";
 
@@ -202,6 +264,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         });
         return;
       }
+      // [SECURITY] パスも固定許可にする。推論の 2 経路以外 (モデル取り込み /api/pull、
+      // 削除 /api/delete 等) を叩かせない。content.js も保存値から URL を組むが、SW でも
+      // 二重に縛る (多層防御, V-04)。
+      const ALLOWED_LLM_PATHS = new Set(["/api/chat", "/v1/chat/completions"]);
+      if (!ALLOWED_LLM_PATHS.has(requested.pathname)) {
+        sendResponse({ ok: false, error: `forbidden: path not allowed (${requested.pathname})` });
+        return;
+      }
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs || 120000);
       try {
@@ -270,4 +340,9 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   tabCounts.delete(tabId);
+  const pair = scPairs.get(tabId);
+  if (pair) {
+    for (const p of [pair.iframe, pair.content]) { if (p) { try { p.disconnect(); } catch (_) {} } }
+    scPairs.delete(tabId);
+  }
 });

@@ -156,9 +156,15 @@
     let maskForceList = [];
     let enabled = true;
     let mlEnabled = false;
+    // [SECURITY] Secure Composer が入力を受け持つホスト (ChatGPT) では、マスキングは
+    // iframe (拡張オリジン) が chrome.storage を直接読んで行う。除外リスト・常に伏せる語
+    // といった機密を MAIN world に配ると、ページ JS が読める (V-02)。そこで、このホストでは
+    // 機密リストを MAIN world へ送らない。他プロバイダの従来経路は MAIN world エンジンが
+    // これらを必要とするため従来どおり (docs/security にて残存リスクとして明記)。
+    const secureComposerHost = /(^|\.)(chatgpt\.com|openai\.com)$/.test(location.hostname);
     try {
       const stored = await chrome.storage.local.get([
-        "interactive", "uiMode", "maskAllowlist", "maskForceList", "mlEnabled", "enabled",
+        "interactive", "uiMode", "maskAllowlist", "maskForceList", "mlEnabled", "enabled", "secureComposerEnabled",
       ]);
       if (typeof stored.mlEnabled === "boolean") mlEnabled = stored.mlEnabled;
       interactive = stored.interactive !== false;
@@ -166,10 +172,11 @@
         uiMode = stored.uiMode;
       }
       enabled = stored.enabled !== false;
-      if (Array.isArray(stored.maskAllowlist)) {
+      const secretsStayLocal = secureComposerHost && stored.secureComposerEnabled !== false;
+      if (!secretsStayLocal && Array.isArray(stored.maskAllowlist)) {
         maskAllowlist = stored.maskAllowlist.filter((v) => typeof v === "string");
       }
-      if (Array.isArray(stored.maskForceList)) {
+      if (!secretsStayLocal && Array.isArray(stored.maskForceList)) {
         // サイドバー drop で追加された user force-mask list。
         // 各 entry は { value: string, category: string } の最小形式。
         // 互換: 古い文字列配列はカテゴリなし (OTHER) で読み込む。
@@ -198,7 +205,7 @@
   try {
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area !== "local") return;
-      if ("interactive" in changes || "uiMode" in changes || "maskAllowlist" in changes || "maskForceList" in changes || "mlEnabled" in changes || "enabled" in changes) {
+      if ("interactive" in changes || "uiMode" in changes || "maskAllowlist" in changes || "maskForceList" in changes || "mlEnabled" in changes || "enabled" in changes || "secureComposerEnabled" in changes) {
         broadcastSettings();
       }
     });
@@ -420,15 +427,14 @@
   // `config: null` and handleLlmCall short-circuits.
   async function handleLlmConfig(data) {
     const { id } = data;
+    // [SECURITY] MAIN world (= ページが読める) には機密を出さない。LLM の URL・モデル・
+    // 種別は isolated world と SW だけが持つ。ページには「有効か」「モード」「タイムアウト」
+    // という非機密の表示用の値だけ返す。実際の URL/モデルは handleLlmCall が chrome.storage
+    // から組み立てる (V-03 の解消, threat-model INV-4)。
     let cfg = null;
     try {
       const stored = await chrome.storage.local.get([
-        "localLlmEnabled",
-        "localLlmUrl",
-        "localLlmModel",
-        "localLlmMode",
-        "localLlmKind",
-        "localLlmTimeoutMs",
+        "localLlmEnabled", "localLlmUrl", "localLlmMode", "localLlmTimeoutMs",
       ]);
       if (
         stored.localLlmEnabled === true &&
@@ -436,10 +442,7 @@
         stored.localLlmUrl
       ) {
         cfg = {
-          url: stored.localLlmUrl.replace(/\/+$/, ""),
-          model: stored.localLlmModel || "",
           mode: stored.localLlmMode === "replace" ? "replace" : "detect",
-          kind: stored.localLlmKind === "openai-compat" ? "openai-compat" : "ollama",
           timeoutMs: Number(stored.localLlmTimeoutMs) || 120000,
         };
       }
@@ -451,8 +454,25 @@
   }
 
   async function handleLlmCall(data) {
-    const { id, system, user, config } = data;
+    const { id, system, user } = data;
     let result = null;
+    // [SECURITY] ページが渡してきた config は信用しない。URL・パス・モデル・種別は
+    // すべて chrome.storage の保存値から組み立てる。これで偽装した llm-call に任意の
+    // パス (/api/pull など) やモデルを叩かせない (V-04 の解消, threat-model INV-3)。
+    let config = null;
+    try {
+      const stored = await chrome.storage.local.get([
+        "localLlmEnabled", "localLlmUrl", "localLlmModel", "localLlmKind", "localLlmTimeoutMs",
+      ]);
+      if (stored.localLlmEnabled === true && typeof stored.localLlmUrl === "string" && stored.localLlmUrl) {
+        config = {
+          url: stored.localLlmUrl.replace(/\/+$/, ""),
+          model: stored.localLlmModel || "",
+          kind: stored.localLlmKind === "openai-compat" ? "openai-compat" : "ollama",
+          timeoutMs: Number(stored.localLlmTimeoutMs) || 120000,
+        };
+      }
+    } catch (_) { config = null; }
     if (!config || !config.url) {
       window.postMessage({ source: TAG_OUT, id, type: "llm-call-result", result: null }, "*");
       return;

@@ -187,7 +187,9 @@ try {
   const sw = ctx.serviceWorkers()[0] || (await ctx.waitForEvent("serviceworker", { timeout: 25000 }));
   await sw.evaluate(async () => { for (let i = 0; i < 100; i++) { const s = await chrome.storage.local.get(["enabled"]); if (typeof s.enabled === "boolean") return; await new Promise((r) => setTimeout(r, 100)); } });
   // 閉じた Shadow DOM の中の位置と状態は、このフラグがあるときだけホストの data 属性に出る (ページには出さない)
-  await sw.evaluate(() => chrome.storage.local.set({ __pii_guard_e2e: true }));
+  // このテストは composer-toggle 単体 (ネイティブ入力欄の下書き走査・警告) を検証するので、
+  // Secure Composer は無効にする。SC が入力を受け持つ経路は tests/e2e/ と tests/redteam/ で検証する。
+  await sw.evaluate(() => chrome.storage.local.set({ __pii_guard_e2e: true, secureComposerEnabled: false }));
   const errs = [];
   const logs = [];
   const p = await ctx.newPage();
