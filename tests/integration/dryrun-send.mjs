@@ -1,7 +1,7 @@
 // tests/integration/dryrun-send.mjs — 実サイトの「送信」を、ブラウザの外に出さずに試す (手動実行)。
 //
 // 使い方: 拡張を読み込んだ Chrome を --remote-debugging-port=<port> で起動し、対象サイトにログインしてから
-//   node tests/integration/dryrun-send.mjs <claude|gemini|manus> [--port=9333] [--attach=<file>] [--no-send]
+//   node tests/integration/dryrun-send.mjs <claude|gemini|manus> [--port=9333] [--attach=<file>] [--drop=<file>] [--paste=<file>] [--no-send] [--save-bodies=<dir>]
 //
 // 何をするか:
 //   入力欄に架空の個人情報とカナリアを打ち、Enter で送る。サイトが出そうとした通信を全部その場で止め、
@@ -40,6 +40,8 @@ const opt = (name, dflt) => { const a = args.find((x) => x.startsWith(`--${name}
 const flag = (name) => args.includes(`--${name}`);
 const port = opt("port", "9333");
 const attach = opt("attach", "");
+const dropFile = opt("drop", ""); // 入力欄の上に実ファイルを落とす (CDP の Input.dispatchDragEvent)
+const pasteFile = opt("paste", ""); // 入力欄にファイルを貼り付ける (ページで ClipboardEvent を作る。拡張は本物と同じに扱う)
 const noSend = flag("no-send");
 const saveDir = opt("save-bodies", ""); // 止めた本文のうちカナリアを含むものを生のまま保存する (手元の解析用。架空の値だけ)
 
@@ -61,8 +63,9 @@ const CANARY = "PIIGUARDDRYRUN" + Date.now().toString(36).toUpperCase();
 const PHONE = "090-1234-5678";
 const EMAIL = "taro.yamada@example.test";
 // 添付のテスト用ファイルは名前と中身に PIIGUARDFILE を入れる (それを含む通信も外に出さない)
-const NEEDLES = [CANARY, PHONE, EMAIL, "09012345678", "PIIGUARDFILE"];
-const NAMES = ["canary", "phone", "email", "phone-digits", "file-canary"];
+const FAKE_NAME = "山田太郎"; // 添付のファイル名・中身に入れる架空の氏名
+const NEEDLES = [CANARY, PHONE, EMAIL, "09012345678", "PIIGUARDFILE", FAKE_NAME];
+const NAMES = ["canary", "phone", "email", "phone-digits", "file-canary", "name"];
 const DRAFT = `${CANARY} 電話 ${PHONE} メール ${EMAIL}`;
 
 // ---- 1. ページ側の止め具 (拡張のフックより下に入る) -------------------------------------
@@ -206,15 +209,15 @@ function analyzeEntry(e) {
     via: e.via, mode: e.mode, method: e.method,
     to: (() => { try { const u = new URL(e.url, SITES[site].home); return u.host + u.pathname.slice(0, 90); } catch (_) { return String(e.url).slice(0, 100); } })(),
     body: e.body ? e.body.type : "pending", bytes: e.body && e.body.b64 ? Buffer.from(e.body.b64, "base64").length : e.body && e.body.text ? e.body.text.length : 0,
-    canary: !!(found.canary || found["file-canary"]), rawPhone: !!(found.phone || found["phone-digits"]), rawEmail: !!found.email, placeholders,
+    canary: !!(found.canary || found["file-canary"]), rawPhone: !!(found.phone || found["phone-digits"]), rawEmail: !!found.email, rawName: !!found.name, placeholders,
   };
   if (row.canary || row.rawPhone || row.rawEmail) {
     const j = texts.find((t) => /^[[{]/.test(t.trim()));
     if (j) row.where = NEEDLES.map((_, i) => ({ n: NAMES[i], p: keyPathsOf(j, i) })).filter((x) => x.p.length).map((x) => `${x.n}: ${x.p.join(" | ")}`);
     if (e.body && e.body.parts) row.fileNames = e.body.parts.filter((p) => p.file).map((p) => p.file);
   }
-  row.verdict = row.canary || row.rawPhone || row.rawEmail
-    ? (row.rawPhone || row.rawEmail ? "LEAK: 生の個人情報が残っている" : "masked: 個人情報は伏せ字")
+  row.verdict = row.canary || row.rawPhone || row.rawEmail || row.rawName
+    ? (row.rawPhone || row.rawEmail || row.rawName ? "LEAK: 生の個人情報が残っている" : "masked: 個人情報は伏せ字")
     : "unrelated";
   return row;
 }
@@ -249,7 +252,8 @@ async function startNetGuard(wsUrl, pageTargetId, hostRe) {
     if (!body && Array.isArray(request.postDataEntries)) body = request.postDataEntries.map((e) => Buffer.from(e.bytes || "", "base64").toString("latin1")).join("");
     const block = hasNeedle(request.url) || (write && (mode === "strict" || hasNeedle(body)));
     if (block) {
-      blocked.push({ t: Date.now(), mode, method, url: request.url, bytes: body.length, canary: hasNeedle(body) || hasNeedle(request.url) });
+      const rawPii = [PHONE, EMAIL, "09012345678", FAKE_NAME].some((n) => body.includes(n) || Buffer.from(body, "latin1").toString("utf8").includes(n) || request.url.includes(encodeURIComponent(n)));
+      blocked.push({ t: Date.now(), mode, method, url: request.url, bytes: body.length, canary: hasNeedle(body) || hasNeedle(request.url), rawPii, placeholders: /<[A-Z_]+_\d+>/.test(body) });
       await send("Fetch.failRequest", { requestId, errorReason: "BlockedByClient" }, m.sessionId);
     } else {
       await send("Fetch.continueRequest", { requestId }, m.sessionId);
@@ -356,7 +360,7 @@ try {
   out.extLog = [];
   page.on("console", (m) => {
     const t = m.text();
-    if (/egress guard:|substituted masked|masked an attachment|manus-ws: substituted/.test(t)) out.extLog.push(t.replace(/^\[pii-guard\]\s*/, "").slice(0, 160));
+    if (/egress guard:|substituted masked|masked an attachment|manus-ws: substituted|attachment-guard:/.test(t)) out.extLog.push(t.replace(/^\[pii-guard\]\s*/, "").slice(0, 160));
   });
   net = await startNetGuard(webSocketDebuggerUrl, pageTarget.id, S.host);
   recorder = await startCdpRecorder(webSocketDebuggerUrl);
@@ -385,6 +389,28 @@ try {
 
   const ed = page.locator(S.editor).filter({ visible: true }).first();
   await ed.waitFor({ timeout: 15000 });
+  if (dropFile) {
+    const pt = await ed.evaluate((el) => { const r = el.getBoundingClientRect(); return { x: Math.round(r.left + r.width / 2), y: Math.round(r.top + r.height / 2) }; });
+    const cdp = await page.context().newCDPSession(page);
+    const data = { items: [], files: [dropFile], dragOperationsMask: 1 };
+    for (const type of ["dragEnter", "dragOver", "dragOver", "drop"]) { await cdp.send("Input.dispatchDragEvent", { type, x: pt.x, y: pt.y, data }); await sleep(150); }
+    await cdp.detach().catch(() => {});
+    step(`ドロップ: ${path.basename(dropFile)} を入力欄に落とした`);
+    await sleep(7000);
+    out.chipsHint = await page.evaluate(() => document.body.innerText.includes("連絡先"));
+  }
+  if (pasteFile) {
+    const content = fs.readFileSync(pasteFile, "utf8");
+    await ed.evaluate((el, { name, content }) => {
+      const dt = new DataTransfer();
+      dt.items.add(new File([content], name, { type: "text/plain" }));
+      el.focus();
+      el.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: dt }));
+    }, { name: path.basename(pasteFile), content });
+    step(`貼り付け: ${path.basename(pasteFile)} を入力欄に貼った`);
+    await sleep(7000);
+    out.pasteHint = await page.evaluate(() => document.body.innerText.includes("連絡先"));
+  }
   if (attach) {
     const how = await attachVia(page, ed, attach);
     step(how ? `添付: ${path.basename(attach)} (${how})` : "添付: 入口が見つからない (スキップ)");
@@ -418,7 +444,7 @@ try {
       r.saved = f;
     });
   }
-  out.netBlocked = net.blocked.map((b) => ({ mode: b.mode, method: b.method, to: (() => { try { const u = new URL(b.url); return u.host + u.pathname.slice(0, 80); } catch (_) { return ""; } })(), canary: b.canary }));
+  out.netBlocked = net.blocked.map((b) => ({ mode: b.mode, method: b.method, to: (() => { try { const u = new URL(b.url); return u.host + u.pathname.slice(0, 80); } catch (_) { return ""; } })(), canary: b.canary, rawPii: b.rawPii, placeholders: b.placeholders, bytes: b.bytes }));
   await page.goto(S.home, { waitUntil: "domcontentloaded", timeout: 45000 }).catch(() => {});
   await sleep(8000);
   // 下書きが復元されていたら消す (架空の値でも、残しておくと後で誤って送られうる)

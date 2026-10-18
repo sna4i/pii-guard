@@ -429,8 +429,9 @@
     state.enabled && scActive && !state.interactive &&
     state.scMaskNotice.count > 0 && (Date.now() - state.scMaskNotice.at) < SC_NOTICE_MS;
   // F-SC-08: 添付を止めた / マスクせずに通した (マスキング OFF) / 確認 OFF でマスクした、のどれか。
+  // 添付ガードは ChatGPT 以外 (Claude/Gemini/Manus) でも動くので、SC の有無に関係なく出す (F-EG-05)
   const attachWarning = () =>
-    scActive && (Date.now() - state.attachNotice.at) < SC_NOTICE_MS &&
+    (Date.now() - state.attachNotice.at) < SC_NOTICE_MS &&
     (state.attachNotice.blocked > 0 || state.attachNotice.unmasked > 0 ||
       (state.attachNotice.masked > 0 && !state.interactive));
   function attachMsg(n) {
@@ -707,7 +708,7 @@
     const blocked = Array.isArray(d.blocked) ? d.blocked.length : 0;
     const unmasked = Array.isArray(d.unmasked) ? d.unmasked.length : 0;
     const reason = typeof d.reason === "string" ? d.reason : "";
-    if (!scActive || (masked <= 0 && blocked <= 0 && unmasked <= 0)) return;
+    if (masked <= 0 && blocked <= 0 && unmasked <= 0) return;
     state.attachNotice = { masked, blocked, unmasked, reason, at: Date.now() };
     render();
     if (blocked > 0 || unmasked > 0 || !state.interactive) notice(attachMsg(state.attachNotice));

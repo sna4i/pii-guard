@@ -1574,6 +1574,52 @@
     }, 0);
   }
 
+  // --- ページにつながっていない file input (F-EG-05) --------------------------
+  // 添付ガード (ISOLATED world の attachment-guard.js) は window の capture で change を受ける。
+  // 作ってすぐ click する file input はページにつながっておらず、change が window に届かない。
+  // click / showPicker の前に、見えない箱に入れてページへつなぐ (ページから見た動きは変わらない)。
+  (function connectDetachedFileInputs() {
+    let box = null;
+    const connect = (el) => {
+      try {
+        if (el.type !== "file" || el.isConnected) return;
+        if (!box || !box.isConnected) {
+          box = document.createElement("div");
+          box.setAttribute("data-pii-guard", "file-inputs");
+          box.style.display = "none";
+          (document.body || document.documentElement).appendChild(box);
+        }
+        box.appendChild(el);
+      } catch (_) {}
+    };
+    const origClick = HTMLInputElement.prototype.click;
+    HTMLInputElement.prototype.click = function () { connect(this); return origClick.apply(this, arguments); };
+    const origPicker = HTMLInputElement.prototype.showPicker;
+    if (typeof origPicker === "function") {
+      HTMLInputElement.prototype.showPicker = function () { connect(this); return origPicker.apply(this, arguments); };
+    }
+  })();
+
+  // --- 投げ直した drop のファイルを、フォルダ対応の API でも読めるようにする (F-EG-05) -------
+  // 添付ガードは、ページに渡す前にマスクした File を載せた drop を投げ直す (渡し先の input が無い
+  // サイト)。スクリプトで作った DataTransfer の項目は webkitGetAsEntry() が null を返すので、それで
+  // ファイルを数えるサイト (Gemini、2026-10-18 実測) は添付を捨てる。本物が null を返すファイル項目に
+  // だけ、その File を返す最小のエントリを返す (OS からの本物のドロップは本物のエントリのまま)。
+  if (typeof DataTransferItem !== "undefined" && typeof DataTransferItem.prototype.webkitGetAsEntry === "function") {
+    const origGetAsEntry = DataTransferItem.prototype.webkitGetAsEntry;
+    DataTransferItem.prototype.webkitGetAsEntry = function () {
+      const real = origGetAsEntry.apply(this, arguments);
+      if (real || this.kind !== "file") return real;
+      const file = this.getAsFile();
+      if (!file) return null;
+      return {
+        isFile: true, isDirectory: false, name: file.name, fullPath: "/" + file.name, filesystem: null,
+        file(success, error) { try { success(file); } catch (e) { if (typeof error === "function") error(e); } },
+        getParent(success) { if (typeof success === "function") success(null); },
+      };
+    };
+  }
+
   // --- fetch hook --------------------------------------------------------
 
   const originalFetch = window.fetch.bind(window);

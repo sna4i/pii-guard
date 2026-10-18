@@ -222,6 +222,14 @@
       log("drop-received", { count: files.length });
       uploadFiles(files, "drop-upload");
     });
+    // 貼り付け (実物を模す): 貼られたファイルはそのまま添付してアップロードする (F-EG-05)
+    document.addEventListener("paste", (e) => {
+      const files = Array.from((e.clipboardData && e.clipboardData.files) || []);
+      if (!files.length) return;
+      e.preventDefault();
+      log("paste-received", { count: files.length, text: (e.clipboardData.getData("text/plain") || "").length });
+      uploadFiles(files, "paste-upload");
+    });
   })();
 
   function addMessage(role, text, extra) {
