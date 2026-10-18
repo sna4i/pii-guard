@@ -27,8 +27,12 @@ async function readActivePort(userDataDir, timeoutMs = 15000) {
   throw new Error("DevToolsActivePort not found");
 }
 
-export async function startCdpRecorder(userDataDir) {
-  const url = await readActivePort(userDataDir);
+/**
+ * @param {string} userDataDirOrWsUrl テスト用プロファイルのパス (DevToolsActivePort を読む)、
+ *   または既に動いているブラウザの DevTools WebSocket URL (ws://...、/json/version の webSocketDebuggerUrl)
+ */
+export async function startCdpRecorder(userDataDirOrWsUrl) {
+  const url = /^wss?:\/\//.test(userDataDirOrWsUrl) ? userDataDirOrWsUrl : await readActivePort(userDataDirOrWsUrl);
   const ws = new WebSocket(url);
   await new Promise((resolve, reject) => { ws.onopen = resolve; ws.onerror = reject; });
   let nextId = 0;
