@@ -55,8 +55,9 @@
 - **F-SC-11 (fail-open 修正)**: ✅ 実装・検証済 (本 PR)。`scOwnsComposer` を overlay の live 連動に。機密の非配布 (V-02) は設定連動で常時。RT-LIVE-01/02/03, RT-STAND-01, RT-RETRY-01, RT-PM-01〜05 で確認。
 - **F-SC-09 (再試行)**: ✅ F-SC-11 で根治。RT-RETRY-01 で確認。
 - **F-SC-10 (マスク済み通知の黄色ピル)**: ✅ 実装・検証済。RT-PILL-01/02。
-- **F-SC-08 (未マスク添付の警告)**: ⏳ 実装予定。添付チップ検出 → ピル黄色 (F-SC-10 の仕組みを流用)。
-- **F-SC-07 (明示添付のマスク差し替え)**: ⏳ 実装予定。経路は確定 (1.0 節)。file input/drop をフックしテキストをマスクした File に差し替える。モックに file-upload を足して検証 or 実環境で確認。
+- **F-SC-07 (明示添付のマスク差し替え)**: ✅ 実装・モック検証済 (`attachments/attachment-guard.js`)。file input の change を capture で横取りし、テキスト系はマスク済み File に差し替えて投げ直す。drop も対応。AT-01 で「アップロードされる中身がマスク済み」を確認。
+- **F-SC-08 (未マスク添付の警告)**: ✅ 実装・モック検証済。バイナリ/巨大/マスク失敗は fail-closed でブロックし、`mask-mcp:attachment` でピルを黄色に。AT-02 で確認。
+- 実環境 (ログイン後) 確認: 未了。chrome.runtime.reload() で CLI 読み込みの拡張が Chrome に無効化されたため (再起動が要る。ログインはプロファイルに保持)。
 
 ## 5. テスト観点
 - T: SC 有効時、ネイティブ送信を injected.js が二重処理しない (サイドバーが二重に出ない)。

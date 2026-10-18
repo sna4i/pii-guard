@@ -57,7 +57,8 @@
         "composer-toggle.js",
         "secure-composer/composer-state.js",
         "secure-composer/privacy-boundary.js",
-        "adapters/chatgpt-composer-adapter.js"
+        "adapters/chatgpt-composer-adapter.js",
+        "attachments/attachment-guard.js"
       ],
       "run_at": "document_start"
     }

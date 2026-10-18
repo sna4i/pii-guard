@@ -169,6 +169,29 @@
     }
   }
 
+  // 添付 (実物の ChatGPT を模す): file input → 中身を読んでサーバへ PUT 相当で送る。
+  // attachment-guard が change を横取りしてマスク済み File に差し替えていれば、ここで読む
+  // 中身はマスク済みになる (実物も input.files を読んでアップロードする)。
+  (function setupAttach() {
+    const inp = document.createElement("input");
+    inp.type = "file";
+    inp.id = "mock-file";
+    inp.multiple = true;
+    inp.setAttribute("data-testid", "file-input");
+    inp.style.cssText = "position:fixed;bottom:4px;left:4px;opacity:0.01;width:40px";
+    document.body.appendChild(inp);
+    inp.addEventListener("change", async () => {
+      const files = Array.from(inp.files || []);
+      for (const f of files) {
+        let text = "";
+        try { text = await f.text(); } catch (_) {}
+        log("attach-upload", { name: f.name, bytes: f.size });
+        // 実物の presigned PUT 相当: 中身をサーバに送る (テストが受信内容を検査する)
+        try { await fetch("/backend-api/files/content", { method: "POST", headers: { "content-type": "text/plain" }, body: text }); } catch (_) {}
+      }
+    });
+  })();
+
   function addMessage(role, text, extra) {
     const thread = document.getElementById("thread");
     const div = document.createElement("div");

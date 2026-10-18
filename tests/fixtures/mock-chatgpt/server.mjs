@@ -135,6 +135,7 @@ export async function startMockChatGPT(opts = {}) {
         if (mode.conversationDelayMs > 0) setTimeout(finish, mode.conversationDelayMs); else finish();
         return;
       }
+      if (p === "/backend-api/files/content") { rec.kind = "files-content"; return send(200, "application/json", '{"ok":true}'); }
       if (p.startsWith("/ces/") || p.startsWith("/backend-api/events")) { rec.kind = "telemetry"; return send(204, "text/plain", ""); }
       if (p.startsWith("/cdn/")) return send(200, "image/svg+xml", "<svg xmlns='http://www.w3.org/2000/svg'/>");
       return send(404, "text/plain", "not found");
