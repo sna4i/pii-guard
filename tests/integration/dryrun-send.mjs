@@ -42,7 +42,10 @@ const port = opt("port", "9333");
 const attach = opt("attach", "");
 const dropFile = opt("drop", ""); // 入力欄の上に実ファイルを落とす (CDP の Input.dispatchDragEvent)
 const pasteFile = opt("paste", "");
-const extra = opt("extra", ""); // 下書きに足す語 (例: テスト用の「常に伏せる語」)。これも外に出さない目印にする // 入力欄にファイルを貼り付ける (ページで ClipboardEvent を作る。拡張は本物と同じに扱う)
+const extra = opt("extra", ""); // 下書きに足す語 (例: テスト用の「常に伏せる語」)。これも外に出さない目印にする
+// --interactive: 利用者の既定どおり確認画面 (サイドバー / ChatGPT は入力欄の確認バー) を出し、
+// 「マスクして送信」を押して進める。付けなければ確認画面を一時的に切る (自動マスク)。
+const interactive = flag("interactive"); // 入力欄にファイルを貼り付ける (ページで ClipboardEvent を作る。拡張は本物と同じに扱う)
 const noSend = flag("no-send");
 const saveDir = opt("save-bodies", ""); // 止めた本文のうちカナリアを含むものを生のまま保存する (手元の解析用。架空の値だけ)
 
@@ -56,9 +59,13 @@ const SITES = {
     probe: { url: `/_/BardChatUi/data/assistant.lamda.BardFrontendService/StreamGenerate?${PROBE_MARK}`, body: (t) => ({ contents: [{ role: "user", parts: [{ text: t }] }] }) } },
   manus: { home: "https://manus.im/app", host: /(^|\.)manus\.im$/, editor: 'div.ProseMirror[contenteditable="true"], textarea, [contenteditable="true"]',
     probe: { url: `/api/chat/message?${PROBE_MARK}`, body: (t) => ({ content: t }) } },
+  // ChatGPT は Secure Composer (拡張オリジンの iframe) に打って送る。ページの JS のアダプタは使わない
+  // ので、止め具の順番はテスト送信で確かめられない。送信の本文は CDP の段 (全フックを通った後の、
+  // 実際に出ていく形) で受け取って調べる。
+  chatgpt: { home: "https://chatgpt.com/", host: /(^|\.)chatgpt\.com$/, editor: '#prompt-textarea, div.ProseMirror[contenteditable="true"]', secureComposer: true },
 };
 const S = SITES[site];
-if (!S) { console.error("usage: node tests/integration/dryrun-send.mjs <claude|gemini|manus> [--port=9333] [--attach=<file>] [--no-send]"); process.exit(2); }
+if (!S) { console.error("usage: node tests/integration/dryrun-send.mjs <claude|gemini|manus|chatgpt> [--port=9333] [--interactive] [--attach=<file>] [--no-send]"); process.exit(2); }
 
 const CANARY = "PIIGUARDDRYRUN" + Date.now().toString(36).toUpperCase();
 const PHONE = "090-1234-5678";
@@ -254,7 +261,7 @@ async function startNetGuard(wsUrl, pageTargetId, hostRe) {
     const block = hasNeedle(request.url) || (write && (mode === "strict" || hasNeedle(body)));
     if (block) {
       const rawPii = [PHONE, EMAIL, "09012345678", FAKE_NAME].some((n) => body.includes(n) || Buffer.from(body, "latin1").toString("utf8").includes(n) || request.url.includes(encodeURIComponent(n)));
-      blocked.push({ t: Date.now(), mode, method, url: request.url, bytes: body.length, canary: hasNeedle(body) || hasNeedle(request.url), rawPii, placeholders: /<[A-Z_]+_\d+>/.test(body) });
+      blocked.push({ t: Date.now(), mode, method, url: request.url, bytes: body.length, canary: hasNeedle(body) || hasNeedle(request.url), rawPii, placeholders: /<[A-Z_]+_\d+>/.test(body), body: body.slice(0, 1 << 20) });
       await send("Fetch.failRequest", { requestId, errorReason: "BlockedByClient" }, m.sessionId);
     } else {
       await send("Fetch.continueRequest", { requestId }, m.sessionId);
@@ -339,7 +346,9 @@ async function attachVia(page, ed, file) {
 
 // ---- 本体 ---------------------------------------------------------------------------
 const out = { site, canary: CANARY, steps: [] };
-const step = (s) => { out.steps.push(s); };
+const T0 = Date.now();
+// 進み具合は標準エラーへ (止まった場所が分かるように)。標準出力は最後の JSON だけ
+const step = (s) => { out.steps.push(s); console.error(`[${((Date.now() - T0) / 1000).toFixed(1)}s] ${s}`); };
 const browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
 let saved = null;
 let net = null;
@@ -348,14 +357,17 @@ try {
   const ctx = browser.contexts()[0];
   const page = ctx.pages().find((p) => { try { return S.host.test(new URL(p.url()).hostname); } catch (_) { return false; } });
   if (!page) throw new Error(`${site} のタブが無い`);
+  page.setDefaultTimeout(15000); // 既定の無制限待ちで止まらないように
   const { webSocketDebuggerUrl } = await fetch(`http://127.0.0.1:${port}/json/version`).then((r) => r.json());
   const targets = await fetch(`http://127.0.0.1:${port}/json`).then((r) => r.json());
   const pageTarget = targets.find((t) => t.type === "page" && t.url === page.url()) || targets.find((t) => t.type === "page" && S.host.test(new URL(t.url).hostname));
 
   // 設定: 確認画面を切る (自動マスク)。元の値を覚えて最後に戻す
-  saved = await extEval(`chrome.storage.local.get(["interactive"]).then((s) => ({ had: "interactive" in s, v: s.interactive }))`);
-  await extEval(`chrome.storage.local.set({ interactive: false }).then(() => true)`);
-  step("設定: 確認画面を一時的に OFF");
+  if (!interactive) {
+    saved = await extEval(`chrome.storage.local.get(["interactive"]).then((s) => ({ had: "interactive" in s, v: s.interactive }))`);
+    await extEval(`chrome.storage.local.set({ interactive: false }).then(() => true)`);
+    step("設定: 確認画面を一時的に OFF");
+  } else step("設定: 確認画面はそのまま (利用者の既定)");
 
   // 拡張自身の判定 (伏せた・止めた・差し替えた) のログも集める (値は含まない)
   out.extLog = [];
@@ -371,7 +383,14 @@ try {
 
   // 順番の検査: 拡張のアダプタが拾う形の送信を fetch と XHR で 1 回ずつ流す (strict で止める)。
   // 止め具に届いた本文がマスク済み = 拡張のフックが上、止め具が下。
-  const order = await page.evaluate(async ({ probe, phone }) => {
+  // 確認画面が有効だとテスト送信にもサイドバーが開いて待ち続けるので、テスト送信の間だけ切る。
+  let probeSaved = null;
+  if (interactive && !S.secureComposer) {
+    probeSaved = await extEval(`chrome.storage.local.get(["interactive"]).then((s) => ({ had: "interactive" in s, v: s.interactive }))`);
+    await extEval(`chrome.storage.local.set({ interactive: false }).then(() => true)`);
+    await sleep(1500);
+  }
+  const order = await Promise.race([page.evaluate(async ({ probe, phone }) => {
     const names = { fetch: window.fetch.name, xhr: XMLHttpRequest.prototype.send.name, ws: WebSocket.prototype.send.name, beacon: navigator.sendBeacon && navigator.sendBeacon.name };
     if (!window.__dryRun) return { names, installed: false };
     window.__dryRun.setMode("strict");
@@ -382,11 +401,21 @@ try {
     window.__dryRun.setMode("needle");
     const got = window.__dryRun.log.filter((e) => /__pii_guard_dryrun_probe=1/.test(e.url)).map((e) => ({ via: e.via, text: e.body && typeof e.body.text === "string" ? e.body.text : null }));
     return { names, installed: true, probes: got.map((g) => ({ via: g.via, reached: true, masked: g.text !== null && !g.text.includes(phone) && /<[A-Z_]+_\d+>/.test(g.text) })) };
-  }, { probe: { url: S.probe.url, body: S.probe.body(`PIIGUARDPROBE 電話 ${PHONE}`) }, phone: PHONE });
+  }, { probe: S.probe ? { url: S.probe.url, body: S.probe.body(`PIIGUARDPROBE 電話 ${PHONE}`) } : { url: "/__pii_guard_dryrun_probe?__pii_guard_dryrun_probe=1", body: { x: 1 } }, phone: PHONE }),
+    sleep(20000).then(() => ({ installed: false, timeout: true }))]);
+  if (probeSaved) {
+    await extEval(probeSaved.had ? `chrome.storage.local.set({ interactive: ${JSON.stringify(probeSaved.v)} }).then(() => true)` : `chrome.storage.local.remove("interactive").then(() => true)`);
+    await sleep(1500);
+  }
   out.hookOrder = order;
   const viaOk = (v) => (order.probes || []).some((p) => p.via === v && p.reached && p.masked);
-  if (!order.installed || !viaOk("fetch") || !viaOk("xhr")) throw new Error("止め具が拡張のフックの下に入っていない (または拡張がマスクしない)。中止: " + JSON.stringify(order));
-  step("止め具: 拡張のフックの下に入ったことを確認 (fetch / XHR のテスト送信がマスク済みで届いた)");
+  if (S.secureComposer) {
+    if (!order.installed) throw new Error("止め具が入っていない。中止");
+    step("止め具: ページ側の止め具あり (ChatGPT は CDP の段の本文で判定)");
+  } else {
+    if (!order.installed || !viaOk("fetch") || !viaOk("xhr")) throw new Error("止め具が拡張のフックの下に入っていない (または拡張がマスクしない)。中止: " + JSON.stringify(order));
+    step("止め具: 拡張のフックの下に入ったことを確認 (fetch / XHR のテスト送信がマスク済みで届いた)");
+  }
 
   const ed = page.locator(S.editor).filter({ visible: true }).first();
   await ed.waitFor({ timeout: 15000 });
@@ -417,16 +446,68 @@ try {
     step(how ? `添付: ${path.basename(attach)} (${how})` : "添付: 入口が見つからない (スキップ)");
     await sleep(7000);
   }
-  // 読み込み直後のアニメーション等でクリックできないことがあるので、だめなら直接フォーカスする
-  await ed.click({ timeout: 15000 }).catch(async () => { await ed.evaluate((el) => el.focus()); });
-  await ed.pressSequentially(DRAFT, { delay: 20 });
-  await sleep(2500);
-  if (!noSend) {
-    await page.evaluate(() => window.__dryRun.setMode("strict"));
-    net.setMode("strict");
-    step("送信: strict モードで Enter");
-    await page.keyboard.press("Enter");
-    await sleep(9000);
+  const strict = async () => { await page.evaluate(() => window.__dryRun.setMode("strict")); net.setMode("strict"); };
+  if (S.secureComposer) {
+    // 保護入力欄 (iframe) に打つ。確認バーが出たら、strict にしてから「マスキングして送信」を押す
+    let frame = null;
+    for (let i = 0; i < 60 && !frame; i++) { frame = page.frames().find((f) => /\/secure-composer\/secure-composer\.html/.test(f.url())); if (!frame) await sleep(250); }
+    if (!frame) throw new Error("保護入力欄 (Secure Composer) の iframe が無い");
+    const ta = frame.locator("textarea");
+    await ta.waitFor({ timeout: 10000 });
+    out.scState = await frame.evaluate(() => document.documentElement.dataset.state);
+    await ta.click();
+    await ta.pressSequentially(DRAFT, { delay: 20 });
+    await sleep(2500);
+    if (!noSend) {
+      await strict();
+      step("送信: strict モードで保護入力欄から Enter");
+      await ta.press("Enter");
+      const shown = await frame.waitForSelector('#confirm[data-show="1"]', { timeout: 6000 }).then(() => true).catch(() => false);
+      out.confirmShown = shown;
+      if (shown) { await frame.locator("#confirm-send").click(); step("確認バー: 「マスキングして送信」を押した"); }
+      await sleep(9000);
+    }
+  } else {
+    // 読み込み直後のアニメーション等でクリックできないことがあるので、だめなら直接フォーカスする
+    await ed.click({ timeout: 15000 }).catch(async () => { await ed.evaluate((el) => el.focus()); });
+    await ed.pressSequentially(DRAFT, { delay: 20 });
+    await sleep(2500);
+    if (!noSend) {
+      await strict();
+      step("送信: strict モードで Enter");
+      await page.keyboard.press("Enter");
+      if (interactive) {
+        // 確認用のサイドバー (開いた shadow root) の「マスクして送信」を押す。
+        // 普通のクリック → 強制クリック → ボタンにフォーカスして Enter の順に試す
+        const btn = page.getByRole("button", { name: /選択したものをマスクして送信/ });
+        const shown = await btn.waitFor({ timeout: 15000 }).then(() => true).catch(() => false);
+        out.sidebarShown = shown;
+        // 押せたかは「サイドバーが閉じたか」でなく「目印入りの送信が止め具に届いたか」で見る
+        // (止め具で送信が失敗すると、サイトが送り直してサイドバーがまた開くため)
+        const sent = () => page.evaluate((canary) => window.__dryRun.log.some((e) => {
+          const b = e.body || {};
+          if (typeof b.text === "string" && b.text.includes(canary)) return true;
+          if (b.b64) { try { return atob(b.b64).includes(canary); } catch (_) { return false; } }
+          return false;
+        }), CANARY).catch(() => false);
+        const open = async () => !(await sent());
+        if (shown) {
+          await sleep(800);
+          const tries = [
+            ["click", () => btn.click({ timeout: 5000 })],
+            ["force-click", () => btn.click({ timeout: 5000, force: true })],
+            ["focus+Enter", async () => { await btn.focus({ timeout: 5000 }); await page.keyboard.press("Enter"); }],
+          ];
+          for (const [name, fn] of tries) {
+            await fn().catch((e) => step(`サイドバー: ${name} 失敗 (${String(e.message).split("\n")[0].slice(0, 80)})`));
+            await sleep(1200);
+            if (!(await open())) { step(`サイドバー: 「選択したものをマスクして送信」を押した (${name})`); out.sidebarAccepted = name; break; }
+          }
+          if (!out.sidebarAccepted) step("サイドバー: 押せなかった");
+        }
+      }
+      await sleep(9000);
+    }
   }
   // 記録を回収してから needle モードに戻し、読み直して再送を見張る
   const log = await page.evaluate(() => window.__dryRun.log.map((e) => ({ ...e })));
@@ -446,7 +527,11 @@ try {
     });
   }
   out.netBlocked = net.blocked.map((b) => ({ mode: b.mode, method: b.method, to: (() => { try { const u = new URL(b.url); return u.host + u.pathname.slice(0, 80); } catch (_) { return ""; } })(), canary: b.canary, rawPii: b.rawPii, placeholders: b.placeholders, bytes: b.bytes }));
-  await page.goto(S.home, { waitUntil: "domcontentloaded", timeout: 45000 }).catch(() => {});
+  // CDP の段で止めた本文も同じ方法で調べる (全フックを通った後の、実際に出ていく形)
+  out.netRows = net.blocked.map((b) => analyzeEntry({ via: "net", mode: b.mode, method: b.method, url: b.url, body: { type: "bytes", b64: Buffer.from(b.body || "", "latin1").toString("base64") } }))
+    .filter((r) => r.verdict !== "unrelated");
+  step("後片付け: needle に戻して読み直す");
+  await page.goto(S.home, { waitUntil: "commit", timeout: 20000 }).catch((e) => step("読み直し失敗: " + String(e.message).split("\n")[0].slice(0, 80)));
   await sleep(8000);
   // 下書きが復元されていたら消す (架空の値でも、残しておくと後で誤って送られうる)
   const restored = await page.evaluate(({ sel, canary }) => [...document.querySelectorAll(sel)].some((el) => ((el.value ?? el.innerText) || "").includes(canary)), { sel: S.editor, canary: CANARY }).catch(() => false);
@@ -458,6 +543,16 @@ try {
     await sleep(2000);
   }
   out.draftRestoredAfterReload = restored;
+  if (S.secureComposer) {
+    // ChatGPT の元の入力欄 (保護入力欄の下) に、伏せ字にした本文が残っていれば消す
+    const left = await page.evaluate((canary) => {
+      const ed = document.querySelector("#prompt-textarea");
+      if (!ed || !(ed.innerText || "").includes(canary)) return false;
+      ed.focus(); document.execCommand("selectAll"); document.execCommand("delete");
+      return true;
+    }, CANARY).catch(() => false);
+    out.nativeDraftCleared = left;
+  }
   const late = await page.evaluate(() => (window.__dryRun ? window.__dryRun.log.map((e) => ({ via: e.via, url: e.url })) : [])).catch(() => []);
   out.afterReloadBlocked = late.length;
   // 外に出た通信にカナリア・生の値が 1 つでもあれば失敗 (止め具の穴)
