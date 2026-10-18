@@ -136,10 +136,12 @@
   for (const f of ENGINE_FILES) injectScript(f);
   injectScript("review-modal.js");
   injectScript("sidebar.js");
+  // 原文の持ち出しガード (F-EG-01〜04)。injected.js が使うので先に読む
+  injectScript("security/egress-guard.js");
   injectScript("injected.js");
   console.debug(
     "[pii-guard] injected",
-    ENGINE_FILES.length + 3,
+    ENGINE_FILES.length + 4,
     "scripts (engine + ui + hook)"
   );
 
@@ -242,6 +244,17 @@
     // the API ever throws at boot.
   }
 
+  // F-EG-03: このサイトで前に覚えた持ち出しガードの記憶を、起動時に SW から取っておく
+  const egressRestore = new Promise((resolve) => {
+    try {
+      chrome.runtime.sendMessage({ type: "EGRESS_RESTORE" }, (resp) => {
+        void chrome.runtime.lastError;
+        resolve(resp && resp.ok ? resp : { values: [], drafts: [] });
+      });
+    } catch (_) { resolve({ values: [], drafts: [] }); }
+    setTimeout(() => resolve({ values: [], drafts: [] }), 1500);
+  });
+
   // 2) Handle page-world requests.
   window.addEventListener("message", (event) => {
     if (event.source !== window) return;
@@ -259,6 +272,25 @@
       } else {
         console.warn(`[pii-guard] ${data.type} ignored: the confirmation UI is not available`);
       }
+      return;
+    }
+
+    // F-EG-03: 持ち出しガードの記憶の保存と復元 (SW の chrome.storage.session、サイトごと)。
+    // ページからも送れるメッセージだが、SW は送り手のタブのサイトの記憶しか触らせない。
+    if (data.type === "egress-remember") {
+      try {
+        chrome.runtime.sendMessage({
+          type: "EGRESS_REMEMBER",
+          values: Array.isArray(data.values) ? data.values.slice(0, 200) : [],
+          drafts: Array.isArray(data.drafts) ? data.drafts.slice(0, 20) : [],
+        });
+      } catch (_) { /* SW が眠っていても致命的ではない */ }
+      return;
+    }
+    if (data.type === "egress-restore-request") {
+      egressRestore.then((r) => {
+        window.postMessage({ source: TAG_OUT, type: "egress-restore", values: r.values || [], drafts: r.drafts || [] }, "*");
+      });
       return;
     }
 

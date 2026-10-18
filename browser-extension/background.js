@@ -185,6 +185,8 @@ chrome.runtime.onInstalled.addListener(async () => {
   }
 });
 
+const EGRESS_TTL_MS = 30 * 60 * 1000; // 持ち出しガードの記憶を残す時間 (F-EG-03)
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || typeof message.type !== "string") {
     return false;
@@ -201,6 +203,42 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       updateBadge(tabId, next);
     }
     sendResponse({ ok: true });
+    return true;
+  }
+
+  // F-EG-03: 持ち出しガードの記憶 (検出した値・下書き) をサイトごとに覚える。読み直しの後に
+  // 解析ツールが保存しておいたイベントを送り直しても、まだ止められるように。置き場所は
+  // chrome.storage.session (メモリだけ・ブラウザを閉じると消える)、30 分で忘れる。どのサイトの
+  // 記憶かは送り手のタブの URL で決める (ページは自分のサイトの記憶しか読み書きできない)。
+  if (message.type === "EGRESS_REMEMBER" || message.type === "EGRESS_RESTORE") {
+    (async () => {
+      let host = "";
+      try { host = new URL(sender.url || (sender.tab && sender.tab.url) || "").hostname; } catch (_) {}
+      if (!host || !sender.tab || sender.id !== chrome.runtime.id || !chrome.storage.session) { sendResponse({ ok: false }); return; }
+      const key = "egress:" + host;
+      const now = Date.now();
+      const got = (await chrome.storage.session.get(key))[key] || {};
+      const fresh = (arr) => (Array.isArray(arr) ? arr : []).filter((x) => x && now - x.t < EGRESS_TTL_MS);
+      let values = fresh(got.values);
+      let drafts = fresh(got.drafts);
+      if (message.type === "EGRESS_REMEMBER") {
+        for (const v of (Array.isArray(message.values) ? message.values : []).slice(0, 200)) {
+          if (!v || typeof v.v !== "string" || !v.v || v.v.length > 500) continue;
+          values = values.filter((x) => x.v !== v.v);
+          values.push({ v: v.v, label: String(v.label || "PII").slice(0, 40), t: now });
+        }
+        for (const d of (Array.isArray(message.drafts) ? message.drafts : []).slice(0, 20)) {
+          if (typeof d !== "string" || !d.trim()) continue;
+          const text = d.slice(0, 4000);
+          drafts = drafts.filter((x) => x.text !== text && !text.startsWith(x.text));
+          drafts.push({ text, t: now });
+        }
+        await chrome.storage.session.set({ [key]: { values: values.slice(-300), drafts: drafts.slice(-20) } });
+        sendResponse({ ok: true });
+      } else {
+        sendResponse({ ok: true, values: values.map(({ v, label }) => ({ v, label })), drafts: drafts.map((d) => d.text) });
+      }
+    })().catch(() => { try { sendResponse({ ok: false }); } catch (_) {} });
     return true;
   }
 

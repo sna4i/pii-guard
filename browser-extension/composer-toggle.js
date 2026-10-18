@@ -715,6 +715,15 @@
     attachNoticeTimer = setTimeout(() => { state.attachNotice = { masked: 0, blocked: 0, unmasked: 0, reason: "", at: 0 }; render(); }, SC_NOTICE_MS);
   });
 
+  // F-EG-03/04: 原文の持ち出しガード (MAIN world の injected.js) が通信を止めた・伏せたとき。
+  // detail は JSON 文字列 (MAIN world のオブジェクトはこの world から読めないため)。
+  window.addEventListener("mask-mcp:egress", (ev) => {
+    let d = {};
+    try { d = JSON.parse(String((ev && ev.detail) || "{}")); } catch (_) { d = {}; }
+    if (d.action === "block") notice("個人情報を含む通信を止めました");
+    else if (d.action === "scrub") notice("通信の中の個人情報を伏せ字にしました");
+  });
+
   // ---- オフ時の検出 -----------------------------------------------------------
   function scheduleScan(delay) {
     clearTimeout(debounceTimer);

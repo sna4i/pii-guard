@@ -88,6 +88,7 @@
         "vendor/transformers/ort-wasm-simd-threaded.jsep.mjs",
         "vendor/transformers/ort-wasm-simd-threaded.jsep.wasm",
         "security/leak-detector.js",
+        "security/egress-guard.js",
         "secure-composer/secure-composer.html",
         "secure-composer/secure-composer.css",
         "secure-composer/composer-state.js",
