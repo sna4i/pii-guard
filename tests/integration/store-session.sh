@@ -23,7 +23,10 @@ case "${1:-status}" in
   start)
     if port_up; then echo "既に起動中 (port $PORT)"; exit 0; fi
     mkdir -p "$PROFILE"
+    # 新しいプロフィールでは初回起動の画面がデバッグ用ポートを開くのを止める (2026-10-19 確認) ので、
+    # --no-first-run と --no-default-browser-check を付ける。
     setsid /opt/google/chrome/chrome --user-data-dir="$PROFILE" --remote-debugging-port=$PORT \
+      --no-first-run --no-default-browser-check \
       --disable-blink-features=AutomationControlled "$URL" >/dev/null 2>&1 < /dev/null &
     disown
     for _ in $(seq 1 20); do port_up && break; sleep 1; done
