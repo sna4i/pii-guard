@@ -86,6 +86,8 @@
     DRIVERS_LICENSE: "credential",
     PASSPORT: "credential",
     CREDIT_CARD: "credential",
+    SECURITY_CODE: "credential",
+    CARD_EXPIRY: "credential",
     BANK_ACCOUNT: "credential",
     // ---- attribute ------------------------------------------------------
     AGE: "attribute",

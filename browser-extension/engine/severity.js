@@ -10,6 +10,8 @@
     PASSPORT: "critical",
     DRIVERS_LICENSE: "critical",
     CREDIT_CARD: "critical",
+    SECURITY_CODE: "critical",
+    CARD_EXPIRY: "high",
     BANK_ACCOUNT: "critical",
     API_KEY: "critical",
     SECRET: "critical",
