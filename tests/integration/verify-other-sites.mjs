@@ -5,8 +5,9 @@
 // - 開いたタブは閉じない (ログインが要るなら、そのタブで利用者がログインできる)。
 // - --wait-login を付けると、ログイン画面のあいだは指定秒数までログインを待ってから確認する
 //   (待つあいだは画面に触らない)。
-// - 送信はしない。入力欄に架空の個人情報を 1 行打ち、打ち終わり + フォーカスを外したあとの
-//   数秒間に、ブラウザから出ようとした通信を調べる。対象は全タブ・iframe・Worker・Service Worker の
+// - 送信はしない。入力欄に架空の個人情報を 1 行打ち、打ち終わり・フォーカスを外したあと・
+//   下書きの入った入力欄をクリックしたあと (クリックした要素の文字を拾う自動計測がある。
+//   2026-10-18 に Manus の Amplitude で実測) の数秒間に、ブラウザから出ようとした通信を調べる。対象は全タブ・iframe・Worker・Service Worker の
 //   リクエスト (URL/ヘッダー/本文) と WebSocket の送信フレーム (tests/fixtures/cdp-recorder.mjs)。
 //   打った値とその変換形 (全角・URL エンコード・JSON エスケープ・Base64) を
 //   browser-extension/security/leak-detector.js で探す。最後に下書きを消す。
@@ -162,8 +163,10 @@ try {
       await page.evaluate(() => { if (document.activeElement) document.activeElement.blur(); }).catch(() => {});
       await sleep(4000);                                      // フォーカスを外したときの保存も見る
       if (shotsDir) { r.shot = path.join(shotsDir, `${name}-typed.png`); await page.screenshot({ path: r.shot }).catch(() => { r.shot = null; }); }
-      // 下書きを消す (送らない)
+      // 下書きの入った入力欄をクリックする (編集で普通に起きる操作)。クリック計測の送信を待つ
       await ed.click({ timeout: 5000 }).catch(() => {});
+      await sleep(4000);
+      // 下書きを消す (送らない)
       await page.keyboard.press("Control+A").catch(() => {});
       await page.keyboard.press("Delete").catch(() => {});
       await sleep(3000);
