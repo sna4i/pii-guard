@@ -4,6 +4,18 @@
 
 ## 1. 調査結果 (実測 + 構造分析)
 
+### 1.0 添付ファイルのアップロード経路 (実測, ログイン後 chatgpt.com, 2026-10-18 追記)
+開いていたログイン済みセッション (CDP 9333) で、架空のカナリア .txt を file input にセットして観測 (送信なし):
+```
+1. POST https://chatgpt.com/backend-api/files                   (JSON: ファイル名/サイズ/MIME → presigned URL 取得)
+2. PUT  https://*.oaiusercontent.com/files/<uuid>/raw            ← ★中身を Azure Blob へ直接 PUT (Content-Type: text/plain)
+3. POST https://chatgpt.com/backend-api/files/process_upload_stream  (確定)
+```
+- **ファイルの中身は chatgpt.com ではなく別オリジン (`*.oaiusercontent.com`) への presigned PUT で出る**。Secure Composer も既存の injected.js マスクも通らず、**中身は素通り (未マスク)** を確認。
+- ただし PUT を発行するのは chatgpt.com 側の JS なので、**MAIN world の fetch/XHR フック (injected.js) からはこの PUT が見える** → 横取りの足がかりになる。
+- `POST /backend-api/files` のメタデータに**ファイル名**が入る (ファイル名自体の PII も二次的に対象)。
+- Secure Composer の overlay はログイン後も入力欄を **100% 被覆・SECURE_READY** で、タイプ/ペーストは保護されている (別途実測)。つまり素通りするのは**明示添付の中身**。
+
 ### 1.1 長文ペースト → テキストファイル化 (実測, ログインなし chatgpt.com)
 - 拡張なしで本物の chatgpt.com (ログインなし) に、実クリップボード + Ctrl+V で 500〜20,000 字を貼った。
 - **結果: どのサイズでも入力欄に全文が残り (kept = 貼った文字数)、ファイルチップもアップロード通信も発生しなかった。**
@@ -36,13 +48,15 @@
 ## 3. 設計方針
 - **F-SC-11**: injected.js に「このタブで SC が ChatGPT を担っているか」を知らせる。content.js が `secureComposerEnabled` と host から判定し、MAIN world へ非機密フラグ `scOwnsComposer` を配る。injected.js の `pickAdapter` は、ChatGPT かつ `scOwnsComposer` のとき chatgpt アダプタを返さない (素通し)。他プロバイダ・SC 無効時は従来どおり。
 - **F-SC-08/10**: composer-toggle (ピル) が、(i) composer 内の添付チップ (未マスク) の有無、(ii) SC からの「マスク/未マスク件数」を受けて、黄色+内訳を出す。SC → content/pill への件数通知を SW ペアリング・バスに追加。
-- **F-SC-07 (明示添付)**: 添付アップロード (fetch/XHR の FormData/Blob、presigned PUT) を横取りし、**テキスト系 (txt/md/csv/json/log) は読んでマスクして差し替え**、それ以外は F-SC-08 で警告 or ブロック。ログイン後の実アップロード経路の実測が前提。
+- **F-SC-07 (明示添付, 経路確定済)**: 「先にマスクしてからファイル化」= **ファイル選択の時点で横取り**するのが正道。`HTMLInputElement`(type=file) の `files` 設定と drag&drop を MAIN world でフックし、テキスト系 (txt/md/csv/json/log) は `File.text()` を読んでマスク→**マスク済み内容で新しい File を作って差し替え**る。こうすれば後段の `POST /backend-api/files` のサイズ/SHA も最初からマスク後の値になり整合する (PUT の本文だけ書き換えるとサイズ不一致で壊れる恐れ)。バイナリ (画像/PDF 等) はマスク不能なので F-SC-08 で警告 or ブロック。ファイル名も必要ならマスク。
+  - 対象オリジン: フックは chatgpt.com (発行元) の MAIN world で足りる。`*.oaiusercontent.com` への PUT 自体を横取りするのは**サイズ不整合のリスクがあるため避ける** (入力時に差し替える方が安全)。
 
 ## 4. 実装状況
-- F-SC-11: 実装・検証予定 (本 PR)
-- F-SC-08/10: 実装・検証予定 (本 PR)
-- F-SC-09: F-SC-11 で根治、モックで検証予定
-- F-SC-07 (明示添付のマスク/差し替え): ログイン後の実測待ち (6 章)
+- **F-SC-11 (fail-open 修正)**: ✅ 実装・検証済 (本 PR)。`scOwnsComposer` を overlay の live 連動に。機密の非配布 (V-02) は設定連動で常時。RT-LIVE-01/02/03, RT-STAND-01, RT-RETRY-01, RT-PM-01〜05 で確認。
+- **F-SC-09 (再試行)**: ✅ F-SC-11 で根治。RT-RETRY-01 で確認。
+- **F-SC-10 (マスク済み通知の黄色ピル)**: ✅ 実装・検証済。RT-PILL-01/02。
+- **F-SC-08 (未マスク添付の警告)**: ⏳ 実装予定。添付チップ検出 → ピル黄色 (F-SC-10 の仕組みを流用)。
+- **F-SC-07 (明示添付のマスク差し替え)**: ⏳ 実装予定。経路は確定 (1.0 節)。file input/drop をフックしテキストをマスクした File に差し替える。モックに file-upload を足して検証 or 実環境で確認。
 
 ## 5. テスト観点
 - T: SC 有効時、ネイティブ送信を injected.js が二重処理しない (サイドバーが二重に出ない)。

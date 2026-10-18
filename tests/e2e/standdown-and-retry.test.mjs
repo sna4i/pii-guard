@@ -19,6 +19,7 @@ test("RT-STAND-01 SC 有効時に injected.js が ChatGPT 送信を二重処理�
   const page = await h.openChat("/");
   const frame = await h.waitSecureReady(page, 8000);
   assert.ok(frame, "Secure Composer 未起動");
+  await h.waitScActive(page); // overlay が live として content.js→MAIN world に伝わるまで
   await h.type(page, frame, piiText(canary));
   await h.enter(page, frame);
   await sleep(2500); // interactive で横取りされるとサイドバー待ちで送信が止まるはず

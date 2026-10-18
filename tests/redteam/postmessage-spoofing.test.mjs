@@ -37,7 +37,9 @@ async function openWithSniffer() {
   });
   await page.goto("https://chatgpt.com/", { waitUntil: "domcontentloaded" });
   await page.waitForFunction(() => window.__mock && document.querySelector("#composer-root form"));
-  await sleep(1500);
+  // fail-open 修正後、機密の非配布は overlay が live な定常状態でのみ。SC が担当になるまで待つ。
+  await h.waitScActive(page);
+  await sleep(500);
   return page;
 }
 

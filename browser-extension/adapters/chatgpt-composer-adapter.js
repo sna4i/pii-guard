@@ -20,6 +20,7 @@
   const SEND_SEL = '#composer-submit-button, [data-testid="send-button"], button[data-composer-submit], button[type="submit"][aria-label*="送信"], button[aria-label*="Send"]';
 
   let active = false;
+  let scReady = false;        // iframe が ready を報告済みか (fail-closed 判定に使う)
   let native = null;          // ネイティブ入力欄
   let host = null;            // iframe を入れる位置決めの箱 (position:fixed)
   let iframe = null;
@@ -143,11 +144,21 @@
     }
   }
 
+  // F-SC-11 (fail-open 修正): overlay が実際に生きているかを content.js に知らせる。
+  // live のときだけ injected.js が ChatGPT を素通しし、機密が MAIN world に出ない。
+  // live が取れない (ready 前・teardown・入力欄消失) 間は injected.js がマスクに戻る。
+  function reportLive(v) {
+    try {
+      const f = window.__localMaskMCP && window.__localMaskMCP.__scSetOverlayLive;
+      if (typeof f === "function") f(!!v);
+    } catch (_) {}
+  }
+
   function connectBoundary() {
     boundary = SC.boundary.connect("sc-content");
     boundary.on("commit", (payload) => doCommit(payload));
     boundary.on("resize", (p) => { if (p && typeof p.height === "number") { iframeHeight = p.height; schedulePlace(); } return true; });
-    boundary.on("ready", () => { pushTheme(); schedulePlace(); return true; });
+    boundary.on("ready", () => { scReady = true; pushTheme(); schedulePlace(); reportLive(active && !!native); return true; });
     boundary.on("state", () => true);
     // F-SC-10: SC がマスクした件数を同じ ISOLATED world の composer-toggle (ピル) へ渡す。
     boundary.on("maskinfo", (p) => {
@@ -183,7 +194,9 @@
 
   function teardownOverlay() {
     active = false;
+    scReady = false;
     if (host) host.style.display = "none";
+    reportLive(false); // overlay を外したら即 injected.js をマスクに戻す
   }
 
   // SPA の作り直し・表示変化に追従。ネイティブが差し替わったら貼り直す。
@@ -191,8 +204,10 @@
     const el = findNative();
     if (el && el !== native) { if (native) { native.removeEventListener("focusin", redirectFocus); native.removeEventListener("mousedown", onNativeDown, true); native.removeEventListener("keydown", onNativeKey, true); } active = true; attach(el); }
     else if (el && !active) { active = true; host && (host.style.display = "block"); }
-    else if (!el) { native = null; if (host) host.style.display = "none"; }
+    else if (!el) { native = null; if (host) host.style.display = "none"; reportLive(false); } // 入力欄が消えたら素通ししない
     if (active) schedulePlace();
+    // 入力欄があり iframe も ready なら live を再確認 (SPA の作り直しからの復帰)。
+    reportLive(active && scReady && !!native);
   }
 
   let enabled = true; // secureComposerEnabled

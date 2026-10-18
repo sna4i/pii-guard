@@ -149,6 +149,12 @@
   // toggle in the popup takes effect on the very next intercept.
   // ``uiMode`` defaults to ``"sidebar"`` (Milestone 8 Wave B); the
   // legacy modal experience is opt-in via the popup radio.
+  // F-SC-11 (fail-open 修正): Secure Composer の overlay が「実際に生きている」間だけ true。
+  // adapter が iframe の ready で true、teardown/blocked/入力欄消失で false にする。これが
+  // false の間は、SC 設定が ON でも injected.js は横取りを続ける (fail-closed)。既定 false =
+  // overlay が確認できるまで素通ししない。機密の非配布 (V-02) はこれとは別に「設定」で常時効く。
+  let scOverlayLive = false;
+
   async function broadcastSettings() {
     let interactive = true;
     let uiMode = "sidebar";
@@ -176,8 +182,15 @@
         uiMode = stored.uiMode;
       }
       enabled = stored.enabled !== false;
-      const secretsStayLocal = secureComposerHost && stored.secureComposerEnabled !== false;
-      scOwnsComposer = secretsStayLocal;
+      const scEnabled = secureComposerHost && stored.secureComposerEnabled !== false;
+      // 2 つを分離する:
+      //  - secretsStayLocal (V-02): 機密を MAIN world に出さないのは「設定」で決める。overlay の
+      //    生死に連動させると、起動直後 (overlay が live になる前) の配布に機密が乗ってページに
+      //    読まれてしまう。設定が ON なら常に出さない。
+      //  - scOwnsComposer (F-SC-11 fail-open 修正): injected.js を素通しさせるのは overlay が実際に
+      //    live なときだけ。overlay が無ければ injected.js がマスクに戻る (fail-closed)。
+      const secretsStayLocal = scEnabled;
+      scOwnsComposer = scEnabled && scOverlayLive;
       if (!secretsStayLocal && Array.isArray(stored.maskAllowlist)) {
         maskAllowlist = stored.maskAllowlist.filter((v) => typeof v === "string");
       }
@@ -206,6 +219,15 @@
       "*"
     );
   }
+  // adapter (同じ isolated world) が overlay の生死を知らせる口。live が変わるたびに再配布し、
+  // injected.js の scOwnsComposer と機密配布を即座に切り替える (fail-closed, F-SC-11)。
+  window.__localMaskMCP = window.__localMaskMCP || {};
+  window.__localMaskMCP.__scSetOverlayLive = (v) => {
+    const next = !!v;
+    if (next === scOverlayLive) return;
+    scOverlayLive = next;
+    broadcastSettings();
+  };
   broadcastSettings();
   try {
     chrome.storage.onChanged.addListener((changes, area) => {

@@ -158,6 +158,21 @@ export async function launch(opts = {}) {
         if (frame) await frame.locator("textarea").press("Enter");
         else await page.locator('#prompt-textarea, textarea#mobile-composer-prompt').first().press("Enter");
       },
+      // SC が「実際に overlay を担当している」(scOwnsComposer=true) まで待つ。fail-open 修正後、
+      // 機密の非配布と injected.js の素通しはこれが true の間だけ有効 (overlay が live な定常状態)。
+      async waitScActive(page, timeoutMs = 10000) {
+        try {
+          await page.waitForFunction(
+            () => { const s = window.__localMaskMCP && window.__localMaskMCP.settings; return !!(s && s.scOwnsComposer === true); },
+            null, { timeout: timeoutMs }
+          );
+          return true;
+        } catch (_) { return false; }
+      },
+      // MAIN world の scOwnsComposer を読む (fail-open 判定の観測用)。
+      async scOwns(page) {
+        return page.evaluate(() => { const s = window.__localMaskMCP && window.__localMaskMCP.settings; return !!(s && s.scOwnsComposer === true); });
+      },
       async nativeText(page) {
         return page.evaluate(() => {
           const el = document.querySelector("#prompt-textarea, textarea#mobile-composer-prompt");
