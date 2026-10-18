@@ -1333,6 +1333,8 @@
             .filter((p) => p && Number.isInteger(p[0]) && Number.isInteger(p[1]) && p[1] > p[0])
         : [],
       masked: entity.masked !== false, // default true
+      // V-02: 除外リストは MAIN world に来ない。ISOLATED world が検出結果に付けた印で判断する
+      allowlisted: entity.allowlisted === true,
       locked: false, // set by show() after force_masked_categories is read
       severity: normaliseSeverity(entity.severity),
       // Gateway-computed ``<ENTITY_TYPE_N>`` placeholder so the row
@@ -2496,7 +2498,7 @@
             row.locked = true;
             row.masked = true;
           }
-          if (allowlist.has(row.value)) {
+          if (allowlist.has(row.value) || row.allowlisted) {
             row.masked = false;
             row.locked = false;
           }
@@ -2776,6 +2778,51 @@
       // 直前の maskForceList (前回 recompute 時の snapshot)。新規追加 entry
       // を差分で検出してそこへスクロール + フラッシュするために使う。
       let previousForcelist = [];
+      let previousForceKeys = null; // V-02: 直前の「常に伏せる語」の検出 (label|value)
+
+      // V-02: 「常に伏せる語」のリストは MAIN world に来ないので、ISOLATED world が返した
+      // 「この文の中の位置」(ufmDets) で再計算する。
+      function recomputeWithDetections(ufmDets) {
+        const engine = window.__localMaskMCP && window.__localMaskMCP.engine;
+        if (!engine || typeof engine.resolveOverlaps !== "function") return;
+        const agg = engine.aggregate;
+        if (!agg || typeof agg.aggregateDetections !== "function") return;
+        if (typeof originalText !== "string" || originalText.length === 0) return;
+        const baselineDets = [];
+        for (const row of baselineAggregated) {
+          if (!row || typeof row.label !== "string" || row.label.startsWith("USER_DEFINED_")) continue;
+          for (const pos of Array.isArray(row.positions) ? row.positions : []) {
+            if (!Array.isArray(pos) || pos.length < 2) continue;
+            baselineDets.push({ entity_type: row.label, start: Number(pos[0]), end: Number(pos[1]), text: String(row.value || ""), score: 1.0, action: row.masked === false ? "allowed" : "masked" });
+          }
+        }
+        const dets = (Array.isArray(ufmDets) ? ufmDets : []).filter((d) => d && typeof d.entity_type === "string" && Number.isInteger(d.start) && Number.isInteger(d.end));
+        const nextAgg = agg.aggregateDetections(engine.resolveOverlaps(baselineDets.concat(dets)));
+        const keys = new Set(dets.map((d) => d.entity_type + "|" + d.text));
+        const prev = previousForceKeys || new Set(baselineAggregated.filter((r) => r && String(r.label).startsWith("USER_DEFINED_")).map((r) => r.label + "|" + r.value));
+        previousForceKeys = keys;
+        applyAggregated(nextAgg, { fromForcelist: true });
+        // 新しく加わった語の行へスクロールして光らせる (従来と同じ)
+        for (const k of keys) {
+          if (prev.has(k)) continue;
+          const bar = k.indexOf("|");
+          for (const r of rows) {
+            if (r.value === k.slice(bar + 1) && r.label === k.slice(0, bar)) { scrollToAndFlashRow(r.key); break; }
+          }
+        }
+      }
+      // リストが変わった合図 (listsVersion) を受けたら、ISOLATED world に再計算の材料を頼む
+      let lastListsVersion = (NS.settings && NS.settings.listsVersion) || 0;
+      async function refreshLists() {
+        if (typeof NS.requestLocal !== "function" || typeof originalText !== "string" || !originalText) return;
+        const res = await NS.requestLocal("lists", { text: originalText, values: rows.map((r) => r.value) });
+        if (!res) return;
+        const allowSet = new Set(Array.isArray(res.allowValues) ? res.allowValues : []);
+        for (const [, ctl] of rowControls) {
+          if (allowSet.has(ctl.row.value) && ctl.row.masked) ctl.setState(false);
+        }
+        recomputeWithDetections(res.forceDetections);
+      }
 
       function recomputeWithForcelist(entries) {
         const engine = window.__localMaskMCP && window.__localMaskMCP.engine;
@@ -2835,7 +2882,13 @@
       function onSettingsUpdated(event) {
         const next = event && event.detail;
         if (!next) return;
-        if (Array.isArray(next.maskAllowlist)) {
+        if (typeof next.listsVersion === "number" && next.listsVersion !== lastListsVersion) {
+          lastListsVersion = next.listsVersion;
+          refreshLists();
+        }
+        // 以前の content.js (リストの値を配っていた版) との互換。今の版は空の配列しか送らないので、
+        // 空のときは何もしない (空の「常に伏せる語」で再計算すると、その行が消えてしまう)。
+        if (Array.isArray(next.maskAllowlist) && next.maskAllowlist.length) {
           const allowSet = new Set(next.maskAllowlist);
           for (const [, ctl] of rowControls) {
             if (allowSet.has(ctl.row.value) && ctl.row.masked) {
@@ -2843,7 +2896,7 @@
             }
           }
         }
-        if (Array.isArray(next.maskForceList)) {
+        if (Array.isArray(next.maskForceList) && next.maskForceList.length) {
           // 短時間に複数 storage.onChanged が飛ぶケースに備えて
           // requestAnimationFrame で deduplicate (必要最小限の再描画)。
           if (forceListRafId) cancelAnimationFrame(forceListRafId);

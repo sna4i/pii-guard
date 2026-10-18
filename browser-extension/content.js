@@ -156,6 +156,8 @@
   // false の間は、SC 設定が ON でも injected.js は横取りを続ける (fail-closed)。既定 false =
   // overlay が確認できるまで素通ししない。機密の非配布 (V-02) はこれとは別に「設定」で常時効く。
   let scOverlayLive = false;
+  // V-02: 除外リスト・常に伏せる語が変わったことだけを MAIN world に知らせる番号 (中身からは作らない)
+  let listsVersion = 0;
 
   async function broadcastSettings() {
     let interactive = true;
@@ -168,11 +170,11 @@
     // secureComposerEnabled)。MAIN world に配る非機密フラグ。injected.js はこれが true の間、
     // ChatGPT の送信を横取りしない (SC が唯一の経路。二重確認・再試行バイパスの根治, F-SC-11)。
     let scOwnsComposer = false;
-    // [SECURITY] Secure Composer が入力を受け持つホスト (ChatGPT) では、マスキングは
-    // iframe (拡張オリジン) が chrome.storage を直接読んで行う。除外リスト・常に伏せる語
-    // といった機密を MAIN world に配ると、ページ JS が読める (V-02)。そこで、このホストでは
-    // 機密リストを MAIN world へ送らない。他プロバイダの従来経路は MAIN world エンジンが
-    // これらを必要とするため従来どおり (docs/security にて残存リスクとして明記)。
+    // [SECURITY] 除外リスト・常に伏せる語といった機密を MAIN world に配ると、ページ JS が読める
+    // (V-02)。2026-10-18 から全サイトで配らない: ページ (injected.js / sidebar.js) のマスクと
+    // 確認画面は、この ISOLATED world のエンジンに "local-mask" で頼み、渡された文についての
+    // 結果だけを受け取る (handleLocalMask)。配るのは「リストがあるか」と変わった合図だけ。
+    let hasSecretLists = false;
     const secureComposerHost = /(^|\.)(chatgpt\.com|openai\.com)$/.test(location.hostname);
     try {
       const stored = await chrome.storage.local.get([
@@ -191,23 +193,11 @@
       //    読まれてしまう。設定が ON なら常に出さない。
       //  - scOwnsComposer (F-SC-11 fail-open 修正): injected.js を素通しさせるのは overlay が実際に
       //    live なときだけ。overlay が無ければ injected.js がマスクに戻る (fail-closed)。
-      const secretsStayLocal = scEnabled;
       scOwnsComposer = scEnabled && scOverlayLive;
-      if (!secretsStayLocal && Array.isArray(stored.maskAllowlist)) {
-        maskAllowlist = stored.maskAllowlist.filter((v) => typeof v === "string");
-      }
-      if (!secretsStayLocal && Array.isArray(stored.maskForceList)) {
-        // サイドバー drop で追加された user force-mask list。
-        // 各 entry は { value: string, category: string } の最小形式。
-        // 互換: 古い文字列配列はカテゴリなし (OTHER) で読み込む。
-        maskForceList = stored.maskForceList
-          .map((e) => typeof e === "string"
-            ? { value: e, category: "OTHER" }
-            : (e && typeof e.value === "string")
-              ? { value: e.value, category: typeof e.category === "string" ? e.category : "OTHER" }
-              : null)
-          .filter(Boolean);
-      }
+      // リストの値は配らない (maskAllowlist / maskForceList は空のまま)。有無だけ知らせる:
+      // ISOLATED に頼めないときに、MAIN world のエンジン (リスト無し) で黙って続けず止めるため。
+      hasSecretLists = (Array.isArray(stored.maskAllowlist) && stored.maskAllowlist.length > 0) ||
+        (Array.isArray(stored.maskForceList) && stored.maskForceList.length > 0);
     } catch (_) {
       interactive = true;
       uiMode = "sidebar";
@@ -216,7 +206,7 @@
       {
         source: TAG_OUT,
         type: "settings",
-        settings: { interactive, uiMode, maskAllowlist, maskForceList, mlEnabled, enabled, scOwnsComposer },
+        settings: { interactive, uiMode, maskAllowlist, maskForceList, mlEnabled, enabled, scOwnsComposer, hasSecretLists, listsVersion },
       },
       "*"
     );
@@ -234,6 +224,7 @@
   try {
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area !== "local") return;
+      if ("maskAllowlist" in changes || "maskForceList" in changes) listsVersion++;
       if ("interactive" in changes || "uiMode" in changes || "maskAllowlist" in changes || "maskForceList" in changes || "mlEnabled" in changes || "enabled" in changes || "secureComposerEnabled" in changes) {
         broadcastSettings();
       }
@@ -242,6 +233,55 @@
     // ``chrome.storage`` is always available in an MV3 content
     // script; the guard exists only to avoid bricking the page if
     // the API ever throws at boot.
+  }
+
+  // ---- V-02: ページのマスクを、リスト込みでこの ISOLATED world のエンジンで行う ----------------
+  // kind: "sanitize" (maskSanitize) / "aggregated" (maskAggregated、除外リストの行に masked:false と
+  // allowlisted:true の印) / "lists" (確認画面の再計算用: 渡された値のうち除外リストにあるもの、
+  // 渡された文の中の「常に伏せる語」の位置)。返すのは渡された文についての結果だけ。
+  // ページは任意の文を投げて、ある語がリストにあるかを試せる (問い合わせによる推測)。マスクの結果は
+  // ページの通信に載るので避けられない限界。リストそのものを丸ごと読める状態よりは狭い。
+  const isoEngine = () => {
+    const e = window.__localMaskMCP && window.__localMaskMCP.engine;
+    return e && e.ready && typeof e.maskSanitize === "function" ? e : null;
+  };
+  async function waitIsoEngine(ms) {
+    const end = Date.now() + ms;
+    while (Date.now() < end && !isoEngine()) await new Promise((r) => setTimeout(r, 50));
+    return isoEngine();
+  }
+  const forceEntryOf = (e) => (typeof e === "string" ? { value: e, category: "OTHER" }
+    : e && typeof e.value === "string" ? { value: e.value, category: typeof e.category === "string" ? e.category : "OTHER" } : null);
+  async function handleLocalMask(data) {
+    const { id, kind, text } = data;
+    let result = null;
+    try {
+      if (typeof text === "string" && text.length <= 2 * 1024 * 1024) {
+        const engine = await waitIsoEngine(3000);
+        if (engine) {
+          const st = await chrome.storage.local.get(["maskAllowlist", "maskForceList", "mlEnabled"]);
+          const allow = new Set((Array.isArray(st.maskAllowlist) ? st.maskAllowlist : []).filter((v) => typeof v === "string"));
+          const force = (Array.isArray(st.maskForceList) ? st.maskForceList : []).map(forceEntryOf).filter(Boolean);
+          const opts = { userForceMaskEntries: force, mlEnabled: st.mlEnabled === true };
+          if (kind === "aggregated") {
+            result = await engine.maskAggregated(text, opts);
+            for (const row of (result && Array.isArray(result.aggregated) ? result.aggregated : [])) {
+              if (row && allow.has(row.value)) { row.masked = false; row.allowlisted = true; }
+            }
+          } else if (kind === "lists") {
+            const values = (Array.isArray(data.values) ? data.values : []).filter((v) => typeof v === "string").slice(0, 500);
+            const ufm = engine.userForceMask;
+            result = {
+              allowValues: values.filter((v) => allow.has(v)),
+              forceDetections: ufm && typeof ufm.detectUserForceMask === "function" && force.length ? ufm.detectUserForceMask(text, force) : [],
+            };
+          } else {
+            result = await engine.maskSanitize(text, opts);
+          }
+        }
+      }
+    } catch (_) { result = null; }
+    window.postMessage({ source: TAG_OUT, id, type: "local-mask-result", result }, "*");
   }
 
   // F-EG-03: このサイトで前に覚えた持ち出しガードの記憶を、起動時に SW から取っておく
@@ -304,7 +344,9 @@
 
     if (typeof data.id !== "string") return;
 
-    if (data.type === "sanitize") {
+    if (data.type === "local-mask") {
+      handleLocalMask(data);
+    } else if (data.type === "sanitize") {
       handleSanitize(data);
     } else if (data.type === "sanitize-aggregated") {
       handleSanitizeAggregated(data);

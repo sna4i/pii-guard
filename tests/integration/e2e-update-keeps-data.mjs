@@ -143,14 +143,15 @@ try {
   const page = await ctx.newPage();
   await page.goto("https://chatgpt.com/");
   await page.waitForTimeout(3500);
-  // 拡張機能はページを開いたときに設定をページ側へ送る。受け取り手のスクリプトが
-  // 読み込まれる前に送ると失われ、除外リストも常に伏せる語も効かなかった (1.5.0 まで)
+  // 2026-10-18 (V-02) から、除外リストと常に伏せる語の値はページ側 (MAIN world) に配らない。
+  // ページのマスクは ISOLATED world のエンジンに頼み、リストは「ある」ことだけ知らせる。
+  // 効いていることは、下の送信の結果 (除外は残る・常に伏せる語は伏せる) で確かめる。
   const pageSettings = await page.evaluate(() => {
     const s = (window.__localMaskMCP && window.__localMaskMCP.settings) || {};
-    return { allow: (s.maskAllowlist || []).length, force: (s.maskForceList || []).length };
+    return { allow: (s.maskAllowlist || []).length, force: (s.maskForceList || []).length, has: s.hasSecretLists === true };
   });
-  check(pageSettings.allow === IMPORTED.length && pageSettings.force === 1,
-    `ページ側に除外リストと常に伏せる語が届いている (除外 ${pageSettings.allow} 件、常に伏せる ${pageSettings.force} 件)`);
+  check(pageSettings.allow === 0 && pageSettings.force === 0 && pageSettings.has,
+    `ページ側には除外リストと常に伏せる語の値が届かず、「ある」ことだけが届く (除外 ${pageSettings.allow} 件、常に伏せる ${pageSettings.force} 件、あり=${pageSettings.has})`);
   await page.evaluate((t) => {
     fetch("/backend-api/conversation", {
       method: "POST", headers: { "content-type": "application/json" },

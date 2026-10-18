@@ -1,7 +1,7 @@
 // tests/integration/dryrun-send.mjs — 実サイトの「送信」を、ブラウザの外に出さずに試す (手動実行)。
 //
 // 使い方: 拡張を読み込んだ Chrome を --remote-debugging-port=<port> で起動し、対象サイトにログインしてから
-//   node tests/integration/dryrun-send.mjs <claude|gemini|manus> [--port=9333] [--attach=<file>] [--drop=<file>] [--paste=<file>] [--no-send] [--save-bodies=<dir>]
+//   node tests/integration/dryrun-send.mjs <claude|gemini|manus> [--port=9333] [--attach=<file>] [--drop=<file>] [--paste=<file>] [--extra=<語>] [--no-send] [--save-bodies=<dir>]
 //
 // 何をするか:
 //   入力欄に架空の個人情報とカナリアを打ち、Enter で送る。サイトが出そうとした通信を全部その場で止め、
@@ -41,7 +41,8 @@ const flag = (name) => args.includes(`--${name}`);
 const port = opt("port", "9333");
 const attach = opt("attach", "");
 const dropFile = opt("drop", ""); // 入力欄の上に実ファイルを落とす (CDP の Input.dispatchDragEvent)
-const pasteFile = opt("paste", ""); // 入力欄にファイルを貼り付ける (ページで ClipboardEvent を作る。拡張は本物と同じに扱う)
+const pasteFile = opt("paste", "");
+const extra = opt("extra", ""); // 下書きに足す語 (例: テスト用の「常に伏せる語」)。これも外に出さない目印にする // 入力欄にファイルを貼り付ける (ページで ClipboardEvent を作る。拡張は本物と同じに扱う)
 const noSend = flag("no-send");
 const saveDir = opt("save-bodies", ""); // 止めた本文のうちカナリアを含むものを生のまま保存する (手元の解析用。架空の値だけ)
 
@@ -64,9 +65,9 @@ const PHONE = "090-1234-5678";
 const EMAIL = "taro.yamada@example.test";
 // 添付のテスト用ファイルは名前と中身に PIIGUARDFILE を入れる (それを含む通信も外に出さない)
 const FAKE_NAME = "山田太郎"; // 添付のファイル名・中身に入れる架空の氏名
-const NEEDLES = [CANARY, PHONE, EMAIL, "09012345678", "PIIGUARDFILE", FAKE_NAME];
-const NAMES = ["canary", "phone", "email", "phone-digits", "file-canary", "name"];
-const DRAFT = `${CANARY} 電話 ${PHONE} メール ${EMAIL}`;
+const NEEDLES = [CANARY, PHONE, EMAIL, "09012345678", "PIIGUARDFILE", FAKE_NAME, ...(extra ? [extra] : [])];
+const NAMES = ["canary", "phone", "email", "phone-digits", "file-canary", "name", "extra"];
+const DRAFT = `${CANARY} 電話 ${PHONE} メール ${EMAIL}${extra ? ` 件名 ${extra}` : ""}`;
 
 // ---- 1. ページ側の止め具 (拡張のフックより下に入る) -------------------------------------
 const KILL_SWITCH = `(() => {
@@ -209,15 +210,15 @@ function analyzeEntry(e) {
     via: e.via, mode: e.mode, method: e.method,
     to: (() => { try { const u = new URL(e.url, SITES[site].home); return u.host + u.pathname.slice(0, 90); } catch (_) { return String(e.url).slice(0, 100); } })(),
     body: e.body ? e.body.type : "pending", bytes: e.body && e.body.b64 ? Buffer.from(e.body.b64, "base64").length : e.body && e.body.text ? e.body.text.length : 0,
-    canary: !!(found.canary || found["file-canary"]), rawPhone: !!(found.phone || found["phone-digits"]), rawEmail: !!found.email, rawName: !!found.name, placeholders,
+    canary: !!(found.canary || found["file-canary"]), rawPhone: !!(found.phone || found["phone-digits"]), rawEmail: !!found.email, rawName: !!found.name, rawExtra: !!found.extra, placeholders,
   };
   if (row.canary || row.rawPhone || row.rawEmail) {
     const j = texts.find((t) => /^[[{]/.test(t.trim()));
     if (j) row.where = NEEDLES.map((_, i) => ({ n: NAMES[i], p: keyPathsOf(j, i) })).filter((x) => x.p.length).map((x) => `${x.n}: ${x.p.join(" | ")}`);
     if (e.body && e.body.parts) row.fileNames = e.body.parts.filter((p) => p.file).map((p) => p.file);
   }
-  row.verdict = row.canary || row.rawPhone || row.rawEmail || row.rawName
-    ? (row.rawPhone || row.rawEmail || row.rawName ? "LEAK: 生の個人情報が残っている" : "masked: 個人情報は伏せ字")
+  row.verdict = row.canary || row.rawPhone || row.rawEmail || row.rawName || row.rawExtra
+    ? (row.rawPhone || row.rawEmail || row.rawName || row.rawExtra ? "LEAK: 生の個人情報が残っている" : "masked: 個人情報は伏せ字")
     : "unrelated";
   return row;
 }

@@ -63,7 +63,7 @@ service worker
 
 ### 残存リスク (正直な明示)
 - **R-1 (別拡張機能)**: 同等権限の悪意ある拡張は同じタブに content script を注入でき、DOM/キー入力を観測しうる。Chrome の権限モデル上どの拡張でも防げない。本実装はページ JS からの防御が主目的 (threat-model 4 節)。
-- **R-2 (他プロバイダの MAIN world 露出)**: V-02 の機密リスト非配布は **ChatGPT のみ**。Claude.ai / Gemini / Manus は従来どおり MAIN world エンジンが使うため露出が残る。Secure Composer を他プロバイダへ展開するのが恒久対策 (フォローアップ)。
+- **R-2 (他プロバイダの MAIN world 露出)**: 2026-10-18 に対応。機密リスト (除外リスト・常に伏せる語) は**全サイトで** MAIN world に配らない。ページ側のマスクと確認画面は、ISOLATED world のエンジンにリスト込みで頼み、渡した文についての結果だけを受け取る (RT-V02-01/02)。**残る限界**: ページは任意の文をマスクさせて、ある語がリストにあるかを 1 語ずつ試せる (問い合わせによる推測)。マスクの結果はページの通信に載るので、ページ側でマスクする方式では避けられない。恒久対策は Secure Composer を他プロバイダへ展開すること (入力をページに見せない)。
 - **R-3 (実サイトの送信ボタン/`conduit_token`)**: 送信ボタン属性・停止ボタン・`conduit_token` 必須性はモックの仮定。実サイト (ログイン後) は自動で開けず未検証。`docs/security/network-baseline.md` 4 節。
 
 ---
@@ -124,7 +124,7 @@ baseline (`9dce0f2`) では RT-FC-01, RT-PM-01/02/03, RT-NET-01/03/04 が FAIL (
 
 ## 19.7 残作業 (リリース前に閉じるべき)
 1. **P0-14 の自動化**: iframe の engine 初期化失敗を注入する手段 (本番に抜け道を作らず、テスト専用ビルド or CDP で engine スクリプトを差し替え) を用意し、BLOCKED → overlay 撤去 → ネイティブが「保護中」と誤表示されないことを e2e 化。
-2. **R-2**: Secure Composer を Claude.ai / Gemini / Manus へ展開し、全プロバイダで MAIN world から機密を排除。
+2. **R-2**: リストの非配布は全サイトで済み (2026-10-18)。問い合わせによる推測まで塞ぐには、Secure Composer を Claude.ai / Gemini / Manus へ展開する。
 3. **R-3**: 実サイト (ログイン後) で送信ボタン属性・`conduit_token` 必須性・`prepare` 挙動を確認し、アダプタのセレクタを実測で裏取り。
 4. **composer-toggle 統合**: OFF 時の警告 UX を iframe 側に移設 (現状は SC 有効ホストで警告をオフにして衝突回避)。
 5. **CI**: P0 (レッドチーム/E2E) を必須ゲートに (`xvfb-run` でヘッドレス表示を用意)。

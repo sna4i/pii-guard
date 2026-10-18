@@ -250,9 +250,23 @@
     return isEngineReady(e) ? e : null;
   }
 
+  // V-02: マスクは ISOLATED world (content.js) のエンジンにリスト込みで頼む。リストの値は
+  // MAIN world に来ない。kind: "sanitize" / "aggregated" / "lists" (確認画面の再計算)。
+  async function localMask(kind, text, extra) {
+    const resp = await request("local-mask", { kind, text, ...(extra || {}) }, 10000);
+    return resp && resp.type === "local-mask-result" ? resp.result : null;
+  }
+  NS.requestLocal = (kind, payload) => localMask(kind, payload && payload.text, payload);
+  // ISOLATED に頼めなかったとき: リストがあるなら、MAIN world のエンジン (リスト無し) で黙って
+  // 続けると「常に伏せる語」を伏せないまま送る。マスク失敗として呼び手に返す (fail-closed)。
+  const listsNeeded = () => !!(NS.settings && NS.settings.hasSecretLists);
+
   async function sanitizeOnce(text, service, sourceUrl) {
     const backend = await resolveBackend();
     if (backend === "standalone") {
+      const local = await localMask("sanitize", text);
+      if (local && typeof local.sanitized_text === "string") return local;
+      if (listsNeeded()) { WARN("isolated masking unavailable; refusing to mask without the user's lists"); return null; }
       const engine = await getEngine();
       if (!engine) {
         // Engine missing AND gateway not preferred: degrade by returning
@@ -284,12 +298,10 @@
 
   // Engine オプション共通化 — ユーザー force-mask list と ML フラグを注入。
   // NS.settings は content.js が chrome.storage.local から配布。
+  // MAIN world のエンジンは、ISOLATED に頼めなかったときの予備。リストは持たない (V-02)。
   function engineOpts() {
-    const list = Array.isArray(NS.settings && NS.settings.maskForceList)
-      ? NS.settings.maskForceList
-      : [];
     const mlEnabled = !!(NS.settings && NS.settings.mlEnabled);
-    return { userForceMaskEntries: list, mlEnabled };
+    return { userForceMaskEntries: [], mlEnabled };
   }
 
   async function sanitizeAggregated(text, service, sourceUrl) {
@@ -298,6 +310,9 @@
     //   * gateway     → ask the content script to proxy to the gateway.
     const backend = await resolveBackend();
     if (backend === "standalone") {
+      const local = await localMask("aggregated", text);
+      if (local && Array.isArray(local.aggregated)) return local;
+      if (listsNeeded()) { WARN("isolated masking unavailable; refusing to mask without the user's lists"); return null; }
       const engine = await getEngine();
       if (!engine) {
         WARN(
@@ -1428,10 +1443,10 @@
   const textOf = (el) => String((el.tagName === "TEXTAREA" || el.tagName === "INPUT" ? el.value : el.innerText) || "");
   async function detectInto(text) {
     if (!EG || !maskingOn() || !text || !text.trim()) return;
-    const engine = await getEngine();
-    if (!engine) return;
     try {
-      const r = await engine.maskSanitize(text, engineOpts());
+      // 常に伏せる語も覚えるため、ISOLATED のエンジン (リスト込み) を先に使う
+      let r = await localMask("sanitize", text);
+      if (!r) { const engine = await getEngine(); if (!engine) return; r = await engine.maskSanitize(text, engineOpts()); }
       for (const d of (r && r.detections) || []) {
         const v = typeof d.text === "string" ? d.text : text.slice(d.start, d.end);
         const before = guard.sensitive.size;
