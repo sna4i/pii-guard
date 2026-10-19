@@ -56,11 +56,53 @@
   //
   // map[i] is the original index that normalised character i came from;
   // one trailing sentinel lets a half-open end offset map back too.
+  //
+  // 加えて 2 つの揺れを正規化テキスト側だけで吸収する (元テキストは変えない):
+  //  - 見えない文字 (ゼロ幅スペース・ゼロ幅非結合子/結合子・単語結合子・BOM・
+  //    ソフトハイフン)。Web・PDF・チャットからのコピペで「090​1234​5678」のように
+  //    数字や名前の間に紛れ込み、すべてのパターンをすり抜けていた。正規化テキスト
+  //    からは落とし、map で元の座標を保つので、マスク範囲は見えない文字ごと覆う。
+  //  - 数字に挟まれたハイフン類 (IME の「ー」、‐ ‑ ‒ – — ― − ﹣)。NFKC が「-」に寄せる
+  //    のは全角の「－」だけなので、「090ー1234ー5678」を電話番号として拾えなかった。
+  //    数字の間に限って「-」に揃える (カタカナ語の「ゲーム」の「ー」は触らない)。
+  //  - 1 桁ずつ空白で区切った数字 (「0 9 0-1 2 3 4-5 6 7 8」「1 2 3 4 5 6 7 8 9 0 1 2」)。1 桁の数字が
+  //    1 つの空白 (半角・全角) で 3 つ以上並ぶ並びに限って、正規化テキストからその空白を落とす
+  //    (F-EG-07)。拾うかどうかは各パターンの形と検査 (電話の形・Luhn・検査数字・ラベル) が決めるので、
+  //    数を数えるだけの「1 2 3」などは詰めても何も拾わない。
+  // どれも含まない普通の文では norm === text のままで、照合は従来の高速パスを通る。
+  const INVISIBLE_RE = /[­​-‍⁠﻿]/;
+  const DIGIT_DASH_RE = /^[ー‐-―−﹣]$/;
+  function nextIsDigit(text, j) {
+    while (j < text.length && INVISIBLE_RE.test(text[j])) j++;
+    return j < text.length && /^[0-9]/.test(text[j].normalize("NFKC"));
+  }
+  // 1 桁の数字が 1 つの空白で 2 つ以上並ぶ並び。3 桁以上か、ハイフン類で次の数字のかたまりに
+  // つながる (「0 3-1 2 3 4-…」の市外局番) ときだけ詰める。
+  const SPACED_DIGITS_RE = /(?<![0-9０-９])[0-9０-９](?:[ \u3000][0-9０-９])+(?![0-9０-９])/g;
+  const DASH_NEAR_RE = /^[-－ー‐-―−﹣]\s?[0-9０-９]/;
+  function spacedDigitGaps(text) {
+    if (!/[0-9０-９][ \u3000][0-9０-９]/.test(text)) return null;
+    const drop = new Set();
+    SPACED_DIGITS_RE.lastIndex = 0;
+    let m;
+    while ((m = SPACED_DIGITS_RE.exec(text)) !== null) {
+      const digits = (m[0].length + 1) / 2;
+      const end = m.index + m[0].length;
+      const joined = DASH_NEAR_RE.test(text.slice(end, end + 3)) ||
+        /[0-9０-９]\s?[-－ー‐-―−﹣]$/.test(text.slice(Math.max(0, m.index - 3), m.index));
+      if (digits < 3 && !joined) continue;
+      for (let k = 1; k < m[0].length; k += 2) drop.add(m.index + k); // 数字と数字の間の空白
+    }
+    return drop.size ? drop : null;
+  }
   function nfkcWithMap(text) {
     let norm = "";
     const map = [];
     let i = 0;
+    const gaps = spacedDigitGaps(text);
     while (i < text.length) {
+      if (INVISIBLE_RE.test(text[i])) { i += 1; continue; } // 落とす (map に載せない)
+      if (gaps && gaps.has(i)) { i += 1; continue; }       // 1 桁ずつ区切った数字の間の空白
       let consumed = 1;
       let n = text[i].normalize("NFKC");
       if (i + 1 < text.length) {
@@ -69,6 +111,7 @@
         const pair = (text[i] + text[i + 1]).normalize("NFKC");
         if (pair.length === 1) { n = pair; consumed = 2; }
       }
+      if (DIGIT_DASH_RE.test(n) && /[0-9]$/.test(norm) && nextIsDigit(text, i + consumed)) n = "-";
       for (let k = 0; k < n.length; k++) map.push(i);
       norm += n;
       i += consumed;

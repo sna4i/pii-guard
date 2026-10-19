@@ -97,6 +97,60 @@ async function importAllowlist(file) {
   }
 }
 
+// --- マスキングがオンのときの背景色 (1.6.0、docs/composer-toggle.md D-26) ---------
+// 色見本は tint.js の PRESETS から作る。見本の左右は、明るい表示と暗い表示で実際に
+// 付く色。保存するのは "#rrggbb" か null (「なし」) だけ。
+
+const TINT_PREVIEW_LIGHT = "#ffffff";
+const TINT_PREVIEW_DARK = "#212121";
+
+function buildTintPalette() {
+  const T = window.PiiGuardTint;
+  const box = $("chat-tint-palette");
+  if (!T || !box) return;
+  for (const it of [{ name: "なし", hex: "" }, ...T.PRESETS]) {
+    const label = document.createElement("label");
+    label.className = "swatch";
+    label.title = it.name;
+    const input = document.createElement("input");
+    input.type = "radio";
+    input.name = "chat-tint";
+    input.value = it.hex;
+    const chip = document.createElement("span");
+    chip.className = it.hex ? "chip" : "chip none";
+    for (const base of [TINT_PREVIEW_LIGHT, TINT_PREVIEW_DARK]) {
+      const half = document.createElement("span");
+      half.className = "half";
+      half.style.background = it.hex ? T.tintedBackground(it.hex, base) : base;
+      chip.appendChild(half);
+    }
+    const name = document.createElement("span");
+    name.className = "name";
+    name.textContent = it.name;
+    label.append(input, chip, name);
+    box.appendChild(label);
+  }
+}
+
+function showTint(value) {
+  const preset = [...document.querySelectorAll('#chat-tint-palette input[name="chat-tint"]')]
+    .find((r) => r.value === (value || ""));
+  if (preset) { preset.checked = true; return; }
+  $("chat-tint-custom-radio").checked = true;
+  $("chat-tint-custom").value = value;
+}
+
+async function loadChatTint() {
+  const T = window.PiiGuardTint;
+  const { chatTint } = await chrome.storage.local.get("chatTint");
+  showTint(T ? T.normalizeTint(chatTint) : null);
+}
+
+async function saveChatTint(value) {
+  const T = window.PiiGuardTint;
+  await chrome.storage.local.set({ chatTint: T ? T.normalizeTint(value) : null });
+}
+
 // --- Settings (mirrors popup) ------------------------------------------
 
 async function loadEnabled() {
@@ -745,6 +799,8 @@ document.addEventListener("DOMContentLoaded", () => {
     if (engineEl) engineEl.textContent = v;
   } catch (_) {}
   loadAllowlist();
+  buildTintPalette();
+  loadChatTint();
   loadEnabled();
   loadInteractive();
   loadUiMode();
@@ -771,6 +827,24 @@ document.addEventListener("DOMContentLoaded", () => {
     const file = e.target.files && e.target.files[0];
     if (file) importAllowlist(file);
     e.target.value = "";
+  });
+
+  // 背景色: 色見本は押したらすぐ保存。任意の色は選び終わったとき (change) と、
+  // ドラッグ中は 0.25 秒止まったときに保存する (開いているタブを毎回塗り直さないため)
+  $("chat-tint-palette").addEventListener("change", (e) => {
+    if (e.target && e.target.name === "chat-tint") saveChatTint(e.target.value);
+  });
+  $("chat-tint-custom-radio").addEventListener("change", () => saveChatTint($("chat-tint-custom").value));
+  let tintInputTimer = null;
+  $("chat-tint-custom").addEventListener("input", () => {
+    $("chat-tint-custom-radio").checked = true;
+    clearTimeout(tintInputTimer);
+    tintInputTimer = setTimeout(() => saveChatTint($("chat-tint-custom").value), 250);
+  });
+  $("chat-tint-custom").addEventListener("change", () => {
+    $("chat-tint-custom-radio").checked = true;
+    clearTimeout(tintInputTimer);
+    saveChatTint($("chat-tint-custom").value);
   });
 
   $("opt-enabled").addEventListener("change", (e) => {

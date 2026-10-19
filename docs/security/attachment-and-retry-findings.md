@@ -1,0 +1,93 @@
+# 添付ファイル・ペースト・再試行まわりの調査と要件 (Phase 追加)
+
+> 2026-10-18 / 対象: feat/secure-composer
+
+## 1. 調査結果 (実測 + 構造分析)
+
+### 1.0 添付ファイルのアップロード経路 (実測, ログイン後 chatgpt.com, 2026-10-18 追記)
+開いていたログイン済みセッション (CDP 9333) で、架空のカナリア .txt を file input にセットして観測 (送信なし):
+```
+1. POST https://chatgpt.com/backend-api/files                   (JSON: ファイル名/サイズ/MIME → presigned URL 取得)
+2. PUT  https://*.oaiusercontent.com/files/<uuid>/raw            ← ★中身を Azure Blob へ直接 PUT (Content-Type: text/plain)
+3. POST https://chatgpt.com/backend-api/files/process_upload_stream  (確定)
+```
+- **ファイルの中身は chatgpt.com ではなく別オリジン (`*.oaiusercontent.com`) への presigned PUT で出る**。Secure Composer も既存の injected.js マスクも通らず、**中身は素通り (未マスク)** を確認。
+- ただし PUT を発行するのは chatgpt.com 側の JS なので、**MAIN world の fetch/XHR フック (injected.js) からはこの PUT が見える** → 横取りの足がかりになる。
+- `POST /backend-api/files` のメタデータに**ファイル名**が入る (ファイル名自体の PII も二次的に対象)。
+- Secure Composer の overlay はログイン後も入力欄を **100% 被覆・SECURE_READY** で、タイプ/ペーストは保護されている (別途実測)。つまり素通りするのは**明示添付の中身**。
+
+### 1.1 長文ペースト → テキストファイル化 (実測, ログインなし chatgpt.com)
+- 拡張なしで本物の chatgpt.com (ログインなし) に、実クリップボード + Ctrl+V で 500〜20,000 字を貼った。
+- **結果: どのサイズでも入力欄に全文が残り (kept = 貼った文字数)、ファイルチップもアップロード通信も発生しなかった。**
+- → **paste→file 変換はログイン後だけの挙動**。ログインなしでは再現できず、閾値・生成方法・アップロード先は自動取得できない (ログイン後は自動操作で開けない / memory: [[project-chatgpt-dom-notes]])。
+
+### 1.2 構造分析 — Secure Composer が付いていれば paste→file は起きない
+- Secure Composer 有効時、ユーザーはネイティブ入力欄ではなく **iframe の textarea** に貼る。iframe の textarea はただの textarea なので、何文字貼っても**ファイル化しない** (ChatGPT のファイル化ロジックはネイティブ composer 側にある)。
+- 送信時は `writeNative` が**マスク済み**テキストをネイティブに入れる。ここで ChatGPT が大きすぎる本文をファイル化しても、中身は既にマスク済み。
+- **したがって、ユーザーが観測した「添付テキストファイルが素通り」は次のどちらか:**
+  - **(a)** ログイン後の DOM に iframe が重ならず、ペーストがネイティブ composer に入り、ネイティブ側で未マスクのままファイル化された。
+  - **(b)** ＋ボタン / ドラッグ&ドロップでの**明示的なファイル添付** (入力欄を一切通らない。Secure Composer も fetch フックも通らない)。
+- どちらかで対処が変わるため、ユーザーに確認が必要 (6 章)。
+
+### 1.3 再試行ボタンの二重処理リスク (構造分析)
+- Secure Composer 有効時、iframe がマスク済みをネイティブに入れて送信ボタンを押す → ChatGPT が `POST /conversation` を発行 → **injected.js の fetch フックもこれを横取りする** (フックは SC がマスク済みだと知らない)。
+- `interactive:true` だと、この既にマスク済みの本文に対して**サイドバー確認が二重に出る**。キャンセルすると送信が reject → ChatGPT が「再試行」を出す。
+- → 二重処理と再試行の経路が、ユーザーの言う「確認→キャンセル→再試行でマスキングが効かない」挙動の温床。
+- **根治策 (F-SC-11)**: SC 有効ホスト (ChatGPT) では injected.js の ChatGPT アダプタを**停止**し、SC を唯一の経路にする。こうすればネイティブには常にマスク済みが載り、再試行の再送もマスク済みで安全。
+
+### 1.4 ドラッグ&ドロップ (実測, ログイン後 chatgpt.com, 2026-10-18)
+- 旧実装の drop 経路は**添付を握りつぶしていた**。`[class*="composer"]` を「入力欄まわり」とみなしていたが、ChatGPT はスレッド側の要素にも `group-has-[[data-expanded-composer]]/home-composer-layout:hidden` というクラスを付けるので、ページ中のほぼ全ての drop を横取りしていた。しかもマスク済みファイルを拡張が作った隠し input に載せていたため、ChatGPT はそれを読まず、**チップもアップロードも 0** (漏れはしないが、添付できない)。
+- 入力欄の上に落とすと、拡張の iframe (Secure Composer) に落ちる。iframe はファイルを扱わないので、何も起きなかった。
+- ChatGPT の file input は 4 つ (入力欄の form 内)。画像専用 3 つ (`accept="image/*"` など) と、**汎用 1 つ (`accept` 無し・`multiple`)**。id (`_r_g_` など) は React の useId で変わる。
+- ChatGPT はファイルのドラッグが入ると「ここにファイルをドロップすると、会話に追加されます」の全面表示を出し、dragenter/dragleave の対で出し入れする。
+- ドラッグが入った時点で `POST /backend-api/files/upload_reservations` が出るが、本文は用途のメタデータだけ (ファイル名・中身なし)。ドロップ後は `prepare` (`client_prepare_source: "file_picker"`、MIME だけ)、`POST /backend-api/files` (**ファイル名**とサイズ)、PUT (中身)、`file_upload_action_suggestions` (**ファイル名**) の順に出る。
+- 同じ中身のファイルをもう一度添付すると、PUT が省かれることがある (中身の重複排除)。実環境の確認では毎回中身を変えること。
+
+## 2. 要件 (ID 付き)
+
+| ID | 要件 | 検証可否 |
+|---|---|---|
+| F-SC-07 | 長文が ChatGPT 側でファイル化されるケースを読み取り、**マスキングしてからファイル化**する (拡張内部処理)。SC 経由入力では iframe がファイル化を防ぐので、対象は「ネイティブに渡った後にファイル化される大きなマスク済み本文」= 既にマスク済みで安全。残る本当の対象は 1.2(b) の明示添付 | ⚠️ ログイン後の実測が要る (6 章) |
+| F-SC-08 | **未マスクの添付**(テキストファイル等)が composer にあるとき、拡張ボタン(ピル)に**警告マーク**を出す | ✅ モックで検証可 |
+| F-SC-09 | 確認→キャンセル→ChatGPT の**再試行**ボタンでマスキングが無効化されない。再送もマスク済みであること | ✅ F-SC-11 + モックで検証可 |
+| F-SC-10 | **確認機能 OFF** のとき、未解消の個人情報 or 既にマスクしたデータがある場合、ピルを**黄色**にし「マスキングされたデータがあります」等を表示 | ✅ モックで検証可 |
+| F-SC-11 | SC 有効ホストでは injected.js の ChatGPT 横取りを停止 (SC を唯一の送信経路に)。二重確認・再試行バイパスの根治 | ✅ モックで検証可 |
+| F-SC-13 | **ドラッグ&ドロップ**の添付も、ページのどこに落としても (入力欄の上を含む) マスクしてから ChatGPT に渡す。マスクできないものは止めてピルで知らせる | ✅ モック + 実環境で検証 (1.4 / 4 章) |
+
+## 3. 設計方針
+- **F-SC-11**: injected.js に「このタブで SC が ChatGPT を担っているか」を知らせる。content.js が `secureComposerEnabled` と host から判定し、MAIN world へ非機密フラグ `scOwnsComposer` を配る。injected.js の `pickAdapter` は、ChatGPT かつ `scOwnsComposer` のとき chatgpt アダプタを返さない (素通し)。他プロバイダ・SC 無効時は従来どおり。
+- **F-SC-08/10**: composer-toggle (ピル) が、(i) composer 内の添付チップ (未マスク) の有無、(ii) SC からの「マスク/未マスク件数」を受けて、黄色+内訳を出す。SC → content/pill への件数通知を SW ペアリング・バスに追加。
+- **F-SC-07 (明示添付, 経路確定済)**: 「先にマスクしてからファイル化」= **ファイル選択の時点で横取り**するのが正道。`HTMLInputElement`(type=file) の `files` 設定と drag&drop を MAIN world でフックし、テキスト系 (txt/md/csv/json/log) は `File.text()` を読んでマスク→**マスク済み内容で新しい File を作って差し替え**る。こうすれば後段の `POST /backend-api/files` のサイズ/SHA も最初からマスク後の値になり整合する (PUT の本文だけ書き換えるとサイズ不一致で壊れる恐れ)。バイナリ (画像/PDF 等) はマスク不能なので F-SC-08 で警告 or ブロック。ファイル名も必要ならマスク。
+  - 対象オリジン: フックは chatgpt.com (発行元) の MAIN world で足りる。`*.oaiusercontent.com` への PUT 自体を横取りするのは**サイズ不整合のリスクがあるため避ける** (入力時に差し替える方が安全)。
+
+## 4. 実装状況
+- **F-SC-11 (fail-open 修正)**: ✅ 実装・検証済 (本 PR)。`scOwnsComposer` を overlay の live 連動に。機密の非配布 (V-02) は設定連動で常時。RT-LIVE-01/02/03, RT-STAND-01, RT-RETRY-01, RT-PM-01〜05 で確認。
+- **F-SC-09 (再試行)**: ✅ F-SC-11 で根治。RT-RETRY-01 で確認。
+- **F-SC-10 (マスク済み通知の黄色ピル)**: ✅ 実装・検証済。RT-PILL-01/02。
+- **F-SC-07 (明示添付のマスク差し替え)**: ✅ 実装・モック + 実環境で検証済 (`attachments/attachment-guard.js`)。file input の change を window の capture で横取りし、テキスト系はマスク済み File に差し替えて投げ直す。AT-01 で「アップロードされる中身がマスク済み」を確認。
+  - 文字コード: BOM (UTF-16LE/BE) → UTF-8 (厳密) → Shift_JIS の順に読み、出力は UTF-8。NUL が残るもの (BOM 無し UTF-16 等) は読めない扱いでブロック。AT-03 (Shift_JIS)、AT-04 (UTF-16) で確認。
+- **F-SC-08 (未マスク添付の警告)**: ✅ 実装・モック検証済。バイナリ/巨大/マスク失敗は fail-closed でブロックし、`mask-mcp:attachment` でピルを黄色に。AT-02 で確認。
+- **F-SC-13 (ドラッグ&ドロップ)**: ✅ 実装・モック + 実環境で検証済。
+  - attachment-guard が window の capture で drop を先に捕まえる (ページのどこでも、ChatGPT の入力欄があるページだけ)。ChatGPT の drop 処理には元ファイルを渡さない。マスク済み File を ChatGPT 自身の汎用 file input に載せて change を投げる (＋ボタンと同じ経路)。
+  - 横取りした後、落とした要素に dragleave を送って ChatGPT の全面表示を閉じる。
+  - 入力欄の上: ファイルのドラッグ中だけ adapter が iframe を `pointer-events:none` にする。iframe 側は dragenter を受けたら知らせて、透過になるまで「落とせない」表示 (`dropEffect=none`) にする。dragover が 1 秒来なければ元に戻す。
+  - ダイアログ (`[role=dialog]`) 内への drop は、行き先 (プロジェクトのファイル等) を取り違えないよう止め、ファイル選択を使うようピルで知らせる。
+  - マスキング OFF では横取りせず ChatGPT に任せ、ピルが「マスクしていない添付が N 件あります」を出す。OFF でも以前はバイナリをブロックし「止めました」と誤表示していたので、通す・未マスク表示に直した。
+  - 検証: DND-01〜05 (モック。CDP の `Input.dispatchDragEvent` で実ファイルを座標に落とす)。実環境 (2026-10-18, ログイン後, 送信なし) では次を確認した。スレッド上・入力欄上の .txt はどちらもチップ 1・PUT 1 で、PUT 本文はマスク済み、生の値は 0、全面表示は閉じた。.png はチップ 0・PUT 0 で、「マスクできない添付を 1 件止めました」が出た。
+  - 残る未検証: OS からの本物のマウスドラッグ。CDP はカーソル下のフレームが変わってもドラッグの宛先を付け替えない。一方、Chromium 本体 (Aura の `WebContentsViewAura::DragUpdatedCallback`、Mac も同様) は付け替える。そのため、テストでは透過後に dragenter を送り直して再現している。手でのドラッグ確認を 1 回してもらうのが確実。
+- **残る課題: ファイル名はマスクしていない。** 中身はマスク済みでも、`POST /backend-api/files` と `file_upload_action_suggestions` にファイル名がそのまま載る (実測)。名前に個人情報を含むファイル (例: 氏名入りの履歴書) は、名前から漏れる。
+- 実環境の拡張更新は、`chrome.runtime.reload()` ではなく同じプロファイルでの再起動で行う (CLI 読み込みの拡張を reload すると Chrome に無効化される)。
+
+## 5. テスト観点
+- T: SC 有効時、ネイティブ送信を injected.js が二重処理しない (サイドバーが二重に出ない)。
+- T: 再試行相当の再送で、本文がマスク済みのまま届く。
+- T: composer に未マスク添付チップがあるとピルが警告色。
+- T: interactive OFF + マスク済みデータありでピルが黄色 + メッセージ。
+- T (F-SC-13): ページ/入力欄の上への drop がマスク済みで ChatGPT の input 経由で渡る。画像は止まる。ダイアログ内は止まる。OFF は ChatGPT に任せて未マスク警告。
+
+## 6. ユーザーに確認したいこと (ログイン後が要る)
+1. 素通りしたのは **(a) 長文ペースト由来のファイル** か **(b) ＋ボタン/ドラッグの明示添付** か。
+2. (a) なら: ログイン後に長文を貼ってファイル化したときの **ファイルチップの DOM** と、送信時の **アップロード通信 (URL/メソッド/本文の形)**。
+3. そもそもログイン後に Secure Composer の iframe が入力欄に**重なっているか** (重なっていないなら、paste がネイティブに入ってファイル化している = 1.2(a))。
+
+関連: [[secure-composer-baseline]] [[threat-model]] [[project-chatgpt-dom-notes]]

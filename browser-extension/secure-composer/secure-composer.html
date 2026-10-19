@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="ja" data-state="INITIALIZING">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PII Guard Secure Composer</title>
+<link rel="stylesheet" href="secure-composer.css">
+</head>
+<body>
+<!-- 原文を保持してよい唯一の DOM。ページからは contentDocument に触れない (拡張オリジン)。 -->
+<textarea id="editor" rows="1" spellcheck="true" autocapitalize="sentences" autocorrect="on"
+  aria-label="PII Guard 保護入力欄 (ChatGPT に送る前に端末内でマスキングします)"></textarea>
+<!-- PII を検出したときだけ送信前に出す確認 (個人情報が無いときは出さない) -->
+<div id="confirm" hidden role="alertdialog" aria-labelledby="confirm-msg">
+  <p id="confirm-msg"></p>
+  <div class="confirm-actions">
+    <button type="button" id="confirm-send" class="primary"></button>
+    <button type="button" id="confirm-cancel">やめる</button>
+  </div>
+</div>
+<div id="status" aria-live="polite"></div>
+<!-- エンジン一式 (content.js と同じ順)。iframe 内でマスキングするので機密設定は MAIN world に出ない。 -->
+<script src="../engine/dictionaries.js"></script>
+<script src="../engine/patterns.js"></script>
+<script src="../engine/classification.js"></script>
+<script src="../engine/severity.js"></script>
+<script src="../engine/categories.js"></script>
+<script src="../engine/aggregate.js"></script>
+<script src="../engine/force-mask.js"></script>
+<script src="../engine/blocklist.js"></script>
+<script src="../engine/user-force-mask.js"></script>
+<script src="../engine/onnx-detector.js"></script>
+<script src="../engine/confidential.js"></script>
+<script src="../engine/surrogates.js"></script>
+<script src="../engine/llm-prompts.js"></script>
+<script src="../engine/engine.js"></script>
+<script src="../engine/bundle.js"></script>
+<script src="../security/leak-detector.js"></script>
+<script src="composer-state.js"></script>
+<script src="privacy-boundary.js"></script>
+<script src="secure-composer.js"></script>
+</body>
+</html>

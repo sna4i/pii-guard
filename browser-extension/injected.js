@@ -116,12 +116,44 @@
       } catch (_) {}
       return;
     }
+    if (data.type === "egress-restore") {
+      try { if (typeof NS.__egressRestore === "function") NS.__egressRestore(data); } catch (_) {}
+      return;
+    }
     if (typeof data.id !== "string") return;
+    // composer-toggle.js (content script) からの下書きの確認の依頼
+    if (data.type === "review-draft") { handleReviewDraft(data); return; }
     const entry = pending.get(data.id);
     if (!entry) return;
     pending.delete(data.id);
     entry.resolve(data);
   });
+
+  // 入力中の文章を対象にサイドバーを開き、承認結果を content script に返す (1.6.0)。
+  // 入力欄への書き戻しは content script が行う
+  async function handleReviewDraft(data) {
+    const { id, text } = data;
+    const reply = (payload) => window.postMessage({ source: TAG_IN, id, type: "review-draft-result", ...payload }, "*");
+    try {
+      if (typeof text !== "string" || !text.trim()) return reply({ accepted: false });
+      const r = await NS.reviewDraft(text);
+      if (!r || !r.aggResp) return reply({ accepted: false, error: "detect" });
+      const sidebar = NS.sidebar;
+      if (!sidebar || typeof sidebar.show !== "function") return reply({ accepted: false, error: "no-sidebar" });
+      const decision = await sidebar.show(r.aggResp, text, {
+        draft: true,
+        mode: r.llmPending ? "detect" : "regex",
+        llmPending: r.llmPending || undefined,
+      });
+      reply({ accepted: !!(decision && decision.accepted), maskedPositions: (decision && decision.maskedPositions) || [] });
+    } catch (err) {
+      reply({ accepted: false, error: String((err && err.message) || err) });
+    }
+  }
+  // 受け取りの準備ができたので、設定 (除外リスト・常に伏せる語を含む) を
+  // 取りに行く (1.5.1)。content.js は起動直後にも設定を送るが、このスクリプトの
+  // 読み込みより先に届くと失われ、除外リストも常に伏せる語も効かなかった
+  window.postMessage({ source: TAG_IN, type: "request-settings" }, "*");
 
   function request(type, extra, timeoutMs) {
     const id = `mcp-${++sequence}-${Date.now()}`;
@@ -196,7 +228,10 @@
       window.removeEventListener("mask-mcp:engine-ready", onReady);
       resolve(value);
     };
-    const onReady = () => finish(NS.engine);
+    // isolated world (composer-toggle.js 用のエンジン) も同じ名前のイベントを
+    // 同じ window に飛ばすので、イベントだけで判断せず、自分の世界のエンジンが
+    // 実際に使える状態かを確かめる (1.6.0)
+    const onReady = () => { if (isEngineReady(NS.engine)) finish(NS.engine); };
     window.addEventListener("mask-mcp:engine-ready", onReady);
     const iv = setInterval(() => {
       if (isEngineReady(NS.engine)) {
@@ -215,9 +250,23 @@
     return isEngineReady(e) ? e : null;
   }
 
+  // V-02: マスクは ISOLATED world (content.js) のエンジンにリスト込みで頼む。リストの値は
+  // MAIN world に来ない。kind: "sanitize" / "aggregated" / "lists" (確認画面の再計算)。
+  async function localMask(kind, text, extra) {
+    const resp = await request("local-mask", { kind, text, ...(extra || {}) }, 10000);
+    return resp && resp.type === "local-mask-result" ? resp.result : null;
+  }
+  NS.requestLocal = (kind, payload) => localMask(kind, payload && payload.text, payload);
+  // ISOLATED に頼めなかったとき: リストがあるなら、MAIN world のエンジン (リスト無し) で黙って
+  // 続けると「常に伏せる語」を伏せないまま送る。マスク失敗として呼び手に返す (fail-closed)。
+  const listsNeeded = () => !!(NS.settings && NS.settings.hasSecretLists);
+
   async function sanitizeOnce(text, service, sourceUrl) {
     const backend = await resolveBackend();
     if (backend === "standalone") {
+      const local = await localMask("sanitize", text);
+      if (local && typeof local.sanitized_text === "string") return local;
+      if (listsNeeded()) { WARN("isolated masking unavailable; refusing to mask without the user's lists"); return null; }
       const engine = await getEngine();
       if (!engine) {
         // Engine missing AND gateway not preferred: degrade by returning
@@ -249,12 +298,10 @@
 
   // Engine オプション共通化 — ユーザー force-mask list と ML フラグを注入。
   // NS.settings は content.js が chrome.storage.local から配布。
+  // MAIN world のエンジンは、ISOLATED に頼めなかったときの予備。リストは持たない (V-02)。
   function engineOpts() {
-    const list = Array.isArray(NS.settings && NS.settings.maskForceList)
-      ? NS.settings.maskForceList
-      : [];
     const mlEnabled = !!(NS.settings && NS.settings.mlEnabled);
-    return { userForceMaskEntries: list, mlEnabled };
+    return { userForceMaskEntries: [], mlEnabled };
   }
 
   async function sanitizeAggregated(text, service, sourceUrl) {
@@ -263,6 +310,9 @@
     //   * gateway     → ask the content script to proxy to the gateway.
     const backend = await resolveBackend();
     if (backend === "standalone") {
+      const local = await localMask("aggregated", text);
+      if (local && Array.isArray(local.aggregated)) return local;
+      if (listsNeeded()) { WARN("isolated masking unavailable; refusing to mask without the user's lists"); return null; }
       const engine = await getEngine();
       if (!engine) {
         WARN(
@@ -414,7 +464,7 @@
         aggResp._llmStatus = "failed";
         return aggResp;
       }
-      LOG(`llm detect: querying ${cfg.kind} model="${cfg.model || "(default)"}"`);
+      LOG(`llm detect: querying local model (mode=${cfg.mode})`);
       // No showLoading() here — the sidebar's centered overlay is now
       // the sole LLM progress indicator when regex found ≥1 entity and
       // we opened the sidebar in parallel. For the zero-regex path
@@ -521,16 +571,14 @@
       for (const ent of llmEnts) {
         const value = typeof ent.text === "string" ? ent.text.trim() : "";
         if (!value || llmValues.has(value)) continue;
-        const positions = [];
-        let from = 0;
-        while (true) {
-          const idx = text.indexOf(value, from);
-          if (idx < 0) break;
-          positions.push([idx, idx + value.length]);
-          from = idx + value.length;
-        }
-        if (!positions.length) continue;
         const label = String(ent.entity_type || "SENSITIVE_FACT").toUpperCase();
+        // 英数字の語の途中は除く (「1234567」を「123456789012」の中で見つけない)。
+        // 人名は、名字の後の下の名前と、フルネームの各部分も含める (1.5.1)
+        const agg = NS.engine && NS.engine.aggregate;
+        const positions = !agg ? [] : label === "PERSON" && typeof agg.personSpans === "function"
+          ? agg.personSpans(text, value)
+          : typeof agg.findOccurrences === "function" ? agg.findOccurrences(text, value) : [];
+        if (!positions.length) continue;
         const category = LABEL_TO_CATEGORY[label] || "OTHER";
         const severity = LABEL_TO_SEVERITY[label] || "medium";
         counters[label] = (counters[label] || 0) + 1;
@@ -570,6 +618,19 @@
       return aggResp;
     }
   }
+
+  // 下書きの確認 (composer-toggle.js から呼ばれる)。送信時と同じ検出を行い、
+  // LLM が有効ならその統合も始める。サイドバーには llmPending を渡す
+  NS.reviewDraft = async function reviewDraft(text) {
+    const aggResp = await sanitizeAggregated(text, "draft", location.href);
+    if (!aggResp) return null;
+    let llmPending = null;
+    try {
+      const cfgResp = await request("llm-config", {});
+      if (cfgResp && cfgResp.config) llmPending = mergeLlmDetect(aggResp, text);
+    } catch (_) { llmPending = null; }
+    return { aggResp, llmPending };
+  };
 
   async function isEnabled() {
     const resp = await request("is-enabled", {});
@@ -875,7 +936,14 @@
     if (typeof url !== "string") return null;
     for (const s of SERVICES) {
       try {
-        if (s.match(url)) return s;
+        if (s.match(url)) {
+          // F-SC-11: Secure Composer がこのタブの ChatGPT 入力を受け持っているときは、
+          // ネイティブ送信には既にマスク済み本文が載っている。ここで横取りすると、
+          // 二重にサイドバー確認が出たり、再試行の再送で経路が食い違う。SC を唯一の
+          // 経路にするため、chatgpt アダプタは素通しする (他プロバイダ・SC 無効時は従来どおり)。
+          if (s.name === "chatgpt" && NS.settings && NS.settings.scOwnsComposer) return null;
+          return s;
+        }
       } catch (_) {
         // Broken matcher → skip, never brick the page.
       }
@@ -894,65 +962,25 @@
     }
   }
 
-  // Shared numbering helper — mirrors MaskingService._tag_mask's
-  // pass-1 on the server. Same (label, surface) → same number; the
-  // server and client therefore agree on exactly which placeholder
-  // each occurrence resolves to, so the gateway's sanitized_text and
-  // the client-side preview never disagree.
-  //
-  // Returns a function ``numberFor(label, surface) -> int`` that the
-  // substitution loops below call without re-scanning the input.
-  function buildNumberer(originalText, spans) {
-    // spans: Array<{start, end, label}> OR Array<[start, end, label]>
-    const counters = new Map();
-    const numbering = new Map();
-    const normalized = spans
-      .map((x) => {
-        if (Array.isArray(x)) return { start: x[0], end: x[1], label: x[2] };
-        return { start: x.start, end: x.end, label: x.label || x.entity_type };
-      })
-      .filter(
-        (x) =>
-          Number.isInteger(x.start) && Number.isInteger(x.end) && x.end > x.start
-      )
-      .sort((a, b) => a.start - b.start || a.end - b.end);
-    for (const { start, end, label } of normalized) {
-      const surface = originalText.slice(start, end);
-      const key = `${label}\x00${surface}`;
-      if (!numbering.has(key)) {
-        const n = (counters.get(label) || 0) + 1;
-        counters.set(label, n);
-        numbering.set(key, n);
-      }
-    }
-    return (label, surface) =>
-      numbering.get(`${label}\x00${surface}`) || 1;
-  }
-
   // Apply the subset of gateway detections that the user kept
   // checked in the review modal. We use the numbered-tag strategy
   // (``<ENTITY_TYPE_N>``) so repeated mentions of the same surface
   // share a placeholder, matching the server-side invariant.
   function applyTagSubstitutions(originalText, detections, keptIds) {
     if (!keptIds || keptIds.size === 0) return originalText;
-    const kept = detections
-      .map((d, idx) => ({ ...d, __idx: idx }))
-      .filter((d) => keptIds.has(d.__idx))
-      .filter(
-        (d) =>
-          Number.isInteger(d.start) &&
-          Number.isInteger(d.end) &&
-          d.end > d.start
-      );
-    const numberFor = buildNumberer(originalText, kept);
-    const descending = [...kept].sort((a, b) => b.start - a.start);
-    let out = originalText;
-    for (const d of descending) {
-      const surface = originalText.slice(d.start, d.end);
-      const n = numberFor(d.entity_type, surface);
-      out = out.slice(0, d.start) + `<${d.entity_type}_${n}>` + out.slice(d.end);
+    const kept = detections.filter((_, idx) => keptIds.has(idx));
+    return maskSpans(originalText, kept);
+  }
+
+  // 伏せる範囲を伏せ字に置き換える。重なる範囲のまとめ方は
+  // engine/aggregate.js の applySpans() を参照 (1.5.1)。エンジンが無いまま
+  // 伏せずに送ることはしない — 送信ごと止める。
+  function maskSpans(originalText, spans) {
+    const agg = NS.engine && NS.engine.aggregate;
+    if (!agg || typeof agg.applySpans !== "function") {
+      throw new Error("mask-mcp: engine not ready — refusing to send unmasked text");
     }
-    return out;
+    return agg.applySpans(originalText, spans);
   }
 
   // Sidebar variant: input is the flattened [start, end, label] list
@@ -1062,25 +1090,7 @@
 
   function applyTriples(originalText, triples) {
     if (!triples || triples.length === 0) return originalText;
-    const numberFor = buildNumberer(originalText, triples);
-    const sorted = [...triples].sort((a, b) => b[0] - a[0]);
-    let out = originalText;
-    for (const [s, e, label] of sorted) {
-      if (
-        !Number.isInteger(s) ||
-        !Number.isInteger(e) ||
-        e <= s ||
-        s < 0 ||
-        e > out.length
-      ) {
-        continue;
-      }
-      const lbl = String(label || "MASKED");
-      const surface = originalText.slice(s, e);
-      const n = numberFor(lbl, surface);
-      out = out.slice(0, s) + `<${lbl}_${n}>` + out.slice(e);
-    }
-    return out;
+    return maskSpans(originalText, triples);
   }
 
   async function processBody(adapter, bodyJson, url) {
@@ -1349,6 +1359,282 @@
     return { changed: true, body: adapter.replaceInputs(bodyJson, masked) };
   }
 
+  // --- 原文の持ち出しガード (F-EG-01〜04) ------------------------------------
+  //
+  // security/egress-guard.js (content.js がこのファイルより先に注入) の関数で:
+  //   (1) 形を知っている送信 (Claude の PerformAction = protobuf、Gemini の processSession =
+  //       WebChannel) は、本文を取り出して processBody (確認画面とマスク) に載せる。
+  //   (2) それ以外のすべての通信 (fetch / XHR / sendBeacon / WebSocket、どの宛先でも) で、
+  //       利用者が打った・貼った文字から検出した値が入っていたら伏せ字にするか止める。
+  //       外部 (サイト自身以外) の宛先なら、下書きの一部 (16 文字以上) が入っているだけでも止める。
+  // 2026-10-18 実測: Claude と Gemini は送信の形が変わって従来のアダプタが黙って素通しになり、
+  // Manus は Amplitude がクリックした入力欄の文字を送っていた。サイトがまた形を変えても、
+  // (2) が受け止めて素通しではなく止める側に倒す。マスキング OFF のときは何もしない。
+  const EG = NS.egress || null;
+  const PAGE_HOST = location.hostname;
+  const isFirstParty = EG ? EG.firstPartyFor(PAGE_HOST) : () => true;
+  const guard = {
+    sensitive: EG ? EG.createSensitiveSet() : null,
+    live: new Map(),       // 入力欄 → 今の文字
+    history: [],           // 以前の文字 (消えた・送った・貼った文字) {t, text}
+    grams: null,           // 下書きの断片 (遅延計算)
+    timers: new WeakMap(),
+    lastNotice: 0,
+    noticeCount: 0,
+  };
+  const HISTORY_MAX = 30;
+  const HISTORY_TTL = 30 * 60 * 1000;
+  // 前に覚えた記憶 (読み直しの前に検出した値・下書き) を content script 経由で受け取る。
+  // 受け取るまで (最大 1.5 秒) は、非同期で待てる通信 (fetch / XHR) の判定を待たせる。
+  let readyResolve = null;
+  guard.ready = new Promise((res) => { readyResolve = res; });
+  setTimeout(() => readyResolve && readyResolve(), 1500);
+  NS.__egressRestore = (data) => {
+    for (const v of Array.isArray(data.values) ? data.values : []) if (v && typeof v.v === "string") guard.sensitive && guard.sensitive.add(v.v, v.label);
+    for (const d of Array.isArray(data.drafts) ? data.drafts : []) if (typeof d === "string") pushHistory(d, true);
+    if (readyResolve) { readyResolve(); readyResolve = null; }
+  };
+  // 新しく覚えたものは、まとめて content script → SW に預ける
+  const toRemember = { values: [], drafts: [], timer: 0 };
+  function remember(kind, item) {
+    toRemember[kind].push(item);
+    if (toRemember.timer) return;
+    toRemember.timer = setTimeout(() => {
+      const msg = { source: TAG_IN, type: "egress-remember", values: toRemember.values.splice(0), drafts: toRemember.drafts.splice(0) };
+      toRemember.timer = 0;
+      try { window.postMessage(msg, "*"); } catch (_) {}
+    }, 800);
+  }
+  const maskingOn = () => !(NS.settings && NS.settings.enabled === false);
+  const guardActive = () =>
+    !!EG && maskingOn() && (guard.sensitive.size > 0 || guard.live.size > 0 || guard.history.length > 0);
+
+  function pushHistory(text, restoring) {
+    const t = String(text || "").trim();
+    if (!t) return;
+    if (guard.history.length && guard.history[0].text === t) return;
+    guard.history = [{ t: Date.now(), text: t }, ...guard.history.filter((h) => h.text !== t && !t.startsWith(h.text))].slice(0, HISTORY_MAX);
+    guard.grams = null;
+    if (!restoring) remember("drafts", t);
+  }
+  function draftsNow() {
+    const now = Date.now();
+    const before = guard.history.length;
+    guard.history = guard.history.filter((h) => now - h.t < HISTORY_TTL);
+    if (guard.history.length !== before) guard.grams = null;
+    const out = [];
+    for (const [el, t] of guard.live) {
+      if (!el.isConnected) { guard.live.delete(el); pushHistory(t); continue; }
+      if (t && t.trim()) out.push(t);
+    }
+    for (const h of guard.history) out.push(h.text);
+    return out;
+  }
+  // 入力の根元 (textarea / テキストの input / contenteditable の一番外側)
+  function editableRoot(node) {
+    const el = node && node.nodeType === 1 ? node : node && node.parentElement;
+    if (!el) return null;
+    if (el.tagName === "TEXTAREA") return el;
+    if (el.tagName === "INPUT") return /^(text|search|email|tel|url)?$/i.test(el.getAttribute("type") || "") ? el : null;
+    let root = null;
+    for (let cur = el; cur && cur.nodeType === 1; cur = cur.parentElement) if (cur.isContentEditable) root = cur;
+    return root;
+  }
+  const textOf = (el) => String((el.tagName === "TEXTAREA" || el.tagName === "INPUT" ? el.value : el.innerText) || "");
+  async function detectInto(text) {
+    if (!EG || !maskingOn() || !text || !text.trim()) return;
+    try {
+      // 常に伏せる語も覚えるため、ISOLATED のエンジン (リスト込み) を先に使う
+      let r = await localMask("sanitize", text);
+      if (!r) { const engine = await getEngine(); if (!engine) return; r = await engine.maskSanitize(text, engineOpts()); }
+      for (const d of (r && r.detections) || []) {
+        const v = typeof d.text === "string" ? d.text : text.slice(d.start, d.end);
+        const before = guard.sensitive.size;
+        guard.sensitive.add(v, d.entity_type);
+        if (guard.sensitive.size !== before) remember("values", { v, label: d.entity_type });
+      }
+    } catch (_) { /* 検出できなかった分は、外部宛ての下書きの断片の照合だけが効く */ }
+  }
+  function track(el) {
+    const prev = guard.live.has(el) ? guard.live.get(el) : null;
+    const t = textOf(el);
+    if (t === prev) return;
+    if (prev && prev.trim() && !t.startsWith(prev.trim())) pushHistory(prev); // 消えた・書き換えた前の文字も覚える
+    guard.live.set(el, t);
+    guard.grams = null;
+    clearTimeout(guard.timers.get(el));
+    guard.timers.set(el, setTimeout(() => { detectInto(t); if (t.trim().length >= 16) remember("drafts", t.trim()); }, 200));
+  }
+  if (EG) {
+    try { window.postMessage({ source: TAG_IN, type: "egress-restore-request" }, "*"); } catch (_) {}
+    const onEdit = (e) => { const el = editableRoot(e.target); if (el) track(el); };
+    document.addEventListener("input", onEdit, true);
+    document.addEventListener("compositionend", onEdit, true);
+    // 貼った文字・落とした文字 (入力欄に入らず添付に変わるサイトもあるので、ここで覚える)
+    document.addEventListener("paste", (e) => {
+      try { const t = e.clipboardData && e.clipboardData.getData("text/plain"); if (t) { pushHistory(t); detectInto(t); } } catch (_) {}
+    }, true);
+    document.addEventListener("drop", (e) => {
+      try { const t = e.dataTransfer && e.dataTransfer.getData("text/plain"); if (t) { pushHistory(t); detectInto(t); } } catch (_) {}
+    }, true);
+    // プログラムで入った文字 (下書きの復元など) も拾う
+    setInterval(() => {
+      if (!maskingOn()) return;
+      for (const el of document.querySelectorAll('textarea, [contenteditable="true"], [contenteditable=""]')) {
+        if (el.parentElement && el.parentElement.isContentEditable) continue;
+        track(el);
+      }
+    }, 3000);
+  }
+
+  function notifyGuard(r, url) {
+    LOG(`egress guard: ${r.action} ${redactUrl(url)} (${r.reason || "scrubbed"})`);
+    guard.noticeCount++;
+    const now = Date.now();
+    if (now - guard.lastNotice < 15000) return; // ピルへの通知はまとめる
+    guard.lastNotice = now;
+    try {
+      window.dispatchEvent(new CustomEvent("mask-mcp:egress", { detail: JSON.stringify({ action: r.action, reason: r.reason || "", count: guard.noticeCount }) }));
+    } catch (_) {}
+    guard.noticeCount = 0;
+  }
+  /** 通信 1 件の判定。body は {text} | {bytes} | {unreadable:true} */
+  function guardDecide(url, body) {
+    let host = "";
+    try { host = new URL(url, location.href).hostname; } catch (_) {}
+    const drafts = draftsNow();
+    if (!guard.grams) guard.grams = EG.draftGrams(drafts, 16);
+    const r = EG.decide({ url, host, ...body }, { sensitive: guard.sensitive, drafts, firstParty: isFirstParty, grams: guard.grams, echoMin: 16 });
+    if (r.action !== "pass") notifyGuard(r, url);
+    return r;
+  }
+  const BLOCKED = () => new TypeError("PII Guard: blocked a request carrying unmasked personal data");
+  // 止めた fetch: 外部 (解析ツール等) 宛てなら「送れた」(200) と返し、イベントを保存して送り直させない。
+  // サイト自身宛てはネットワークエラーとして見せる (アプリが成功と勘違いしないように)。
+  function blockedFetch(url) {
+    let host = "";
+    try { host = new URL(url, location.href).hostname; } catch (_) {}
+    if (host && !isFirstParty(host)) {
+      return Promise.resolve(new Response('{"code":200}', { status: 200, headers: { "content-type": "application/json" } }));
+    }
+    return Promise.reject(BLOCKED());
+  }
+
+  // 形を知っている送信: 本文を取り出して processBody (確認画面とマスク) に載せ、本文以外の
+  // フィールドに残る検出済みの値も伏せる。本文が無い (入力中の通信など) なら null。
+  async function maskKnownSend(adapter, raw, url) {
+    const model = adapter.decode(raw, draftsNow());
+    if (!model || !model.fields.length) return null;
+    const result = await processBody(adapter, model, url); // 取消は例外で上へ
+    let m = result.changed ? result.body : model;
+    // 添付 (中身・ファイル名) は確認画面を出さずに自動でマスクする。マスクできなければ送らない
+    if (typeof adapter.autoFields === "function") {
+      for (const f of adapter.autoFields(m)) {
+        const r = await sanitizeOnce(f.text, adapter.name, url);
+        if (!r || typeof r.sanitized_text !== "string") return { blocked: true };
+        let t = r.sanitized_text;
+        if (f.kind === "name") t = t.replace(/</g, "[").replace(/>/g, "]"); // ファイル名に < > は使わない
+        if (t !== f.text) { m = adapter.setField(m, f.path, t); LOG(`${adapter.name}: masked an attachment ${f.kind}`); }
+      }
+    }
+    const other = adapter.scrubOthers(m, guard.sensitive);
+    if (other.stuck) return { blocked: true };
+    if (result.changed) LOG(`${adapter.name}: substituted masked body`);
+    return { body: adapter.encode(other.model) };
+  }
+
+  // fetch の本文を読む (Request の本文も)。書き換えた本文で組み直す関数を添える
+  async function readFetchBody(input, init) {
+    const hasInit = !!(init && init.body != null);
+    const remake = (nb) => (hasInit ? [input, { ...init, body: nb }] : [new Request(input, { body: nb }), init]);
+    if (hasInit) {
+      const b = init.body;
+      if (typeof b === "string") return { text: b, rebuild: remake };
+      if (b instanceof URLSearchParams) return { text: b.toString(), rebuild: (nb) => remake(new URLSearchParams(nb)) };
+      if (b instanceof ArrayBuffer) return { bytes: new Uint8Array(b), rebuild: remake };
+      if (ArrayBuffer.isView(b)) return { bytes: new Uint8Array(b.buffer, b.byteOffset, b.byteLength), rebuild: remake };
+      if (b instanceof Blob) {
+        const u = new Uint8Array(await b.arrayBuffer());
+        return { bytes: u, rebuild: (nb) => remake(new Blob([nb], { type: b.type })) };
+      }
+      if (b instanceof FormData) return { ...formDataText(b), rebuild: null };
+      return { unreadable: true, rebuild: null };
+    }
+    if (typeof Request !== "undefined" && input instanceof Request && !/^(GET|HEAD)$/i.test(input.method)) {
+      try { return { bytes: new Uint8Array(await input.clone().arrayBuffer()), rebuild: remake }; }
+      catch (_) { return { unreadable: true, rebuild: null }; }
+    }
+    return { text: "", rebuild: null };
+  }
+  function formDataText(fd) {
+    let s = "";
+    let file = false;
+    for (const [k, v] of fd.entries()) { if (typeof v === "string") s += `${k}=${v}\n`; else file = true; }
+    return file && !s ? { unreadable: true } : { text: s };
+  }
+  function syncBody(data) {
+    if (data == null) return { text: "" };
+    if (typeof data === "string") return { text: data };
+    if (data instanceof URLSearchParams) return { text: data.toString(), form: true };
+    if (data instanceof ArrayBuffer) return { bytes: new Uint8Array(data) };
+    if (ArrayBuffer.isView(data)) return { bytes: new Uint8Array(data.buffer, data.byteOffset, data.byteLength) };
+    if (data instanceof FormData) return formDataText(data);
+    return { unreadable: true }; // Blob などは同期では読めない
+  }
+  // 止めた XHR は、ネットワークエラーと同じ見え方にする
+  function failXhr(xhr) {
+    setTimeout(() => {
+      try { xhr.dispatchEvent(new ProgressEvent("error")); } catch (_) {}
+      try { xhr.dispatchEvent(new ProgressEvent("loadend")); } catch (_) {}
+    }, 0);
+  }
+
+  // --- ページにつながっていない file input (F-EG-05) --------------------------
+  // 添付ガード (ISOLATED world の attachment-guard.js) は window の capture で change を受ける。
+  // 作ってすぐ click する file input はページにつながっておらず、change が window に届かない。
+  // click / showPicker の前に、見えない箱に入れてページへつなぐ (ページから見た動きは変わらない)。
+  (function connectDetachedFileInputs() {
+    let box = null;
+    const connect = (el) => {
+      try {
+        if (el.type !== "file" || el.isConnected) return;
+        if (!box || !box.isConnected) {
+          box = document.createElement("div");
+          box.setAttribute("data-pii-guard", "file-inputs");
+          box.style.display = "none";
+          (document.body || document.documentElement).appendChild(box);
+        }
+        box.appendChild(el);
+      } catch (_) {}
+    };
+    const origClick = HTMLInputElement.prototype.click;
+    HTMLInputElement.prototype.click = function () { connect(this); return origClick.apply(this, arguments); };
+    const origPicker = HTMLInputElement.prototype.showPicker;
+    if (typeof origPicker === "function") {
+      HTMLInputElement.prototype.showPicker = function () { connect(this); return origPicker.apply(this, arguments); };
+    }
+  })();
+
+  // --- 投げ直した drop のファイルを、フォルダ対応の API でも読めるようにする (F-EG-05) -------
+  // 添付ガードは、ページに渡す前にマスクした File を載せた drop を投げ直す (渡し先の input が無い
+  // サイト)。スクリプトで作った DataTransfer の項目は webkitGetAsEntry() が null を返すので、それで
+  // ファイルを数えるサイト (Gemini、2026-10-18 実測) は添付を捨てる。本物が null を返すファイル項目に
+  // だけ、その File を返す最小のエントリを返す (OS からの本物のドロップは本物のエントリのまま)。
+  if (typeof DataTransferItem !== "undefined" && typeof DataTransferItem.prototype.webkitGetAsEntry === "function") {
+    const origGetAsEntry = DataTransferItem.prototype.webkitGetAsEntry;
+    DataTransferItem.prototype.webkitGetAsEntry = function () {
+      const real = origGetAsEntry.apply(this, arguments);
+      if (real || this.kind !== "file") return real;
+      const file = this.getAsFile();
+      if (!file) return null;
+      return {
+        isFile: true, isDirectory: false, name: file.name, fullPath: "/" + file.name, filesystem: null,
+        file(success, error) { try { success(file); } catch (e) { if (typeof error === "function") error(e); } },
+        getParent(success) { if (typeof success === "function") success(null); },
+      };
+    };
+  }
+
   // --- fetch hook --------------------------------------------------------
 
   const originalFetch = window.fetch.bind(window);
@@ -1360,16 +1646,10 @@
           ? input
           : input && typeof input.url === "string"
           ? input.url
+          : input && typeof input.href === "string"
+          ? input.href
           : "";
-      const method =
-        (init && init.method) || (input && input.method) || "GET";
-
-      // Fast path: skip non-POST methods immediately. Polling / GET /
-      // HEAD / OPTIONS requests never carry user-typed chat content,
-      // so we don't even bother running adapter matchers for them.
-      if (method.toUpperCase() !== "POST") {
-        return originalFetch(input, init);
-      }
+      const method = String((init && init.method) || (input && input.method) || "GET").toUpperCase();
       // Resolve relative URLs (e.g. fetch("/api/...")) to absolute
       // BEFORE adapter matching. Without this, claude.ai's SPA — which
       // uses relative paths like ``/api/organizations/.../completion``
@@ -1380,48 +1660,67 @@
       } catch (_) {
         // Malformed URL → keep the raw string; adapter will just miss.
       }
-      const adapter = pickAdapter(url);
-      // Diagnostic: when ANY claude.ai / chatgpt / gemini / manus
-      // host POSTs, log once-per-unique URL so users can debug
-      // "sidebar never opens" by checking what endpoint the chat
-      // app actually hits. The log says whether the adapter matched
-      // or not. Deduped so chat polling doesn't flood the console.
-      try {
-        const h = new URL(url, location.href).host;
-        if (/(claude\.(ai|com)|\.claude\.com|chatgpt\.com|\.openai\.com|gemini\.google\.com|manus\.im|butterfly-effect\.dev)/i.test(h)) {
-          logOnce(
-            adapter ? "provider POST (adapter matched):" : "provider POST (NO adapter match):",
-            url,
-          );
+
+      // (1) 従来の JSON アダプタ (送信の本文を確認画面とマスクに載せる)
+      if (method === "POST") {
+        const adapter = pickAdapter(url);
+        // Diagnostic: when ANY claude.ai / chatgpt / gemini / manus
+        // host POSTs, log once-per-unique URL so users can debug
+        // "sidebar never opens" by checking what endpoint the chat
+        // app actually hits. Deduped so chat polling doesn't flood.
+        try {
+          const h = new URL(url, location.href).host;
+          if (/(claude\.(ai|com)|\.claude\.com|chatgpt\.com|\.openai\.com|gemini\.google\.com|manus\.im|butterfly-effect\.dev)/i.test(h)) {
+            logOnce(adapter ? "provider POST (adapter matched):" : "provider POST (NO adapter match):", url);
+          }
+        } catch (_) {}
+        if (adapter) {
+          const rawBody = init ? init.body : input && input.body;
+          let parsed = null;
+          if (typeof rawBody === "string") { try { parsed = JSON.parse(rawBody); } catch (_) { parsed = null; } }
+          if (parsed) {
+            if (!(await isEnabled())) return originalFetch(input, init);
+            const result = await processBody(adapter, parsed, url);
+            if (!result.changed) return originalFetch(input, init);
+            const nextInit = { ...(init || {}) };
+            nextInit.body = JSON.stringify(result.body);
+            LOG(`${adapter.name}: substituted masked body`);
+            return originalFetch(input, nextInit);
+          }
         }
-      } catch (_) {}
-      if (!adapter) {
-        return originalFetch(input, init);
-      }
-      if (!(await isEnabled())) {
-        return originalFetch(input, init);
       }
 
-      const rawBody = init ? init.body : input && input.body;
-      if (typeof rawBody !== "string") {
-        return originalFetch(input, init);
-      }
-      let parsed;
-      try {
-        parsed = JSON.parse(rawBody);
-      } catch (_) {
-        return originalFetch(input, init);
-      }
+      if (!EG || !maskingOn()) return originalFetch(input, init);
+      await guard.ready;
+      const known = method === "POST"
+        ? (EG.adapters.claudeRpc.match(url) ? EG.adapters.claudeRpc : EG.adapters.geminiSession.match(url) ? EG.adapters.geminiSession : null)
+        : null;
+      if (!known && !guardActive()) return originalFetch(input, init);
+      const body = await readFetchBody(input, init);
 
-      const result = await processBody(adapter, parsed, url);
-      if (!result.changed) {
-        return originalFetch(input, init);
+      // (2) 形を知っている送信 (protobuf / WebChannel)
+      if (known) {
+        const raw = known === EG.adapters.claudeRpc ? body.bytes : body.text;
+        if (raw != null && (await isEnabled())) {
+          const out = await maskKnownSend(known, raw, url);
+          if (out && out.blocked) { notifyGuard({ action: "block", reason: "known-send-unscrubbable" }, url); return Promise.reject(BLOCKED()); }
+          if (out) {
+            if (!body.rebuild) return Promise.reject(BLOCKED());
+            const [i2, n2] = body.rebuild(out.body);
+            return originalFetch(i2, n2);
+          }
+        }
       }
+      if (!guardActive()) return originalFetch(input, init);
 
-      const nextInit = { ...(init || {}) };
-      nextInit.body = JSON.stringify(result.body);
-      LOG(`${adapter.name}: substituted masked body`);
-      return originalFetch(input, nextInit);
+      // (3) それ以外: 検出済みの値・(外部宛ての) 下書きの断片を探して、伏せるか止める
+      const r = guardDecide(url, body.unreadable ? { unreadable: true } : body.bytes ? { bytes: body.bytes } : { text: body.text || "" });
+      if (r.action === "pass") return originalFetch(input, init);
+      if (r.action === "scrub" && body.rebuild) {
+        const [i2, n2] = body.rebuild(r.text != null ? r.text : r.bytes);
+        return originalFetch(i2, n2);
+      }
+      return blockedFetch(url);
     } catch (err) {
       if (err && err.message && err.message.includes("mask-mcp: user cancelled")) {
         LOG(err.message);
@@ -1456,67 +1755,93 @@
 
   XMLHttpRequest.prototype.send = function patchedSend(body) {
     try {
-      const method = (this._maskMcpMethod || "GET").toUpperCase();
+      const method = String(this._maskMcpMethod || "GET").toUpperCase();
       const rawUrl = this._maskMcpUrl || "";
-      // Fast path: only intercept POSTs with a string body. GET polling
-      // and binary uploads fall through silently — we never log non-send
-      // activity to keep the console quiet.
-      if (method !== "POST" || typeof body !== "string") {
-        return originalXhrSend.apply(this, arguments);
-      }
       // Resolve relative URL → absolute before adapter matching.
       let url = rawUrl;
       try {
         url = new URL(rawUrl, location.href).toString();
       } catch (_) {}
-      const adapter = pickAdapter(url);
+      const adapter = method === "POST" && typeof body === "string" ? pickAdapter(url) : null;
       // Diagnostic (deduped) for provider-host POSTs regardless of
       // adapter match, mirrors the fetch hook.
-      try {
-        const h = new URL(url, location.href).host;
-        if (/(claude\.(ai|com)|\.claude\.com|chatgpt\.com|\.openai\.com|gemini\.google\.com|manus\.im|butterfly-effect\.dev)/i.test(h)) {
-          logOnce(
-            adapter ? "provider XHR (adapter matched):" : "provider XHR (NO adapter match):",
-            url,
-          );
-        }
-      } catch (_) {}
-      if (!adapter) {
+      if (method === "POST") {
+        try {
+          const h = new URL(url, location.href).host;
+          if (/(claude\.(ai|com)|\.claude\.com|chatgpt\.com|\.openai\.com|gemini\.google\.com|manus\.im|butterfly-effect\.dev)/i.test(h)) {
+            logOnce(adapter ? "provider XHR (adapter matched):" : "provider XHR (NO adapter match):", url);
+          }
+        } catch (_) {}
+      }
+      let parsed = null;
+      if (adapter) { try { parsed = JSON.parse(body); } catch (_) { parsed = null; } }
+      const on = !!EG && maskingOn();
+      const known = !parsed && on && method === "POST"
+        ? (EG.adapters.geminiSession.match(url) && typeof body === "string" ? EG.adapters.geminiSession
+          : EG.adapters.claudeRpc.match(url) && body != null && typeof body !== "string" ? EG.adapters.claudeRpc : null)
+        : null;
+      if (!parsed && !known && !(on && guardActive())) {
         return originalXhrSend.apply(this, arguments);
       }
-      let parsed;
-      try {
-        parsed = JSON.parse(body);
-      } catch (_) {
-        return originalXhrSend.apply(this, arguments);
+      // 形を知らない文字の本文は、その場で判定する (同期)
+      if (!parsed && !known) {
+        const sb = syncBody(body);
+        if (!sb.unreadable && !sb.bytes) {
+          const r = guardDecide(url, { text: sb.text });
+          if (r.action === "pass") return originalXhrSend.apply(this, arguments);
+          if (r.action === "scrub" && r.text != null && !(body instanceof FormData)) {
+            return originalXhrSend.call(this, sb.form ? new URLSearchParams(r.text) : r.text);
+          }
+          failXhr(this);
+          return;
+        }
       }
 
       const xhr = this;
       const args = arguments;
       (async () => {
-        if (!(await isEnabled())) {
-          originalXhrSend.apply(xhr, args);
-          return;
-        }
         try {
-          const result = await processBody(adapter, parsed, url);
-          if (!result.changed) {
-            originalXhrSend.apply(xhr, args);
+          if (parsed) {
+            if (!(await isEnabled())) { originalXhrSend.apply(xhr, args); return; }
+            const result = await processBody(adapter, parsed, url);
+            if (!result.changed) { originalXhrSend.apply(xhr, args); return; }
+            LOG(`${adapter.name}: substituted masked XHR body`);
+            originalXhrSend.call(xhr, JSON.stringify(result.body));
             return;
           }
-          LOG(`${adapter.name}: substituted masked XHR body`);
-          originalXhrSend.call(xhr, JSON.stringify(result.body));
+          let raw = null;
+          let bytes = null;
+          let rebuild = null;
+          if (typeof body === "string") { raw = body; rebuild = (nb) => nb; }
+          else if (body instanceof Blob) { bytes = new Uint8Array(await body.arrayBuffer()); rebuild = (nb) => new Blob([nb], { type: body.type }); }
+          else {
+            const sb = syncBody(body);
+            if (sb.bytes) { bytes = sb.bytes; rebuild = (nb) => nb; }
+            else if (sb.text != null) raw = sb.text;
+          }
+          if (known && (await isEnabled())) {
+            const out = await maskKnownSend(known, known === EG.adapters.geminiSession ? raw : bytes, url);
+            if (out && out.blocked) { notifyGuard({ action: "block", reason: "known-send-unscrubbable" }, url); failXhr(xhr); return; }
+            if (out) { originalXhrSend.call(xhr, rebuild ? rebuild(out.body) : out.body); return; }
+          }
+          await guard.ready;
+          if (!guardActive()) { originalXhrSend.apply(xhr, args); return; }
+          const r = guardDecide(url, bytes ? { bytes } : raw != null ? { text: raw } : { unreadable: true });
+          if (r.action === "pass") originalXhrSend.apply(xhr, args);
+          else if (r.action === "scrub" && rebuild) originalXhrSend.call(xhr, rebuild(r.text != null ? r.text : r.bytes));
+          else failXhr(xhr);
         } catch (err) {
           if (err && err.message && err.message.includes("mask-mcp: user cancelled")) {
             LOG(err.message);
             try { xhr.abort(); } catch (_) { /* noop */ }
+            failXhr(xhr);
             return;
           }
-          // [SECURITY] Fail-closed: abort the XHR so the original
-          // body never reaches the network. Chat UIs surface this as
-          // a send error.
+          // [SECURITY] Fail-closed: never send the original body. Chat UIs
+          // surface this as a send error.
           WARN("XHR hook error; ABORTING (fail-closed):", err?.message || err);
           try { xhr.abort(); } catch (_) { /* noop */ }
+          failXhr(xhr);
         }
       })();
     } catch (err) {
@@ -1527,12 +1852,12 @@
     }
   };
 
-  // --- sendBeacon hook (log only) ----------------------------------------
+  // --- sendBeacon hook ----------------------------------------------------
   //
   // Sentry / Amplitude SDKs routinely deliver envelopes via
-  // ``navigator.sendBeacon`` which bypasses fetch+XHR entirely. We
-  // pass the call through unchanged and only LOG provider hits so the
-  // console reveals whether manus chat submission uses this path.
+  // ``navigator.sendBeacon`` which bypasses fetch+XHR entirely.
+  // プロバイダ自身のホスト宛ては従来どおり一律に止める。それ以外 (外部の解析ツール等) は
+  // 持ち出しガードで判定する (2026-10-18 実測: Manus の Amplitude は sendBeacon でも送る)。
 
   if (typeof navigator !== "undefined" && typeof navigator.sendBeacon === "function") {
     const originalSendBeacon = navigator.sendBeacon.bind(navigator);
@@ -1552,6 +1877,17 @@
           // which chat apps gracefully ignore.
           LOG("provider beacon BLOCKED:", redactUrl(url), "bodyType=" + typeof data);
           return false;
+        }
+        if (guardActive()) {
+          const abs = new URL(url, location.href).toString();
+          const sb = syncBody(data);
+          const r = guardDecide(abs, sb.unreadable ? { unreadable: true } : sb.bytes ? { bytes: sb.bytes } : { text: sb.text });
+          // 止めたときは「送った」と返す (解析 SDK が別経路で送り直し続けないように)
+          if (r.action === "block") return true;
+          if (r.action === "scrub" && !(data instanceof FormData)) {
+            return originalSendBeacon(url, r.text != null ? (sb.form ? new URLSearchParams(r.text) : r.text) : r.bytes);
+          }
+          if (r.action === "scrub") return true;
         }
       } catch (_) {}
       return originalSendBeacon(url, data);
@@ -1706,6 +2042,15 @@
         WARN("WS send hook setup failed:", err?.message || err);
       }
       if (!asyncHandled) {
+        // アダプタが扱わないフレームにも持ち出しガードを掛ける (入力中の文字を送るイベント等)
+        try {
+          if (guardActive()) {
+            const sb = syncBody(data);
+            const r = guardDecide(String(this.url || ""), sb.unreadable ? { unreadable: true } : sb.bytes ? { bytes: sb.bytes } : { text: sb.text });
+            if (r.action === "block") return undefined; // フレームを落とす (接続は保つ)
+            if (r.action === "scrub") return originalWsSend.call(this, r.text != null ? r.text : r.bytes);
+          }
+        } catch (_) { /* 判定できないときは従来どおり */ }
         return originalWsSend.apply(this, arguments);
       }
     };

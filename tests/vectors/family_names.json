@@ -1,0 +1,25 @@
+{
+  "label_groups": ["JP_SURNAME"],
+  "cases": [
+    {
+      "name": "配偶者の<姓 名> — 名まで隠す",
+      "input": "配偶者の山田 花子を登録しています",
+      "expected": [{ "label": "JP_SURNAME", "text": "山田 花子" }]
+    },
+    {
+      "name": "子：<姓 名>",
+      "input": "子：山田 一郎",
+      "expected": [{ "label": "JP_SURNAME", "text": "山田 一郎" }]
+    },
+    {
+      "name": "顧客：<姓名>",
+      "input": "顧客：山田太郎",
+      "expected": [{ "label": "JP_SURNAME", "text": "山田太郎" }]
+    },
+    {
+      "name": "担当の<姓名>様 — 敬称は飲み込まない",
+      "input": "担当の山田太郎様より連絡",
+      "expected": [{ "label": "JP_SURNAME", "text": "山田太郎" }]
+    }
+  ]
+}

@@ -80,47 +80,11 @@
   // back-to-front so earlier offsets stay valid as the string shrinks.
   function applyMasks(originalText, keepers) {
     if (!keepers || keepers.length === 0) return originalText;
-
-    // Pass 1 — number every (label, surface) pair left-to-right so
-    // repeated mentions of the same surface share a placeholder
-    // (``<PERSON_1>`` used twice means "same person referenced
-    // twice", matching the server-side _tag_mask invariant).
-    const counters = new Map();
-    const numbering = new Map();
-    const ascending = [...keepers].sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-    for (const [s, e, label] of ascending) {
-      if (!Number.isInteger(s) || !Number.isInteger(e) || e <= s) continue;
-      const surface = originalText.slice(s, e);
-      const key = `${label}\x00${surface}`;
-      if (!numbering.has(key)) {
-        const n = (counters.get(label) || 0) + 1;
-        counters.set(label, n);
-        numbering.set(key, n);
-      }
-    }
-
-    // Pass 2 — substitute back-to-front so earlier offsets remain
-    // valid as later substrings shrink or grow.
-    const descending = [...keepers].sort((a, b) => b[0] - a[0]);
-    let result = originalText;
-    for (const [s, e, label] of descending) {
-      if (
-        !Number.isInteger(s) ||
-        !Number.isInteger(e) ||
-        e <= s ||
-        s < 0 ||
-        e > result.length
-      ) {
-        // Defensive: skip malformed positions instead of throwing,
-        // so a single bad row never breaks the whole preview.
-        continue;
-      }
-      const surface = originalText.slice(s, e);
-      const lbl = String(label || "MASKED");
-      const n = numbering.get(`${lbl}\x00${surface}`) || 1;
-      result = result.slice(0, s) + `<${lbl}_${n}>` + result.slice(e);
-    }
-    return result;
+    // 送信本文と同じ置き換え (engine/aggregate.js の applySpans)。重なる範囲を
+    // まとめるので、プレビューでも伏せ字が途中で切れない (1.5.1)。
+    const agg = window.__localMaskMCP && window.__localMaskMCP.engine && window.__localMaskMCP.engine.aggregate;
+    if (!agg || typeof agg.applySpans !== "function") return originalText;
+    return agg.applySpans(originalText, keepers);
   }
 
   const STYLE = `
@@ -1369,6 +1333,8 @@
             .filter((p) => p && Number.isInteger(p[0]) && Number.isInteger(p[1]) && p[1] > p[0])
         : [],
       masked: entity.masked !== false, // default true
+      // V-02: 除外リストは MAIN world に来ない。ISOLATED world が検出結果に付けた印で判断する
+      allowlisted: entity.allowlisted === true,
       locked: false, // set by show() after force_masked_categories is read
       severity: normaliseSeverity(entity.severity),
       // Gateway-computed ``<ENTITY_TYPE_N>`` placeholder so the row
@@ -1404,6 +1370,9 @@
    */
   async function show(aggregatedResponse, originalText, opts) {
     opts = opts || {};
+    // 入力中の文章を対象にした確認 (composer-toggle.js)。確定しても送信はせず、
+    // 伏せた文章を入力欄に書き戻す。送信を示す文言を変える
+    const isDraft = !!opts.draft;
     // Promise resolved when background LLM augmentation finishes. When
     // provided, we open the sidebar immediately with the regex-only
     // snapshot and re-render after the LLM merges in.
@@ -1479,6 +1448,7 @@
 
       const host = document.createElement("div");
       host.setAttribute("data-mask-mcp-sidebar", "");
+      host.setAttribute("data-pii-guard", "sidebar");
       host.style.all = "initial";
       host.style.display = "block";
       host.style.height = "100vh";
@@ -2292,7 +2262,12 @@
             timerId = setTimeout(doToggle, ms);
           };
 
+          // 行の中の「除外」ボタンの操作は行の長押しとして扱わない (1.6.0)。pointerdown で
+          // ポインタを捕捉すると click の宛先が行になり、ボタンのハンドラが動かなかった
+          const onExcludeBtn = (event) =>
+            !!(event && event.target && typeof event.target.closest === "function" && event.target.closest(".exclude-btn"));
           const onDown = (event) => {
+            if (onExcludeBtn(event)) return;
             if (timerId !== null) return; // already holding
             holdFired = false;
             if (requiresHold()) {
@@ -2300,7 +2275,8 @@
             }
             // else: wait for pointerup — it's a click path
           };
-          const onUp = () => {
+          const onUp = (event) => {
+            if (onExcludeBtn(event)) return;
             const wasHolding = timerId !== null;
             clearTimers();
             resetFill();
@@ -2424,7 +2400,7 @@
         const lead = document.createElement("p");
         lead.className = "confidential-warning-lead";
         lead.textContent =
-          "以下はマスクされません。送信してよいか確認してください。";
+          isDraft ? "以下はマスクされません。確認してください。" : "以下はマスクされません。送信してよいか確認してください。";
         warn.appendChild(lead);
 
         for (const hit of confidentialHits) {
@@ -2522,7 +2498,7 @@
             row.locked = true;
             row.masked = true;
           }
-          if (allowlist.has(row.value)) {
+          if (allowlist.has(row.value) || row.allowlisted) {
             row.masked = false;
             row.locked = false;
           }
@@ -2563,7 +2539,7 @@
         if (categoryOrder.length === 0) {
           const emptyMsg = document.createElement("div");
           emptyMsg.className = "empty";
-          emptyMsg.textContent = "✓ PII は検出されませんでした — そのまま送信できます";
+          emptyMsg.textContent = isDraft ? "✓ PII は検出されませんでした" : "✓ PII は検出されませんでした — そのまま送信できます";
           categoriesWrap.appendChild(emptyMsg);
         }
         applySevFilter();
@@ -2780,7 +2756,7 @@
       const confirmBtn = document.createElement("button");
       confirmBtn.type = "button";
       confirmBtn.className = "primary";
-      confirmBtn.textContent = "選択したものをマスクして送信 (Enter)";
+      confirmBtn.textContent = isDraft ? "選択したものをマスクする (Enter)" : "選択したものをマスクして送信 (Enter)";
       footer.appendChild(cancelBtn);
       footer.appendChild(confirmBtn);
 
@@ -2802,6 +2778,51 @@
       // 直前の maskForceList (前回 recompute 時の snapshot)。新規追加 entry
       // を差分で検出してそこへスクロール + フラッシュするために使う。
       let previousForcelist = [];
+      let previousForceKeys = null; // V-02: 直前の「常に伏せる語」の検出 (label|value)
+
+      // V-02: 「常に伏せる語」のリストは MAIN world に来ないので、ISOLATED world が返した
+      // 「この文の中の位置」(ufmDets) で再計算する。
+      function recomputeWithDetections(ufmDets) {
+        const engine = window.__localMaskMCP && window.__localMaskMCP.engine;
+        if (!engine || typeof engine.resolveOverlaps !== "function") return;
+        const agg = engine.aggregate;
+        if (!agg || typeof agg.aggregateDetections !== "function") return;
+        if (typeof originalText !== "string" || originalText.length === 0) return;
+        const baselineDets = [];
+        for (const row of baselineAggregated) {
+          if (!row || typeof row.label !== "string" || row.label.startsWith("USER_DEFINED_")) continue;
+          for (const pos of Array.isArray(row.positions) ? row.positions : []) {
+            if (!Array.isArray(pos) || pos.length < 2) continue;
+            baselineDets.push({ entity_type: row.label, start: Number(pos[0]), end: Number(pos[1]), text: String(row.value || ""), score: 1.0, action: row.masked === false ? "allowed" : "masked" });
+          }
+        }
+        const dets = (Array.isArray(ufmDets) ? ufmDets : []).filter((d) => d && typeof d.entity_type === "string" && Number.isInteger(d.start) && Number.isInteger(d.end));
+        const nextAgg = agg.aggregateDetections(engine.resolveOverlaps(baselineDets.concat(dets)));
+        const keys = new Set(dets.map((d) => d.entity_type + "|" + d.text));
+        const prev = previousForceKeys || new Set(baselineAggregated.filter((r) => r && String(r.label).startsWith("USER_DEFINED_")).map((r) => r.label + "|" + r.value));
+        previousForceKeys = keys;
+        applyAggregated(nextAgg, { fromForcelist: true });
+        // 新しく加わった語の行へスクロールして光らせる (従来と同じ)
+        for (const k of keys) {
+          if (prev.has(k)) continue;
+          const bar = k.indexOf("|");
+          for (const r of rows) {
+            if (r.value === k.slice(bar + 1) && r.label === k.slice(0, bar)) { scrollToAndFlashRow(r.key); break; }
+          }
+        }
+      }
+      // リストが変わった合図 (listsVersion) を受けたら、ISOLATED world に再計算の材料を頼む
+      let lastListsVersion = (NS.settings && NS.settings.listsVersion) || 0;
+      async function refreshLists() {
+        if (typeof NS.requestLocal !== "function" || typeof originalText !== "string" || !originalText) return;
+        const res = await NS.requestLocal("lists", { text: originalText, values: rows.map((r) => r.value) });
+        if (!res) return;
+        const allowSet = new Set(Array.isArray(res.allowValues) ? res.allowValues : []);
+        for (const [, ctl] of rowControls) {
+          if (allowSet.has(ctl.row.value) && ctl.row.masked) ctl.setState(false);
+        }
+        recomputeWithDetections(res.forceDetections);
+      }
 
       function recomputeWithForcelist(entries) {
         const engine = window.__localMaskMCP && window.__localMaskMCP.engine;
@@ -2861,7 +2882,13 @@
       function onSettingsUpdated(event) {
         const next = event && event.detail;
         if (!next) return;
-        if (Array.isArray(next.maskAllowlist)) {
+        if (typeof next.listsVersion === "number" && next.listsVersion !== lastListsVersion) {
+          lastListsVersion = next.listsVersion;
+          refreshLists();
+        }
+        // 以前の content.js (リストの値を配っていた版) との互換。今の版は空の配列しか送らないので、
+        // 空のときは何もしない (空の「常に伏せる語」で再計算すると、その行が消えてしまう)。
+        if (Array.isArray(next.maskAllowlist) && next.maskAllowlist.length) {
           const allowSet = new Set(next.maskAllowlist);
           for (const [, ctl] of rowControls) {
             if (allowSet.has(ctl.row.value) && ctl.row.masked) {
@@ -2869,7 +2896,7 @@
             }
           }
         }
-        if (Array.isArray(next.maskForceList)) {
+        if (Array.isArray(next.maskForceList) && next.maskForceList.length) {
           // 短時間に複数 storage.onChanged が飛ぶケースに備えて
           // requestAnimationFrame で deduplicate (必要最小限の再描画)。
           if (forceListRafId) cancelAnimationFrame(forceListRafId);

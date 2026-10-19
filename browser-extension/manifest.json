@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "PII Guard (dev — local LLM)",
-  "version": "1.5.0",
-  "version_name": "1.5.0-dev",
+  "version": "1.7.0",
+  "version_name": "1.7.0-dev",
   "description": "PII masking + optional local LLM proxy. Dev build (not for Web Store).",
   "permissions": [
     "storage",
@@ -39,7 +39,25 @@
         "https://*.manus.im/*"
       ],
       "js": [
-        "content.js"
+        "engine/dictionaries.js",
+        "engine/patterns.js",
+        "engine/classification.js",
+        "engine/severity.js",
+        "engine/categories.js",
+        "engine/aggregate.js",
+        "engine/force-mask.js",
+        "engine/blocklist.js",
+        "engine/user-force-mask.js",
+        "engine/confidential.js",
+        "engine/engine.js",
+        "engine/bundle.js",
+        "content.js",
+        "tint.js",
+        "composer-toggle.js",
+        "secure-composer/composer-state.js",
+        "secure-composer/privacy-boundary.js",
+        "adapters/chatgpt-composer-adapter.js",
+        "attachments/attachment-guard.js"
       ],
       "run_at": "document_start"
     }
@@ -65,6 +83,13 @@
         "engine/llm-prompts.js",
         "engine/onnx-detector.js",
         "engine/confidential.js",
+        "secure-composer/secure-composer.js",
+        "secure-composer/privacy-boundary.js",
+        "secure-composer/composer-state.js",
+        "secure-composer/secure-composer.css",
+        "secure-composer/secure-composer.html",
+        "security/leak-detector.js",
+        "security/egress-guard.js",
         "vendor/transformers/transformers.min.js",
         "vendor/transformers/ort-wasm-simd-threaded.jsep.mjs",
         "vendor/transformers/ort-wasm-simd-threaded.jsep.wasm"
@@ -83,6 +108,7 @@
     "default_popup": "popup.html",
     "default_icon": {
       "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
       "48": "icons/icon48.png",
       "128": "icons/icon128.png"
     }
@@ -93,6 +119,7 @@
   },
   "icons": {
     "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
   }

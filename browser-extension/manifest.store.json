@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "PII Guard",
-  "version": "1.5.0",
+  "version": "1.7.0",
   "description": "AIチャットへの送信前に、個人情報や機密の数値を端末内で自動検出してマスキング。入力内容を第三者のサーバーへ送信しません。",
   "permissions": [
     "storage",
@@ -40,7 +40,25 @@
         "https://*.manus.im/*"
       ],
       "js": [
-        "content.js"
+        "engine/dictionaries.js",
+        "engine/patterns.js",
+        "engine/classification.js",
+        "engine/severity.js",
+        "engine/categories.js",
+        "engine/aggregate.js",
+        "engine/force-mask.js",
+        "engine/blocklist.js",
+        "engine/user-force-mask.js",
+        "engine/confidential.js",
+        "engine/engine.js",
+        "engine/bundle.js",
+        "content.js",
+        "tint.js",
+        "composer-toggle.js",
+        "secure-composer/composer-state.js",
+        "secure-composer/privacy-boundary.js",
+        "adapters/chatgpt-composer-adapter.js",
+        "attachments/attachment-guard.js"
       ],
       "run_at": "document_start"
     }
@@ -68,7 +86,14 @@
         "engine/confidential.js",
         "vendor/transformers/transformers.min.js",
         "vendor/transformers/ort-wasm-simd-threaded.jsep.mjs",
-        "vendor/transformers/ort-wasm-simd-threaded.jsep.wasm"
+        "vendor/transformers/ort-wasm-simd-threaded.jsep.wasm",
+        "security/leak-detector.js",
+        "security/egress-guard.js",
+        "secure-composer/secure-composer.html",
+        "secure-composer/secure-composer.css",
+        "secure-composer/composer-state.js",
+        "secure-composer/privacy-boundary.js",
+        "secure-composer/secure-composer.js"
       ],
       "matches": [
         "https://claude.ai/*",
@@ -84,6 +109,7 @@
     "default_popup": "popup.html",
     "default_icon": {
       "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
       "48": "icons/icon48.png",
       "128": "icons/icon128.png"
     }
@@ -94,6 +120,7 @@
   },
   "icons": {
     "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
   }

@@ -136,10 +136,12 @@
   for (const f of ENGINE_FILES) injectScript(f);
   injectScript("review-modal.js");
   injectScript("sidebar.js");
+  // 原文の持ち出しガード (F-EG-01〜04)。injected.js が使うので先に読む
+  injectScript("security/egress-guard.js");
   injectScript("injected.js");
   console.debug(
     "[pii-guard] injected",
-    ENGINE_FILES.length + 3,
+    ENGINE_FILES.length + 4,
     "scripts (engine + ui + hook)"
   );
 
@@ -149,36 +151,53 @@
   // toggle in the popup takes effect on the very next intercept.
   // ``uiMode`` defaults to ``"sidebar"`` (Milestone 8 Wave B); the
   // legacy modal experience is opt-in via the popup radio.
+  // F-SC-11 (fail-open 修正): Secure Composer の overlay が「実際に生きている」間だけ true。
+  // adapter が iframe の ready で true、teardown/blocked/入力欄消失で false にする。これが
+  // false の間は、SC 設定が ON でも injected.js は横取りを続ける (fail-closed)。既定 false =
+  // overlay が確認できるまで素通ししない。機密の非配布 (V-02) はこれとは別に「設定」で常時効く。
+  let scOverlayLive = false;
+  // V-02: 除外リスト・常に伏せる語が変わったことだけを MAIN world に知らせる番号 (中身からは作らない)
+  let listsVersion = 0;
+
   async function broadcastSettings() {
     let interactive = true;
     let uiMode = "sidebar";
     let maskAllowlist = [];
     let maskForceList = [];
+    let enabled = true;
     let mlEnabled = false;
+    // scOwnsComposer: このタブで Secure Composer が入力を受け持っているか (ChatGPT かつ
+    // secureComposerEnabled)。MAIN world に配る非機密フラグ。injected.js はこれが true の間、
+    // ChatGPT の送信を横取りしない (SC が唯一の経路。二重確認・再試行バイパスの根治, F-SC-11)。
+    let scOwnsComposer = false;
+    // [SECURITY] 除外リスト・常に伏せる語といった機密を MAIN world に配ると、ページ JS が読める
+    // (V-02)。2026-10-18 から全サイトで配らない: ページ (injected.js / sidebar.js) のマスクと
+    // 確認画面は、この ISOLATED world のエンジンに "local-mask" で頼み、渡された文についての
+    // 結果だけを受け取る (handleLocalMask)。配るのは「リストがあるか」と変わった合図だけ。
+    let hasSecretLists = false;
+    const secureComposerHost = /(^|\.)(chatgpt\.com|openai\.com)$/.test(location.hostname);
     try {
       const stored = await chrome.storage.local.get([
-        "interactive", "uiMode", "maskAllowlist", "maskForceList", "mlEnabled",
+        "interactive", "uiMode", "maskAllowlist", "maskForceList", "mlEnabled", "enabled", "secureComposerEnabled",
       ]);
       if (typeof stored.mlEnabled === "boolean") mlEnabled = stored.mlEnabled;
       interactive = stored.interactive !== false;
       if (stored.uiMode === "modal" || stored.uiMode === "sidebar") {
         uiMode = stored.uiMode;
       }
-      if (Array.isArray(stored.maskAllowlist)) {
-        maskAllowlist = stored.maskAllowlist.filter((v) => typeof v === "string");
-      }
-      if (Array.isArray(stored.maskForceList)) {
-        // サイドバー drop で追加された user force-mask list。
-        // 各 entry は { value: string, category: string } の最小形式。
-        // 互換: 古い文字列配列はカテゴリなし (OTHER) で読み込む。
-        maskForceList = stored.maskForceList
-          .map((e) => typeof e === "string"
-            ? { value: e, category: "OTHER" }
-            : (e && typeof e.value === "string")
-              ? { value: e.value, category: typeof e.category === "string" ? e.category : "OTHER" }
-              : null)
-          .filter(Boolean);
-      }
+      enabled = stored.enabled !== false;
+      const scEnabled = secureComposerHost && stored.secureComposerEnabled !== false;
+      // 2 つを分離する:
+      //  - secretsStayLocal (V-02): 機密を MAIN world に出さないのは「設定」で決める。overlay の
+      //    生死に連動させると、起動直後 (overlay が live になる前) の配布に機密が乗ってページに
+      //    読まれてしまう。設定が ON なら常に出さない。
+      //  - scOwnsComposer (F-SC-11 fail-open 修正): injected.js を素通しさせるのは overlay が実際に
+      //    live なときだけ。overlay が無ければ injected.js がマスクに戻る (fail-closed)。
+      scOwnsComposer = scEnabled && scOverlayLive;
+      // リストの値は配らない (maskAllowlist / maskForceList は空のまま)。有無だけ知らせる:
+      // ISOLATED に頼めないときに、MAIN world のエンジン (リスト無し) で黙って続けず止めるため。
+      hasSecretLists = (Array.isArray(stored.maskAllowlist) && stored.maskAllowlist.length > 0) ||
+        (Array.isArray(stored.maskForceList) && stored.maskForceList.length > 0);
     } catch (_) {
       interactive = true;
       uiMode = "sidebar";
@@ -187,16 +206,26 @@
       {
         source: TAG_OUT,
         type: "settings",
-        settings: { interactive, uiMode, maskAllowlist, maskForceList, mlEnabled },
+        settings: { interactive, uiMode, maskAllowlist, maskForceList, mlEnabled, enabled, scOwnsComposer, hasSecretLists, listsVersion },
       },
       "*"
     );
   }
+  // adapter (同じ isolated world) が overlay の生死を知らせる口。live が変わるたびに再配布し、
+  // injected.js の scOwnsComposer と機密配布を即座に切り替える (fail-closed, F-SC-11)。
+  window.__localMaskMCP = window.__localMaskMCP || {};
+  window.__localMaskMCP.__scSetOverlayLive = (v) => {
+    const next = !!v;
+    if (next === scOverlayLive) return;
+    scOverlayLive = next;
+    broadcastSettings();
+  };
   broadcastSettings();
   try {
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area !== "local") return;
-      if ("interactive" in changes || "uiMode" in changes || "maskAllowlist" in changes || "maskForceList" in changes || "mlEnabled" in changes) {
+      if ("maskAllowlist" in changes || "maskForceList" in changes) listsVersion++;
+      if ("interactive" in changes || "uiMode" in changes || "maskAllowlist" in changes || "maskForceList" in changes || "mlEnabled" in changes || "enabled" in changes || "secureComposerEnabled" in changes) {
         broadcastSettings();
       }
     });
@@ -206,6 +235,66 @@
     // the API ever throws at boot.
   }
 
+  // ---- V-02: ページのマスクを、リスト込みでこの ISOLATED world のエンジンで行う ----------------
+  // kind: "sanitize" (maskSanitize) / "aggregated" (maskAggregated、除外リストの行に masked:false と
+  // allowlisted:true の印) / "lists" (確認画面の再計算用: 渡された値のうち除外リストにあるもの、
+  // 渡された文の中の「常に伏せる語」の位置)。返すのは渡された文についての結果だけ。
+  // ページは任意の文を投げて、ある語がリストにあるかを試せる (問い合わせによる推測)。マスクの結果は
+  // ページの通信に載るので避けられない限界。リストそのものを丸ごと読める状態よりは狭い。
+  const isoEngine = () => {
+    const e = window.__localMaskMCP && window.__localMaskMCP.engine;
+    return e && e.ready && typeof e.maskSanitize === "function" ? e : null;
+  };
+  async function waitIsoEngine(ms) {
+    const end = Date.now() + ms;
+    while (Date.now() < end && !isoEngine()) await new Promise((r) => setTimeout(r, 50));
+    return isoEngine();
+  }
+  const forceEntryOf = (e) => (typeof e === "string" ? { value: e, category: "OTHER" }
+    : e && typeof e.value === "string" ? { value: e.value, category: typeof e.category === "string" ? e.category : "OTHER" } : null);
+  async function handleLocalMask(data) {
+    const { id, kind, text } = data;
+    let result = null;
+    try {
+      if (typeof text === "string" && text.length <= 2 * 1024 * 1024) {
+        const engine = await waitIsoEngine(3000);
+        if (engine) {
+          const st = await chrome.storage.local.get(["maskAllowlist", "maskForceList", "mlEnabled"]);
+          const allow = new Set((Array.isArray(st.maskAllowlist) ? st.maskAllowlist : []).filter((v) => typeof v === "string"));
+          const force = (Array.isArray(st.maskForceList) ? st.maskForceList : []).map(forceEntryOf).filter(Boolean);
+          const opts = { userForceMaskEntries: force, mlEnabled: st.mlEnabled === true };
+          if (kind === "aggregated") {
+            result = await engine.maskAggregated(text, opts);
+            for (const row of (result && Array.isArray(result.aggregated) ? result.aggregated : [])) {
+              if (row && allow.has(row.value)) { row.masked = false; row.allowlisted = true; }
+            }
+          } else if (kind === "lists") {
+            const values = (Array.isArray(data.values) ? data.values : []).filter((v) => typeof v === "string").slice(0, 500);
+            const ufm = engine.userForceMask;
+            result = {
+              allowValues: values.filter((v) => allow.has(v)),
+              forceDetections: ufm && typeof ufm.detectUserForceMask === "function" && force.length ? ufm.detectUserForceMask(text, force) : [],
+            };
+          } else {
+            result = await engine.maskSanitize(text, opts);
+          }
+        }
+      }
+    } catch (_) { result = null; }
+    window.postMessage({ source: TAG_OUT, id, type: "local-mask-result", result }, "*");
+  }
+
+  // F-EG-03: このサイトで前に覚えた持ち出しガードの記憶を、起動時に SW から取っておく
+  const egressRestore = new Promise((resolve) => {
+    try {
+      chrome.runtime.sendMessage({ type: "EGRESS_RESTORE" }, (resp) => {
+        void chrome.runtime.lastError;
+        resolve(resp && resp.ok ? resp : { values: [], drafts: [] });
+      });
+    } catch (_) { resolve({ values: [], drafts: [] }); }
+    setTimeout(() => resolve({ values: [], drafts: [] }), 1500);
+  });
+
   // 2) Handle page-world requests.
   window.addEventListener("message", (event) => {
     if (event.source !== window) return;
@@ -213,64 +302,51 @@
     if (!data || data.source !== TAG_IN) return;
 
     // Allowlist add (no id — fire-and-forget write to chrome.storage).
-    if (data.type === "add-allowlist" && typeof data.value === "string") {
-      (async () => {
-        try {
-          const { maskAllowlist = [] } = await chrome.storage.local.get("maskAllowlist");
-          const v = data.value.trim();
-          if (v && !maskAllowlist.includes(v)) {
-            maskAllowlist.push(v);
-            await chrome.storage.local.set({ maskAllowlist });
-          }
-        } catch (_) {}
-      })();
+    // 除外リストと常に伏せる語の変更 (サイドバーから)。ページ側 (MAIN world) からの
+    // メッセージはサイトのスクリプトにも送れるので、ここでは保存しない。isolated world の
+    // 閉じた UI (composer-toggle.js) が利用者に確認を出し、押されたときだけ保存する (1.6.0)
+    if ((data.type === "add-allowlist" || data.type === "add-forcelist" || data.type === "remove-forcelist") && typeof data.value === "string") {
+      const confirm = window.__localMaskMCP && window.__localMaskMCP.composerToggle && window.__localMaskMCP.composerToggle.confirmPersist;
+      if (typeof confirm === "function") {
+        confirm({ type: data.type, value: data.value, category: typeof data.category === "string" ? data.category : null });
+      } else {
+        console.warn(`[pii-guard] ${data.type} ignored: the confirmation UI is not available`);
+      }
       return;
     }
 
-    // Force-mask list add — drop-and-pick-category flow from the sidebar.
-    if (data.type === "add-forcelist" && typeof data.value === "string") {
-      (async () => {
-        try {
-          const { maskForceList = [] } = await chrome.storage.local.get("maskForceList");
-          const normalized = maskForceList.map((e) =>
-            typeof e === "string"
-              ? { value: e, category: "OTHER" }
-              : { value: e.value, category: e.category || "OTHER" }
-          );
-          const v = data.value;
-          const cat = typeof data.category === "string" ? data.category : "OTHER";
-          if (v && !normalized.some((e) => e.value === v && e.category === cat)) {
-            normalized.push({ value: v, category: cat });
-            await chrome.storage.local.set({ maskForceList: normalized });
-          }
-        } catch (e) {
-          console.warn("[pii-guard] force-mask add failed:", e && e.message ? e.message : e);
-        }
-      })();
+    // F-EG-03: 持ち出しガードの記憶の保存と復元 (SW の chrome.storage.session、サイトごと)。
+    // ページからも送れるメッセージだが、SW は送り手のタブのサイトの記憶しか触らせない。
+    if (data.type === "egress-remember") {
+      try {
+        chrome.runtime.sendMessage({
+          type: "EGRESS_REMEMBER",
+          values: Array.isArray(data.values) ? data.values.slice(0, 200) : [],
+          drafts: Array.isArray(data.drafts) ? data.drafts.slice(0, 20) : [],
+        });
+      } catch (_) { /* SW が眠っていても致命的ではない */ }
+      return;
+    }
+    if (data.type === "egress-restore-request") {
+      egressRestore.then((r) => {
+        window.postMessage({ source: TAG_OUT, type: "egress-restore", values: r.values || [], drafts: r.drafts || [] }, "*");
+      });
       return;
     }
 
-    // Force-mask list remove — ( value + category ) ペアで一致を削除。
-    if (data.type === "remove-forcelist" && typeof data.value === "string") {
-      (async () => {
-        try {
-          const { maskForceList = [] } = await chrome.storage.local.get("maskForceList");
-          const v = data.value;
-          const cat = typeof data.category === "string" ? data.category : null;
-          const next = maskForceList.filter((e) => {
-            const ev = typeof e === "string" ? e : e.value;
-            const ec = typeof e === "string" ? "OTHER" : (e.category || "OTHER");
-            return !(ev === v && (cat === null || ec === cat));
-          });
-          await chrome.storage.local.set({ maskForceList: next });
-        } catch (_) {}
-      })();
+    // ページ側のスクリプトが受け取りの準備をしてから設定を取りに来る (1.5.1)。
+    // 起動直後に送った設定は、受け取り手の読み込み前だと失われ、除外リストも
+    // 常に伏せる語も効かなかった。id を持たない要求なので、下の id 判定より前で受ける
+    if (data.type === "request-settings") {
+      broadcastSettings();
       return;
     }
 
     if (typeof data.id !== "string") return;
 
-    if (data.type === "sanitize") {
+    if (data.type === "local-mask") {
+      handleLocalMask(data);
+    } else if (data.type === "sanitize") {
       handleSanitize(data);
     } else if (data.type === "sanitize-aggregated") {
       handleSanitizeAggregated(data);
@@ -452,15 +528,14 @@
   // `config: null` and handleLlmCall short-circuits.
   async function handleLlmConfig(data) {
     const { id } = data;
+    // [SECURITY] MAIN world (= ページが読める) には機密を出さない。LLM の URL・モデル・
+    // 種別は isolated world と SW だけが持つ。ページには「有効か」「モード」「タイムアウト」
+    // という非機密の表示用の値だけ返す。実際の URL/モデルは handleLlmCall が chrome.storage
+    // から組み立てる (V-03 の解消, threat-model INV-4)。
     let cfg = null;
     try {
       const stored = await chrome.storage.local.get([
-        "localLlmEnabled",
-        "localLlmUrl",
-        "localLlmModel",
-        "localLlmMode",
-        "localLlmKind",
-        "localLlmTimeoutMs",
+        "localLlmEnabled", "localLlmUrl", "localLlmMode", "localLlmTimeoutMs",
       ]);
       if (
         stored.localLlmEnabled === true &&
@@ -468,10 +543,7 @@
         stored.localLlmUrl
       ) {
         cfg = {
-          url: stored.localLlmUrl.replace(/\/+$/, ""),
-          model: stored.localLlmModel || "",
           mode: stored.localLlmMode === "replace" ? "replace" : "detect",
-          kind: stored.localLlmKind === "openai-compat" ? "openai-compat" : "ollama",
           timeoutMs: Number(stored.localLlmTimeoutMs) || 120000,
         };
       }
@@ -483,8 +555,25 @@
   }
 
   async function handleLlmCall(data) {
-    const { id, system, user, config } = data;
+    const { id, system, user } = data;
     let result = null;
+    // [SECURITY] ページが渡してきた config は信用しない。URL・パス・モデル・種別は
+    // すべて chrome.storage の保存値から組み立てる。これで偽装した llm-call に任意の
+    // パス (/api/pull など) やモデルを叩かせない (V-04 の解消, threat-model INV-3)。
+    let config = null;
+    try {
+      const stored = await chrome.storage.local.get([
+        "localLlmEnabled", "localLlmUrl", "localLlmModel", "localLlmKind", "localLlmTimeoutMs",
+      ]);
+      if (stored.localLlmEnabled === true && typeof stored.localLlmUrl === "string" && stored.localLlmUrl) {
+        config = {
+          url: stored.localLlmUrl.replace(/\/+$/, ""),
+          model: stored.localLlmModel || "",
+          kind: stored.localLlmKind === "openai-compat" ? "openai-compat" : "ollama",
+          timeoutMs: Number(stored.localLlmTimeoutMs) || 120000,
+        };
+      }
+    } catch (_) { config = null; }
     if (!config || !config.url) {
       window.postMessage({ source: TAG_OUT, id, type: "llm-call-result", result: null }, "*");
       return;
