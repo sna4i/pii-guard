@@ -241,9 +241,11 @@
     .wrap { position: relative; display: inline-flex; align-items: center; gap: 4px;
       --size: 28px; --glyph: 16px; --fg: #374151; --fg-off: #9ca3af; --halo: #ffffff; --hover: rgba(0,0,0,.06);
       --float-bg: #ffffff; --float-border: #d1d5db; --warn-fg: #ca8a04; --warn-bg: rgba(234,179,8,.18);
+      --logo-a: #0176fb; --logo-b: #012b6a;
       font: 12px/1 -apple-system, "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif; color: #374151; }
     .wrap.dark { color: #e5e7eb; --fg: #d1d5db; --fg-off: #6b7280; --halo: #2f2f2f; --hover: rgba(255,255,255,.08);
-      --float-bg: #1f2937; --float-border: #4b5563; --warn-fg: #facc15; --warn-bg: rgba(250,204,21,.18); }
+      --float-bg: #1f2937; --float-border: #4b5563; --warn-fg: #facc15; --warn-bg: rgba(250,204,21,.18);
+      --logo-a: #2b8cff; --logo-b: #5b8ee6; }
     .wrap.floating { flex-direction: row-reverse; --halo: var(--float-bg); }
     .toggle { width: var(--size); height: var(--size); flex: none; margin: 0; padding: 0; border: 0; border-radius: 50%;
       background: transparent; color: var(--fg); cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
@@ -251,21 +253,18 @@
     .toggle:focus-visible { outline: 2px solid #6366f1; outline-offset: 1px; }
     .wrap.floating .toggle { background: var(--float-bg); border: 1px solid var(--float-border); box-shadow: 0 1px 3px rgba(0,0,0,.14); }
     .logo { width: var(--glyph); height: var(--glyph); display: block; overflow: visible; }
-    .logo .shield, .logo .aster { fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
-    .logo .shackle { fill: none; stroke: #2563eb; stroke-width: 2; }
-    .logo .lock { fill: #2563eb; stroke: var(--halo); stroke-width: 1.8; paint-order: stroke; }
-    .logo .hole { fill: #ffffff; }
+    /* 盾の左 (pa) と、右と人 (pb)。暗い表示ではブランドの紺 (#012B6A) が沈むので明るめにする */
+    .logo .pa { fill: var(--logo-a); }
+    .logo .pb { fill: var(--logo-b); }
     .logo .slash-halo { stroke: var(--halo); stroke-width: 5; stroke-linecap: round; display: none; }
     .logo .slash { stroke: var(--fg-off); stroke-width: 2.4; stroke-linecap: round; display: none; }
-    .toggle[data-state="off"] { color: var(--fg-off); }
-    .toggle[data-state="off"] .shackle { stroke: var(--fg-off); }
-    .toggle[data-state="off"] .lock { fill: var(--fg-off); }
+    .toggle[data-state="off"] { color: var(--fg-off); --logo-a: var(--fg-off); --logo-b: var(--fg-off); }
+    .toggle[data-state="off"] .pb, .toggle[data-state="warning"] .pb { opacity: .7; }
     .toggle[data-state="off"] .slash, .toggle[data-state="off"] .slash-halo,
     .toggle[data-state="warning"] .slash, .toggle[data-state="warning"] .slash-halo { display: inline; }
     /* 警告: オフのまま個人情報の可能性があるとき、アイコンを黄色にする (D-21) */
-    .wrap .toggle[data-state="warning"] { color: var(--warn-fg); background: var(--warn-bg); }
-    .toggle[data-state="warning"] .shackle, .toggle[data-state="warning"] .slash { stroke: var(--warn-fg); }
-    .toggle[data-state="warning"] .lock { fill: var(--warn-fg); }
+    .wrap .toggle[data-state="warning"] { color: var(--warn-fg); background: var(--warn-bg); --logo-a: var(--warn-fg); --logo-b: var(--warn-fg); }
+    .toggle[data-state="warning"] .slash { stroke: var(--warn-fg); }
     .popover { position: absolute; right: 0; bottom: calc(100% + 6px); width: max-content; min-width: 240px;
       max-width: min(360px, calc(100vw - 16px)); padding: 10px 12px; border-radius: 10px;
       background: #ffffff; color: #374151; border: 1px solid #d1d5db; box-shadow: 0 6px 20px rgba(0,0,0,.18); z-index: 1; }
@@ -287,14 +286,12 @@
     .wrap.below .notice { bottom: auto; top: calc(100% + 6px); }
     .notice[hidden] { display: none; }
   `;
-  // PII Guard のアイコン (盾、「*」、青い錠前)。画像ファイルにしないのは、サイトの CSP で
-  // 画像の読み込みが止められても表示できるようにするため (D-20)。オフでは灰色に斜線
+  // PII Guard のアイコン (2 色の盾と人。assets/brand/pii-guard-icon-source.png を
+  // browser-extension/scripts/build-icons.py でトレースした輪郭)。画像ファイルにしないのは、
+  // サイトの CSP で画像の読み込みが止められても表示できるようにするため (D-20)。オフでは灰色に斜線
   const ICON = '<svg class="logo" viewBox="0 0 32 32" aria-hidden="true" focusable="false">' +
-    '<path class="shield" d="M16 3.4 26.2 7.3v7.4c0 6.5-4.2 11.1-10.2 13.8C10 25.8 5.8 21.2 5.8 14.7V7.3Z"/>' +
-    '<path class="aster" d="M16 9.6v7.8M12.6 11.55l6.8 3.9M12.6 15.45l6.8-3.9"/>' +
-    '<path class="shackle" d="M13.3 22.6v-2a2.7 2.7 0 0 1 5.4 0v2"/>' +
-    '<rect class="lock" x="11.4" y="22.2" width="9.2" height="7.4" rx="1.6"/>' +
-    '<circle class="hole" cx="16" cy="25.6" r="1.15"/>' +
+    '<path class="pa" fill-rule="evenodd" d="M15.97 1.03L15.57 1.13L12.98 2.98L10.47 4.30L8.75 5.01L6.72 5.67L2.84 6.50L2.33 6.88L2.08 7.34L2.00 9.98L2.05 13.58L2.33 16.01L2.94 18.57L3.93 21.14L5.04 23.16L6.26 24.79L7.73 26.16L7.76 23.11L7.89 22.33L8.39 21.08L9.25 20.02L8.34 18.68L7.91 17.79L7.40 16.34L6.95 13.91L6.87 10.94L7.02 10.61L7.56 10.21L9.81 9.62L12.25 8.68L13.87 7.85L16.03 6.45Z"/>' +
+    '<path class="pb" fill-rule="evenodd" d="M12.12 19.41L10.80 20.10L9.91 20.91L9.18 22.10L8.87 23.16L8.82 26.11L8.92 26.49L9.31 26.99L10.78 28.16L12.27 29.12L15.64 30.90L16.18 30.95L17.98 30.09L20.41 28.69L21.86 27.68L22.90 26.74L23.15 26.11L23.15 23.70L23.00 22.68L22.37 21.31L22.01 20.86L21.17 20.10L19.98 19.46L19.25 19.23L18.31 19.11L13.69 19.11ZM15.54 9.98L14.76 10.13L13.79 10.54L12.68 11.45L12.15 12.21L11.79 13.05L11.61 13.96L11.61 14.67L11.82 15.66L12.17 16.44L12.58 17.03L13.21 17.66L13.77 18.04L14.55 18.40L15.44 18.60L16.28 18.62L17.17 18.47L17.85 18.22L18.66 17.74L19.25 17.20L19.68 16.65L20.13 15.73L20.34 14.90L20.36 13.96L20.26 13.32L19.85 12.26L19.40 11.57L18.71 10.89L18.13 10.51L17.29 10.15L16.46 9.98ZM16.00 1.03L16.00 6.45L17.39 7.42L19.04 8.35L21.78 9.50L24.44 10.21L24.88 10.51L25.10 10.92L25.08 13.45L24.70 15.89L23.99 17.97L23.33 19.18L22.72 19.99L23.61 21.24L24.09 22.53L24.19 23.27L24.19 26.16L25.56 24.86L26.98 22.99L28.12 20.93L29.11 18.35L29.62 16.16L29.90 13.93L29.97 12.36L29.92 7.42L29.64 6.88L29.14 6.50L25.18 5.64L23.18 4.98L21.45 4.27L19.40 3.21L17.72 2.14L16.33 1.08Z"/>' +
     '<path class="slash-halo" d="M5.5 5.5 26.5 26.5"/>' +
     '<path class="slash" d="M5.5 5.5 26.5 26.5"/>' +
     "</svg>";
