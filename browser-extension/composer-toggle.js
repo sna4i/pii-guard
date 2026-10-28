@@ -78,7 +78,7 @@
   const T = window.PiiGuardTint;    // tint.js (色の計算)
   const STABLE_MS = 500;            // アイコンが動いてからクリックを受け付けるまで (D-22)
   const FLOAT_SIZE = 28;            // 浮かせるときのアイコンの一辺 (px)
-  const HOST_CSS = "position:fixed;top:0;left:0;z-index:2147483647;isolation:isolate;margin:0;padding:0;border:0;opacity:1;visibility:visible;filter:none;clip-path:none;transform:none;pointer-events:auto;";
+  const HOST_CSS = "position:fixed;inset:auto;top:0;left:0;z-index:2147483647;isolation:isolate;margin:0;padding:0;border:0;overflow:visible;background:transparent;opacity:1;visibility:visible;filter:none;clip-path:none;transform:none;pointer-events:auto;";
 
   // ---- クリックジャッキングへの防御 ----------------------------------------------
   // ホスト要素はページの DOM にあるので、サイトのスクリプトはホストを透明にしたり
@@ -130,15 +130,104 @@
     mo = new MutationObserver((muts) => {
       const tampered = muts.some((m) => m.type === "attributes" && (
         (m.attributeName === "style" && host.getAttribute("style") !== expected()) ||
-        m.attributeName === "class" || m.attributeName === "hidden"));
+        m.attributeName === "class" || m.attributeName === "hidden" ||
+        (m.attributeName === "popover" && TOP_LAYER && host.getAttribute("popover") !== "manual")));
       if (!tampered) return;
       LOG("host attributes were changed by the page; restoring");
       host.removeAttribute("class");
       host.removeAttribute("hidden");
       apply();
+      if (TOP_LAYER) raise(host);
       if (onTamper) onTamper();
     });
     mo.observe(host, { attributes: true });
+  }
+
+  // ---- トップレイヤー (docs/composer-toggle.md の D-31〜D-34) ------------------------
+  // サイトがポップオーバーやモーダルをトップレイヤーに出すと、その透明な ::backdrop が画面全体を
+  // 覆い、z-index で重ねた外枠は Intersection Observer v2 で「覆われている」と判定される
+  // (ChatGPT でファイルを開いたときのパネルのつまみ)。そこで外枠自体をポップオーバーにして
+  // トップレイヤーに出し、サイトが後から別の要素を出したら、その上に出し直す。
+  // ただし、入力欄の上を覆うつもりの表示 (モーダル、全画面、外枠に重なる要素) があるときは
+  // 出し直さず、その下に残る。クリックの判定 (clickIsSafe) は変えない
+  const TOP_LAYER = typeof HTMLElement === "function" && typeof HTMLElement.prototype.showPopover === "function";
+  const LAYER_CSS = '[data-pii-guard="composer-toggle"]::backdrop,[data-pii-guard="persist-confirm"]::backdrop{display:none!important}';
+  let layerStyle = null;
+  let othersOpenedSinceRaise = false;
+  // 自分の外枠の ::backdrop を消す (D-32)。消さないと、自分の膜がページや埋め込みを覆う
+  function ensureLayerStyle() {
+    if (!TOP_LAYER) return;
+    if (layerStyle && layerStyle.isConnected && layerStyle.textContent === LAYER_CSS) return;
+    if (!layerStyle) {
+      layerStyle = document.createElement("style");
+      layerStyle.setAttribute("data-pii-guard", "layer-style");
+    }
+    layerStyle.textContent = LAYER_CSS;
+    (document.head || document.documentElement).appendChild(layerStyle);
+  }
+  // 外枠をトップレイヤーのいちばん上に出す (出し直す)
+  function raise(el) {
+    if (!TOP_LAYER || !el || !el.isConnected) return;
+    ensureLayerStyle();
+    try {
+      if (el.getAttribute("popover") !== "manual") el.setAttribute("popover", "manual");
+      if (el.matches(":popover-open")) el.hidePopover();
+      el.showPopover();
+    } catch (_) { /* 切り離された直後など。次の見回りでやり直す */ }
+  }
+  const isOurHost = (el) => !!el && (el === host || el === persistHost);
+  // 今見えている自分の部品の位置 (アイコンと、保留中の保存の確認)
+  function ourRects() {
+    const rs = [];
+    if (host && ui && host.__pos !== "display:none;") rs.push(ui.toggle.getBoundingClientRect());
+    if (persistCurrent && persistUi && !persistUi.box.hidden) rs.push(persistUi.box.getBoundingClientRect());
+    return rs;
+  }
+  // サイトが入力欄の上を覆うつもりの表示か (D-33): モーダル、全画面、または自分の部品に重なる要素
+  function coversUs(el) {
+    if (el.matches(":modal, :fullscreen")) return true;
+    const r = el.getBoundingClientRect();
+    if (r.width === 0 && r.height === 0) return false;
+    return ourRects().some((o) => r.left < o.right + 4 && o.left < r.right + 4 && r.top < o.bottom + 4 && o.top < r.bottom + 4);
+  }
+  const othersInTopLayer = () => [...document.querySelectorAll(":popover-open, :modal, :fullscreen")].filter((el) => !isOurHost(el));
+  // 自分の外枠を、覆うつもりの表示が無ければいちばん上に出し直す
+  function raiseIfClear(force) {
+    if (!TOP_LAYER) return;
+    if (!force && !othersOpenedSinceRaise) return;
+    const others = othersInTopLayer();
+    if (others.some(coversUs)) return;
+    othersOpenedSinceRaise = false;
+    if (host && ui) raise(host);
+    if (persistCurrent && persistHost) raise(persistHost);
+  }
+  // 1 秒ごとの見回り: 外されていたら戻す (D-34)。見えていないと判定されているのに、
+  // 覆うつもりの表示が無ければ出し直す (toggle イベントを握りつぶされた場合など、D-33)
+  function checkLayers() {
+    if (!TOP_LAYER) return;
+    ensureLayerStyle();
+    if (host && ui && host.__pos !== "display:none;" && !host.matches(":popover-open")) {
+      LOG("the icon host was taken out of the top layer; restoring");
+      raise(host);
+    }
+    if (persistCurrent && persistHost && !persistHost.matches(":popover-open")) {
+      LOG("the confirmation host was taken out of the top layer; cancelling");
+      finishPersist(false);
+    }
+    if (host && ui && visibility.get(ui.toggle) === false) raiseIfClear(true);
+  }
+  function onToggleEvent(e) {
+    const t = e.target;
+    if (!TOP_LAYER || !t || t.nodeType !== 1) return;
+    if (isOurHost(t)) {
+      // 自分で出し直したときは開いたまま。閉じたままなら、サイトが閉じた (D-34)
+      if (t.matches(":popover-open")) return;
+      if (t === persistHost && persistCurrent) { LOG("the confirmation host was closed by the page; cancelling"); finishPersist(false); return; }
+      raise(t);
+      return;
+    }
+    othersOpenedSinceRaise = othersOpenedSinceRaise || e.newState === "open";
+    raiseIfClear(e.newState === "closed");
   }
 
   // サービスごとの入力欄のヒント。外れていても下の汎用の判定で拾う
@@ -282,7 +371,7 @@
     .wrap.dark .actions button { background: #374151; border-color: #4b5563; color: #e5e7eb; }
     .actions button.primary { background: #6366f1; border-color: #6366f1; color: #fff; font-weight: 600; }
     .notice { position: absolute; right: 0; bottom: calc(100% + 6px); padding: 6px 10px; border-radius: 8px; background: #dc2626; color: #fff;
-      white-space: nowrap; box-shadow: 0 2px 8px rgba(0,0,0,.2); }
+      width: max-content; max-width: min(300px, calc(100vw - 16px)); line-height: 1.4; box-shadow: 0 2px 8px rgba(0,0,0,.2); }
     .wrap.below .notice { bottom: auto; top: calc(100% + 6px); }
     .notice[hidden] { display: none; }
   `;
@@ -336,8 +425,9 @@
     for (const el of [ui.toggle, ui.turnOn, ui.maskOnce, ui.close]) watchVisibility(el);
     // 本物の入力で、部品が完全に見えていて、アイコンが動いてから 0.5 秒以上たったときだけ
     const safe = (el, fn) => (e) => {
-      if (!clickIsSafe(e, el, host)) { LOG("ignored a click on a control that is not fully visible"); return; }
-      if (Date.now() - state.lastMovedAt < STABLE_MS) { LOG("ignored a click: the control has just moved"); return; }
+      if (!e || e.isTrusted !== true) return; // ページが作ったクリックは黙って捨てる
+      if (!clickIsSafe(e, el, host)) { ignoredClick("occluded"); return; }
+      if (Date.now() - state.lastMovedAt < STABLE_MS) { ignoredClick("moved"); return; }
       fn(e);
     };
     // 黄色 (オフで個人情報の可能性あり) のときは内訳を開く。それ以外はオン/オフの切り替え (D-29)
@@ -355,6 +445,7 @@
     ui.maskOnce.addEventListener("click", safe(ui.maskOnce, () => { ui.popover.hidden = true; exportLayout(); reviewDraft(); }));
     ui.turnOn.addEventListener("click", safe(ui.turnOn, () => { ui.popover.hidden = true; setEnabled(true); reviewDraft(); }));
     document.documentElement.appendChild(host);
+    raise(host);
   }
 
   // 色を { r, g, b, a } にする。getComputedStyle が oklch() などで返す色は、
@@ -494,12 +585,23 @@
       ui.items.appendChild(li);
     }
   }
-  function notice(text) {
+  // kind はテスト用の目印 (data-notice)。テスト用のフラグがあるときだけ出す
+  function notice(text, kind) {
     if (!ui) return;
     ui.notice.textContent = text;
     ui.notice.hidden = false;
+    if (exposeForTests && host) host.dataset.notice = kind || "";
     clearTimeout(noticeTimer);
-    noticeTimer = setTimeout(() => { ui.notice.hidden = true; }, 4000);
+    noticeTimer = setTimeout(() => { ui.notice.hidden = true; if (host) delete host.dataset.notice; }, 4000);
+  }
+  // クリックを受け付けなかったことを、アイコンの吹き出しで知らせる (D-35)
+  const IGNORED_TEXT = {
+    occluded: "ほかの表示と重なっているため、切り替えませんでした。拡張機能のメニューからも切り替えられます",
+    moved: "アイコンが動いた直後のため、受け付けませんでした。もう一度押してください",
+  };
+  function ignoredClick(reason) {
+    LOG(reason === "moved" ? "ignored a click: the control has just moved" : "ignored a click on a control that is not fully visible");
+    notice(IGNORED_TEXT[reason], reason);
   }
 
   function setHostPos(pos) {
@@ -993,6 +1095,7 @@
     persistUi.sub.textContent = text.sub;
     persistUi.confirm.textContent = text.ok;
     persistUi.box.hidden = false;
+    raise(persistHost);
     persistShownAt = Date.now();
     exportPersistLayout();
     clearTimeout(persistTimer);
@@ -1064,6 +1167,7 @@
     } else {
       place(true);
     }
+    checkLayers();
     checkTint();
   }
   let mutationTimer = null;
@@ -1075,6 +1179,7 @@
     tick();
     observer.observe(document.documentElement, { childList: true, subtree: true });
     setInterval(tick, TICK_MS);
+    document.addEventListener("toggle", onToggleEvent, true);
     window.addEventListener("scroll", () => place(false), { passive: true, capture: true });
     window.addEventListener("resize", () => place(false), { passive: true });
     if (window.ResizeObserver) {

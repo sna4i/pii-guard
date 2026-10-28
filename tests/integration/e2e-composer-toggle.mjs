@@ -17,6 +17,12 @@
 //   T-16 オンのとき、チャットの背景に選んだ色を混ぜる。オフと暗い表示にも追従する
 //   T-17 設定画面のパレットで選んだ色が保存され、開いているタブにすぐ反映する
 //   T-20 チャットした後の画面で、アイコンが入力欄の上の注意書きに重ならない
+//   T-21 離れた所にトップレイヤーの要素 (ChatGPT のパネルのつまみ) があっても、アイコンで切り替えられる
+//   T-22 同じ状態で、保存の確認の「追加」が押せる
+//   T-23 アイコンに重なるトップレイヤーの要素の下では、クリックを受け付けない (toggle イベントを握りつぶされても)
+//   T-24 外枠の popover 属性を消されたり閉じられたりしても元に戻し、保留中の確認は取り消す
+//   T-25 モーダルの <dialog> の上には出し直さない
+//   T-26 クリックを受け付けなかったとき、アイコンの吹き出しで理由を知らせる
 //
 // 使い方: node tests/integration/e2e-composer-toggle.mjs <unpacked 拡張機能ディレクトリ>
 // 環境変数 PII_E2E_SHOTS=<ディレクトリ> を付けると、下の段に置いたときの見た目を保存する
@@ -342,9 +348,12 @@ try {
     const r = JSON.parse(h.dataset.layout).confirm;
     const d = document.createElement("div");
     d.id = "decoy";
-    d.style.cssText = `position:fixed;left:${r[0] - 10}px;top:${r[1] - 10}px;width:${r[2] + 20}px;height:${r[3] + 20}px;z-index:2147483647;background:#16a34a;color:#fff;display:flex;align-items:center;justify-content:center;pointer-events:none;`;
+    // 1.7.1 から外枠はトップレイヤーにあるので、偽の見た目もトップレイヤーに後から出す (それより下では覆えない)
+    d.setAttribute("popover", "manual");
+    d.style.cssText = `position:fixed;inset:auto;margin:0;border:0;padding:0;left:${r[0] - 10}px;top:${r[1] - 10}px;width:${r[2] + 20}px;height:${r[3] + 20}px;background:#16a34a;color:#fff;display:flex;align-items:center;justify-content:center;pointer-events:none;`;
     d.textContent = "送信";
-    document.documentElement.appendChild(d);
+    document.body.appendChild(d);
+    d.showPopover();
     return { x: r[0] + r[2] / 2, y: r[1] + r[3] / 2 };
   }, CONFIRM);
   await p.waitForTimeout(800);
@@ -365,8 +374,10 @@ try {
     const r = JSON.parse(h.dataset.layout).toggle;
     const d = document.createElement("div");
     d.id = "decoy2";
-    d.style.cssText = `position:fixed;left:${r[0] - 6}px;top:${r[1] - 6}px;width:${r[2] + 12}px;height:${r[3] + 12}px;z-index:2147483647;background:#16a34a;pointer-events:none;`;
-    document.documentElement.appendChild(d);
+    d.setAttribute("popover", "manual");
+    d.style.cssText = `position:fixed;inset:auto;margin:0;border:0;padding:0;left:${r[0] - 6}px;top:${r[1] - 6}px;width:${r[2] + 12}px;height:${r[3] + 12}px;background:#16a34a;pointer-events:none;`;
+    document.body.appendChild(d);
+    d.showPopover();
     return { x: r[0] + r[2] / 2, y: r[1] + r[3] / 2 };
   }, HOST);
   await p.waitForTimeout(800);
@@ -516,6 +527,113 @@ try {
   check(fl && box && Math.abs((fl[1] + fl[3] / 2) - (box[1] + box[3] / 2)) <= 2, "縦は箱の中央にそろう");
   check(!overlaps(fl, disc), "浮かせたアイコンも注意書きに重ならない");
   await shotFooter(p, "chat-plain");
+
+  // ---- 1.7.1: ほかの要素がトップレイヤーにあるとき (docs/composer-toggle.md の D-31〜D-36) ----
+  const hostInfo = (sel) => p.evaluate((s) => {
+    const h = document.querySelector(s);
+    return h ? { popover: h.getAttribute("popover"), open: h.matches(":popover-open"), notice: h.dataset.notice || "", pending: h.dataset.pending || "" } : null;
+  }, sel);
+  // ページ側から、要素が「完全に見えている」か (Intersection Observer v2) を測る
+  const pageSeesVisible = (sel) => p.evaluate((s) => new Promise((ok) => {
+    const o = new IntersectionObserver((es) => { o.disconnect(); ok(es[es.length - 1].isVisible === true); }, { threshold: [0, 1], trackVisibility: true, delay: 100 });
+    o.observe(document.querySelector(s));
+  }), sel);
+
+  console.log("T-21 離れた所にトップレイヤーの要素があるとき:");
+  await sw.evaluate(() => chrome.storage.local.set({ enabled: true, chatTint: null }));
+  await p.goto("https://chatgpt.com/footer"); await p.waitForTimeout(3500);
+  // ChatGPT でファイルを開いたときのパネルのつまみと同じ作り: 幅 16px、画面の高さいっぱい、popover=manual、クリックは素通し
+  await p.evaluate(() => {
+    const r = document.createElement("div");
+    r.id = "panel-resizer";
+    r.setAttribute("popover", "manual");
+    r.style.cssText = "position:fixed;inset:auto;left:calc(100vw - 40px);top:0;width:16px;height:100vh;margin:0;padding:0;border:0;background:transparent;pointer-events:none";
+    document.body.appendChild(r);
+    r.showPopover();
+  });
+  await p.waitForTimeout(1500);
+  await clickInPill(p, "toggle"); await p.waitForTimeout(800);
+  check((await stored(sw, "enabled")) === false, "離れた所にトップレイヤーの要素があっても、アイコンを押すとオフになる");
+  await p.waitForTimeout(600);
+  await clickInPill(p, "toggle"); await p.waitForTimeout(800);
+  check((await stored(sw, "enabled")) === true, "もう一度押すとオンに戻る");
+
+  console.log("T-22 同じ状態で保存の確認:");
+  await p.evaluate(() => window.postMessage({ source: "mask-mcp-inpage", type: "add-allowlist", value: "toplayer-ok@example.com" }, "*"));
+  await p.waitForTimeout(1500); // 確認は出てから 0.5 秒たつまで押せない
+  await clickConfirm(p, "confirm"); await p.waitForTimeout(800);
+  check(((await stored(sw, "maskAllowlist")) || []).includes("toplayer-ok@example.com"), "トップレイヤーの要素があっても、確認の「追加」が押せる");
+  await sw.evaluate(() => chrome.storage.local.get("maskAllowlist").then((s) => chrome.storage.local.set({ maskAllowlist: (s.maskAllowlist || []).filter((v) => v !== "toplayer-ok@example.com") })));
+
+  console.log("T-23 アイコンに重なるトップレイヤーの要素:");
+  const tgl = (await layoutOf(p)).toggle;
+  await p.evaluate((r) => {
+    const d = document.createElement("div");
+    d.id = "top-decoy";
+    d.setAttribute("popover", "manual");
+    d.style.cssText = `position:fixed;inset:auto;left:${r[0] - 6}px;top:${r[1] - 6}px;width:${r[2] + 12}px;height:${r[3] + 12}px;margin:0;padding:0;border:0;background:#16a34a;pointer-events:none`;
+    document.body.appendChild(d);
+    d.showPopover();
+  }, tgl);
+  await p.waitForTimeout(1800); // 1 秒ごとの見回りを挟んでも、上に戻らないこと
+  check(!(await pageSeesVisible(HOST)), "重なる要素が後から開くと、アイコンは上に戻らない (ページ側から見て覆われている)");
+  await p.mouse.click(tgl[0] + tgl[2] / 2, tgl[1] + tgl[3] / 2); await p.waitForTimeout(800);
+  check((await stored(sw, "enabled")) === true, "重なるトップレイヤーの偽の見た目の下では、クリックを受け付けない");
+  await p.evaluate(() => {
+    window.addEventListener("toggle", (e) => e.stopImmediatePropagation(), true);
+    const d = document.getElementById("top-decoy");
+    d.hidePopover(); d.showPopover();
+  });
+  await p.waitForTimeout(1800);
+  await p.mouse.click(tgl[0] + tgl[2] / 2, tgl[1] + tgl[3] / 2); await p.waitForTimeout(800);
+  check((await stored(sw, "enabled")) === true, "toggle イベントを握りつぶされても、クリックを受け付けない");
+
+  console.log("T-26 受け付けなかったことを知らせる:");
+  const hi = await hostInfo(HOST);
+  check(hi && hi.notice === "occluded", `アイコンの吹き出しで、重なっていたため切り替えなかったと知らせる (${hi && hi.notice})`);
+  await p.evaluate(() => document.getElementById("top-decoy").remove());
+  await p.waitForTimeout(1500);
+  await clickInPill(p, "toggle"); await p.waitForTimeout(800);
+  check((await stored(sw, "enabled")) === false, "重なる要素が無くなれば、本物のクリックで切り替わる");
+  await p.waitForTimeout(600);
+  await clickInPill(p, "toggle"); await p.waitForTimeout(800);
+
+  console.log("T-24 外枠のポップオーバーへの改変:");
+  let h0 = await hostInfo(HOST);
+  check(h0 && h0.popover === "manual" && h0.open, `アイコンの外枠はトップレイヤーにある (popover=${h0 && h0.popover}, open=${h0 && h0.open})`);
+  await p.evaluate((s) => document.querySelector(s).removeAttribute("popover"), HOST);
+  await p.waitForTimeout(1500);
+  h0 = await hostInfo(HOST);
+  check(h0 && h0.popover === "manual" && h0.open, "popover 属性を消されても、元に戻してトップレイヤーに出し直す");
+  await p.evaluate((s) => document.querySelector(s).hidePopover(), HOST);
+  await p.waitForTimeout(1500);
+  h0 = await hostInfo(HOST);
+  check(h0 && h0.open, "外枠を閉じられても、出し直す");
+  await p.evaluate(() => window.postMessage({ source: "mask-mcp-inpage", type: "add-allowlist", value: "tamper-pending@example.com" }, "*"));
+  await p.waitForTimeout(1200);
+  let c0 = await hostInfo(CONFIRM);
+  check(c0 && c0.pending === "add-allowlist" && c0.open, `保存の確認も外枠がトップレイヤーにある (${JSON.stringify(c0)})`);
+  await p.evaluate((s) => document.querySelector(s).hidePopover(), CONFIRM);
+  await p.waitForTimeout(1500);
+  c0 = await hostInfo(CONFIRM);
+  check(c0 && c0.pending === "", "確認の外枠を閉じられると、保留中の確認を取り消す");
+  check(!((await stored(sw, "maskAllowlist")) || []).includes("tamper-pending@example.com"), "取り消された確認は保存されない");
+
+  console.log("T-25 モーダルの上には出し直さない:");
+  await p.goto("https://chatgpt.com/footer"); await p.waitForTimeout(3500);
+  check(await pageSeesVisible(HOST), "モーダルが無ければアイコンは見えている");
+  await p.evaluate(() => {
+    const dl = document.createElement("dialog");
+    dl.id = "modal";
+    dl.textContent = "プレビュー";
+    document.body.appendChild(dl);
+    dl.showModal();
+  });
+  await p.waitForTimeout(1800);
+  check(!(await pageSeesVisible(HOST)), "モーダルを開いても、アイコンはその上に出し直されない");
+  await p.evaluate(() => document.getElementById("modal").close());
+  await p.waitForTimeout(1500);
+  check(await pageSeesVisible(HOST), "モーダルを閉じれば、アイコンはまた見えている");
 
   check(errs.length === 0, `ページの JS エラーなし${errs.length ? ": " + errs.slice(0, 3).join(" | ") : ""}`);
 } catch (e) {
