@@ -21,6 +21,10 @@
   const Z = "2147483646";
   const EDITOR_SEL = '#prompt-textarea, div.ProseMirror[contenteditable="true"], textarea#mobile-composer-prompt';
   const SEND_SEL = '#composer-submit-button, [data-testid="send-button"], button[data-composer-submit], button[type="submit"][aria-label*="送信"], button[aria-label*="Send"]';
+  // 送信ボタンの場所。ChatGPT は回答を作っている間 (考え中を含む)、ここに停止のボタンを出す (isStopButton)
+  const SLOT_SEL = '#composer-submit-button, [data-testid="send-button"], button[data-composer-submit], button[type="submit"]';
+  const BUTTON_WAIT_MS = 1500; // 書いてから送信ボタンが出るのを待つ (ChatGPT は文字が入ってから描き直して出す)
+  const ACCEPT_WAIT_MS = 5000; // 送ってから、ChatGPT が受け付けた (入力欄が空になった) のを待つ (D-SC-15)
 
   let active = false;
   let scReady = false;        // iframe が ready を報告済みか (fail-closed 判定に使う)
@@ -231,6 +235,57 @@
       el.dispatchEvent(new KeyboardEvent(type, { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true }));
     }
   }
+  // 送信と停止のボタンは、ChatGPT の入力欄を含む form の中で探す。会話の中のボタン
+  // (「読み上げを停止」など) を取り違えないため。form が無い作りでは文書全体で探す
+  const scopeOf = (el) => el.closest("form") || document;
+  function shown(b) {
+    if (!b || !b.isConnected || b.offsetParent === null) return false;
+    const r = b.getBoundingClientRect();
+    return r.width > 0 && r.height > 0 && getComputedStyle(b).visibility !== "hidden";
+  }
+  // 停止のボタンか (docs/release-1.7.1.md の D-SC-13)。送信ボタンと同じ要素や同じ id のことがあるので、送信ボタンを
+  // 探すときも除く。
+  //  - ログインなしの画面は、送信ボタンそのものが aria-label を data-stop-label (「生成を中止」) に替える
+  //    (2026-10-29 に実サイトで確認)
+  //  - ログイン後は data-testid="stop-button" と見込む (実物は未確認)
+  //  - 言葉 (停止・中止・stop) で見分けるのは送信ボタンの場所だけ。form の中の「アップロードを中止」などを取り違えない
+  function isStopButton(b) {
+    if (b.matches('[data-testid*="stop"]')) return true;
+    const label = b.getAttribute("aria-label") || "";
+    const stopLabel = b.getAttribute("data-stop-label");
+    if (stopLabel && label === stopLabel) return true;
+    return b.matches(SLOT_SEL) && /停止|中止|stop/i.test(label);
+  }
+  // ChatGPT が回答を作っている途中か (停止のボタンが見えている)
+  function pageBusy(el) {
+    for (const b of scopeOf(el).querySelectorAll("button")) if (shown(b) && isStopButton(b)) return true;
+    return false;
+  }
+  function findSendButton(scope) {
+    for (const b of scope.querySelectorAll(SEND_SEL)) if (shown(b) && !b.disabled && !isStopButton(b)) return b;
+    return null;
+  }
+  // ChatGPT の入力欄が空か (空白と記号を除いて何も残っていない)
+  const nativeEmpty = (el) => comparable(el.tagName === "TEXTAREA" ? el.value : el.innerText) === "";
+  function clearNative(el) {
+    if (el.tagName === "TEXTAREA") { writeNative(el, ""); return; }
+    el.focus();
+    const sel = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    sel.removeAllRanges(); sel.addRange(range);
+    document.execCommand("delete");
+  }
+  // fn が値を返すまで 50 ms ごとに試す。ms を過ぎたら null
+  async function waitFor(fn, ms) {
+    const end = Date.now() + ms;
+    for (;;) {
+      const v = fn();
+      if (v) return v;
+      if (Date.now() >= end) return null;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  }
   async function doCommit(payload) {
     if (committing) return { committed: false, error: "busy" };
     committing = true;
@@ -239,14 +294,26 @@
       if (text == null) return { committed: false, error: "no text" };
       const el = findNative();
       if (!el) return { committed: false, error: "no native composer" };
+      // 回答を作っている途中は ChatGPT が受け付けない。書かずに返し、下書きは保護入力欄に残す (F-SC-24)
+      if (pageBusy(el)) return { committed: false, error: "page busy" };
       const wrote = writeNative(el, text);
       if (!wrote) return { committed: false, error: "write failed" };
-      // 正規送信: 送信ボタンがあれば押す。なければ Enter。
-      await new Promise((r) => setTimeout(r, 0));
-      const btn = document.querySelector(SEND_SEL);
-      if (btn && !btn.disabled && btn.offsetParent !== null) btn.click();
-      else fireEnter(el);
-      return { committed: true };
+      // 正規送信: 送信ボタンが出るのを待って押す。form の中に出なければ文書全体を一度だけ探し、
+      // それでも無ければ Enter (F-SC-26)
+      const btn = (await waitFor(() => findSendButton(scopeOf(el)), BUTTON_WAIT_MS)) || findSendButton(document);
+      const path = btn ? "button" : "enter";
+      if (btn) btn.click();
+      else { el.focus(); fireEnter(el); }
+      // 受け付けたか: 入力欄が空になった、または停止のボタンが出た (回答を作り始めた) (F-SC-25)。
+      // 書いた入力欄が外れたときも受け付けたとみなす (新しい会話を送ると、ChatGPT は会話の画面に移って入力欄を
+      // 作り直す。外れた要素には書いた文が残るので、空かどうかでは判断できない)
+      const accepted = await waitFor(() => !el.isConnected || nativeEmpty(el) || pageBusy(el), ACCEPT_WAIT_MS);
+      if (!accepted) {
+        // 書いた文を残すと、保護入力欄の裏に隠れたままになる。消して、下書きは保護入力欄に残してもらう
+        clearNative(el);
+        return { committed: false, error: "not accepted", path };
+      }
+      return { committed: true, path };
     } catch (e) {
       return { committed: false, error: String((e && e.message) || e) };
     } finally {

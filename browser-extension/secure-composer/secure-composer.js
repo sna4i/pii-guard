@@ -164,15 +164,15 @@
     return { text: agg.applySpans(text, kept), count: kept.length, ml };
   }
 
-  // 送る前の検出に 0.3 秒より長くかかるときだけ「確認中…」を出す (F-SC-22、D-SC-11)。ML なしなら数ミリ秒で終わる
+  // 0.3 秒より長くかかるときだけ、待っていることを出す。送る前の検出は「確認中…」(F-SC-22、D-SC-11。
+  // ML なしなら数ミリ秒で終わる)、送る操作は「送信中…」(D-SC-16。ChatGPT が受け付けるのを確かめる間)
   const BUSY_MS = 300;
-  const BUSY_TEXT = "確認中…";
-  async function withBusyNotice(work) {
-    const timer = setTimeout(() => { setStatus(BUSY_TEXT); statusEl.classList.add("busy"); autosize(); }, BUSY_MS);
+  async function withBusyNotice(work, text = "確認中…") {
+    const timer = setTimeout(() => { setStatus(text); statusEl.classList.add("busy"); autosize(); }, BUSY_MS);
     try { return await work(); }
     finally {
       clearTimeout(timer);
-      if (statusEl.textContent === BUSY_TEXT) { setStatus(""); autosize(); }
+      if (statusEl.textContent === text) { setStatus(""); autosize(); }
     }
   }
 
@@ -246,10 +246,18 @@
   // ---- 送信 ------------------------------------------------------------------
   let submitting = false;
   // 送れなかった理由 (動作ログの send.failed)。アダプタの doCommit の error と、境界の時間切れから決める
-  const COMMIT_ERRORS = { "write failed": "write-failed", "no native composer": "no-composer", busy: "busy" };
+  const COMMIT_ERRORS = {
+    "write failed": "write-failed", "no native composer": "no-composer", busy: "busy",
+    "page busy": "page-busy", "not accepted": "not-accepted",
+  };
   function commitFailReason(resp) {
     if (!resp || !resp.ok) return "no-response";
     return COMMIT_ERRORS[resp.result && resp.result.error] || undefined;
+  }
+  // 送り方 (送信ボタン / Enter のキー)。受け付けられなかったときに、どちらで送ったかを動作ログに残す
+  function commitPath(resp) {
+    const p = resp && resp.ok && resp.result && resp.result.path;
+    return p === "button" || p === "enter" ? p : undefined;
   }
   async function submit() {
     if (submitting) return;                       // 二重送信の防止 (INV)
@@ -293,13 +301,16 @@
       }
       machine.to("COMMIT_READY");
       machine.to("SUBMITTING");
-      const resp = await boundary.request("commit", { text: finalText, masked: settings.enabled }, 20000);
+      const resp = await withBusyNotice(() => boundary.request("commit", { text: finalText, masked: settings.enabled }, 20000), "送信中…");
       const committed = resp && resp.ok && resp.result && resp.result.committed === true;
       if (!committed) {
         // 送信できなかった → 下書きを残し、編集に戻す。原文の自動再送はしない (INV-2 / P0-10)
-        dl("send.failed", { reason: commitFailReason(resp), via: "secure-composer" });
+        const reason = commitFailReason(resp);
+        dl("send.failed", { reason, path: commitPath(resp), via: "secure-composer" });
         machine.to("EDITING");
-        setStatus("送信できなかった。もう一度 Enter で送れるよ。");
+        setStatus(reason === "page-busy"
+          ? "ChatGPT が回答を作っている途中だよ。終わったら、もう一度 Enter で送ってね。"
+          : "送信できなかった。もう一度 Enter で送れるよ。");
         return;
       }
       machine.to("SENT");

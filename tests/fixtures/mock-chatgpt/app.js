@@ -29,10 +29,16 @@
     prepareRequired: q.get("prepareRequired") === "1",
     // 入力欄が拡張機能の書き込みを受け付けない (書いた直後に空に戻す)。送れなかったときの動きを試す
     rejectWrite: q.get("rejectWrite") === "1",
+    // 送信の操作を受け付けない (入力欄の文はそのまま残る)。受け付けなかったことに気づけるかを試す (T-SC-21b)
+    ignoreSend: q.get("ignoreSend") === "1",
+    // 回答の途中は、停止のボタンが送信ボタンの id (#composer-submit-button) を持つ (T-SC-21c)
+    stopSharesId: q.get("stopSharesId") === "1",
+    // 送信ボタンは文字が入ってから 0.3 秒後に出る (React の描き直しを真似る)。合成した Enter のキーは受け付けない (T-SC-21d)
+    lateSendButton: q.get("lateSendButton") === "1",
   };
   const PREPARE_DEBOUNCE_MS = 350;
   const MODEL = "gpt-6-thinking";
-  const state = { conduitToken: null, streaming: false, prepareTimer: 0, prepareSeq: 0, sentCount: 0 };
+  const state = { conduitToken: null, streaming: false, prepareTimer: 0, prepareSeq: 0, sentCount: 0, abort: null };
   const W = window;
   W.__mock = { state, FLAGS, VARIANT, events: [] };
   const log = (type, extra) => W.__mock.events.push({ t: Date.now(), type, ...(extra || {}) });
@@ -76,11 +82,34 @@
     else editor.innerHTML = "<p><br></p>";
     refreshButtons();
   }
+  let lateTimer = 0;
   function refreshButtons() {
     const has = editorText().trim().length > 0;
-    if (sendBtn) { sendBtn.hidden = !has || state.streaming; sendBtn.disabled = !has || state.streaming; }
+    const showSend = has && !state.streaming;
+    if (sendBtn) {
+      clearTimeout(lateTimer);
+      if (FLAGS.lateSendButton && showSend && sendBtn.hidden) {
+        lateTimer = setTimeout(() => { if (editorText().trim() && !state.streaming) { sendBtn.hidden = false; sendBtn.disabled = false; } }, 300);
+      } else { sendBtn.hidden = !showSend; sendBtn.disabled = !showSend; }
+    }
     if (voiceBtn) voiceBtn.hidden = has || state.streaming;
     if (stopBtn) stopBtn.hidden = !state.streaming;
+    // ログインなし: 送信ボタンそのものが、回答の途中は停止のボタンになる
+    if (VARIANT === "loggedout" && sendBtn) {
+      sendBtn.setAttribute("aria-label", state.streaming ? sendBtn.dataset.stopLabel : sendBtn.dataset.sendLabel);
+      sendBtn.hidden = !(has || state.streaming);
+      sendBtn.disabled = !(has || state.streaming);
+    }
+    // 送信ボタンの場所には、送信か停止のどちらか 1 つだけを置く (React が描き分けるのと同じ)
+    if (FLAGS.stopSharesId && sendBtn && stopBtn) {
+      if (state.streaming) {
+        sendBtn.removeAttribute("id"); stopBtn.id = "composer-submit-button";
+        if (sendBtn.isConnected) sendBtn.replaceWith(stopBtn);
+      } else {
+        stopBtn.removeAttribute("id"); sendBtn.id = "composer-submit-button";
+        if (stopBtn.isConnected) stopBtn.replaceWith(sendBtn);
+      }
+    }
   }
 
   function buildLoggedIn() {
@@ -101,16 +130,25 @@
   }
 
   function buildLoggedOut() {
-    // 2026-10-18 に実サイト (ログインなし) で読んだ DOM の要素と属性
+    // 2026-10-18 に実サイト (ログインなし) で読んだ DOM の要素と属性。送信ボタンは 2026-10-29 に読んだもの:
+    // 停止のボタンは別に無く、同じボタンが回答の途中に aria-label を data-stop-label (「生成を中止」) に替え、
+    // 押すと回答を止める
     root.innerHTML = `<form class="x1lo-grid" style="display:grid;grid-template-columns:36px minmax(0,630px) 80px;grid-template-areas:'leading primary trailing';align-items:end">
-<div style="grid-area:leading"><button type="button" data-composer-action="" aria-label="ファイルを追加">+</button></div>
+<div style="grid-area:leading"><button type="button" data-composer-action="" aria-label="ファイルなどを追加">+</button></div>
 <div style="grid-area:primary"><textarea class="x-default-marker" aria-label="ChatGPT とチャット" autocapitalize="sentences" autocomplete="off" autocorrect="on" data-mobile-composer-prompt="" enterkeyhint="enter" id="mobile-composer-prompt" inputmode="text" name="prompt" placeholder="ChatGPT に聞く" required="" rows="1" spellcheck="true"></textarea></div>
-<div style="grid-area:trailing"><button type="submit" data-composer-submit="" aria-label="送信" disabled>↑</button><button type="button" data-testid="stop-button" hidden>■</button></div>
+<div style="grid-area:trailing"><button type="button" data-start-dictation="" aria-label="音声入力を開始">🎤</button><button type="submit" data-composer-submit="" aria-label="メッセージを送信します" data-send-label="メッセージを送信します" data-stop-label="生成を中止" disabled hidden>↑</button></div>
 </form>`;
     editor = root.querySelector("#mobile-composer-prompt");
     sendBtn = root.querySelector("[data-composer-submit]");
-    stopBtn = root.querySelector('[data-testid="stop-button"]');
+    stopBtn = null;
     voiceBtn = null;
+    // 回答の途中に押すと止める (同じボタン)
+    sendBtn.addEventListener("click", (e) => {
+      if (!state.streaming) return;
+      e.preventDefault();
+      log("stop-clicked");
+      if (state.abort) state.abort.abort();
+    });
   }
 
   function buildThread2026() {
@@ -147,11 +185,14 @@
     form.appendChild(attachInput);
     form.addEventListener("submit", (e) => { e.preventDefault(); submit("button"); });
     if (sendBtn && sendBtn.type !== "submit") sendBtn.addEventListener("click", () => submit("button"));
+    // 停止のボタン: 回答の流れを止める (ChatGPT と同じく、途中までの回答は残す)
+    if (stopBtn) stopBtn.addEventListener("click", () => { log("stop-clicked"); if (state.abort) state.abort.abort(); });
     if (FLAGS.rejectWrite) editor.addEventListener("input", () => {
       if (editor.tagName === "TEXTAREA") editor.value = ""; else editor.innerHTML = "<p><br></p>";
     }, true);
     editor.addEventListener("input", onInput);
     editor.addEventListener("keydown", (e) => {
+      if (FLAGS.lateSendButton && !e.isTrusted) return;
       if (e.key === "Enter" && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
         e.preventDefault();
         submit("enter");
@@ -280,6 +321,7 @@
 
   async function submit(via) {
     const text = editorText();
+    if (FLAGS.ignoreSend) { log("submit-ignored", { via }); return; }
     if (!text.trim() || state.streaming) return;
     log("submit", { via, len: text.length });
     clearTimeout(state.prepareTimer);
@@ -300,12 +342,13 @@
     const headers = { "content-type": "application/json", accept: "text/event-stream" };
     if (state.conduitToken) headers["x-conduit-token"] = state.conduitToken;
     state.streaming = true;
+    state.abort = new AbortController();
     clearEditor();
     if (FLAGS.draft) localStorage.removeItem("mock-draft:" + location.pathname);
     addMessage("user", text);
     const reply = addMessage("assistant", "");
     try {
-      const r = await fetch(url, { method: "POST", headers, body: JSON.stringify(body) });
+      const r = await fetch(url, { method: "POST", headers, body: JSON.stringify(body), signal: state.abort.signal });
       if (!r.ok) throw new Error("HTTP " + r.status);
       const reader = r.body.getReader();
       const dec = new TextDecoder();
@@ -325,6 +368,7 @@
       state.conduitToken = null; // 次の送信では新しい prepare が要る
       log("conversation-ok");
     } catch (e) {
+      if (state.abort && state.abort.signal.aborted) { log("conversation-stopped"); return; }
       reply.remove();
       const retry = document.createElement("button");
       retry.type = "button"; retry.textContent = "再試行"; retry.setAttribute("data-testid", "retry-button");
@@ -333,6 +377,7 @@
       log("conversation-failed", { error: String(e && e.message || e) });
     } finally {
       state.streaming = false;
+      state.abort = null;
       refreshButtons();
     }
   }

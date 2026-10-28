@@ -195,6 +195,17 @@ test("T-LG-04 every code formats to a Japanese sentence without placeholders", (
   assert.match(DL.formatLine(DL.sanitize({ code: "send.masked" }, meta({ site: null }))), /拡張機能/);
 });
 
+test("T-LG-04c send.failed names the new reasons and how the send was made (P-SC-09〜11)", () => {
+  const busy = DL.format(DL.sanitize({ code: "send.failed", d: { reason: "page-busy", via: "secure-composer" } }, meta()));
+  assert.match(busy, /回答を作っている途中/);
+  const ignored = DL.format(DL.sanitize({ code: "send.failed", d: { reason: "not-accepted", path: "enter", via: "secure-composer" } }, meta()));
+  assert.match(ignored, /受け付けなかった/);
+  assert.match(ignored, /Enter キー/);
+  assert.doesNotMatch(ignored, /undefined|null|\{|\}/);
+  const e = DL.sanitize({ code: "send.failed", d: { reason: "not-accepted", path: "<script>" } }, meta());
+  assert.equal(e.d.path, undefined, "知らない送り方は残さない");
+});
+
 test("T-LG-04b level depends on the status where the catalog says so", () => {
   assert.equal(DL.sanitize({ code: "llm.detect", d: { status: "failed" } }, meta()).lv, "warn");
   assert.equal(DL.sanitize({ code: "llm.detect", d: { status: "found" } }, meta()).lv, "info");
