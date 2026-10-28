@@ -40,7 +40,7 @@ ChatGPT は入力中に `POST /backend-api/f/conversation/prepare` で未送信�
 1. P0-14 (初期化失敗を保護中と誤表示しない) の e2e 自動化。
 2. Secure Composer を Claude.ai/Gemini/Manus へ展開 (他プロバイダの MAIN world 機密露出を解消)。
 3. 実サイト(ログイン後)で送信ボタン属性・`conduit_token`・`prepare` を実測し、アダプタのセレクタを裏取り。
-4. composer-toggle の OFF 警告 UX を iframe 側へ移設。
+4. composer-toggle の OFF 警告 UX を iframe 側へ移設。→ 1.7.1 で対応 (`docs/release-1.7.1.md` の F-SC-16、D-SC-04)。
 5. CI: P0 レッドチーム/E2E を必須ゲート化 (`xvfb-run`)。
 
 ## 実行方法

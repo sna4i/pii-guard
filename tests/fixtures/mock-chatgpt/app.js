@@ -17,7 +17,10 @@
 (() => {
   "use strict";
   const q = new URLSearchParams(location.search);
-  const VARIANT = q.get("variant") === "loggedout" ? "loggedout" : "loggedin";
+  // thread2026: 2026-10-28 に利用者の画面 (ログイン後、暗い表示、会話の途中) で診断した入れ子と属性。
+  // 角丸の箱 (背景色) は入力欄の 7 段上、<html class="chatgpt-theme" data-theme="dark"> で color-scheme: dark。
+  // 入力欄に min-height を付けると、箱ごと上に伸びる (下に寄せた縦の並び)。?pill=translucent で箱を半透明にする
+  const VARIANT = ["loggedout", "thread2026"].includes(q.get("variant")) ? q.get("variant") : "loggedin";
   const FLAGS = {
     telemetry: q.get("telemetry") === "1",
     ws: q.get("ws") === "1",
@@ -108,8 +111,35 @@
     voiceBtn = null;
   }
 
+  function buildThread2026() {
+    const html = document.documentElement;
+    html.className = "chatgpt-theme";
+    html.setAttribute("data-theme", "dark");
+    html.style.colorScheme = "dark";
+    document.body.classList.add("v2026");
+    // ?pill=translucent: 半透明の箱 (rgba)。?pill=oklch: 半透明の箱を oklch() で (getComputedStyle も oklch() のまま返す)
+    const translucent = ["translucent", "oklch"].includes(q.get("pill")) ? " " + q.get("pill") : "";
+    root.innerHTML = `<form data-composer-placement="thread" class="relative flex flex-col gap-2" data-type="unified-composer"><div class="contents" style="display:contents"><div class="relative w-full flex-col gap-2 flex"><div class="ComposerModeSurface-lVLm7j">
+<div class="pill2026${translucent}"><div data-composer-layout="multiline" data-composer-body="" class="ComposerLayoutBody-uBBf1A">
+<div data-composer-footer-responsive="" data-composer-layout="multiline" data-composer-rows="stacked" data-composer-spacing="default">
+<div data-composer-layout="multiline" class="min-w-0 AdaptiveFooterInput-zji599 col-span-full row-start-1 -mx-2"><div class="contents" style="display:contents">
+<div data-composer-layout="multiline" data-composer-spacing="default" data-composer-input-variant="default"><div data-composer-input-layout="multiline" data-composer-input-variant="default">
+<div contenteditable="true" role="textbox" id="prompt-textarea" class="ProseMirror" data-composer-markdown="" aria-label="ChatGPT に聞く" data-placeholder="ChatGPT に聞く"><p><br></p></div>
+</div></div></div></div>
+<div class="footer-left"><span data-state="closed" class="contents"><button type="button" class="btn" aria-label="ファイルなどを追加" data-composer-navigation-target="add-context">+</button></span></div>
+<div class="footer-right"><span data-state="closed" class="contents"><button type="button" class="btn" aria-label="音声入力"><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><use href="/cdn/assets/icons-9453d99f50597150.svg#microphone-light-16" fill="currentColor"></use></svg>🎤</button></span>
+<button type="button" class="btn round" data-testid="voice-button" aria-label="音声モードを開始する">◉</button>
+<button type="submit" id="composer-submit-button" data-testid="send-button" class="btn round dark" aria-label="プロンプトを送信する" hidden>↑</button>
+<button type="button" data-testid="stop-button" class="btn round dark" aria-label="ストリーミングの停止" hidden>■</button></div>
+</div></div></div></div></div></div></form>`;
+    editor = root.querySelector("#prompt-textarea");
+    sendBtn = root.querySelector('[data-testid="send-button"]');
+    stopBtn = root.querySelector('[data-testid="stop-button"]');
+    voiceBtn = root.querySelector('[data-testid="voice-button"]');
+  }
+
   function mountComposer() {
-    if (VARIANT === "loggedout") buildLoggedOut(); else buildLoggedIn();
+    if (VARIANT === "loggedout") buildLoggedOut(); else if (VARIANT === "thread2026") buildThread2026(); else buildLoggedIn();
     const form = root.querySelector("form");
     form.appendChild(imageInput);  // 実物と同じく、入力欄の form の中に画像用 → 汎用の順
     form.appendChild(attachInput);

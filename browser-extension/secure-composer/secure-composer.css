@@ -1,6 +1,5 @@
-/* secure-composer.css — ネイティブ入力欄に重ねる保護入力欄。背景は透明にして、下の
-   ネイティブ入力欄の見た目 (角丸・枠) をそのまま見せる。文字の見た目は content script が
-   ネイティブ入力欄から測って CSS 変数で渡す (secure-composer.js の applyTheme)。 */
+/* secure-composer.css — ネイティブ入力欄に重ねる保護入力欄。文字の見た目、入力面の色、明るい/暗い、
+   高さの上限は、content script がネイティブ入力欄から測って渡す (secure-composer.js の applyTheme)。 */
 :root {
   --sc-font: inherit;
   --sc-size: 16px;
@@ -21,7 +20,7 @@ body { overflow: hidden; background: transparent; }
   display: block;
   width: 100%;
   min-height: var(--sc-line);
-  max-height: 45vh;
+  max-height: var(--sc-max-h, 320px); /* iframe の中の vh は iframe 自身の高さなので使わない (D-SC-02) */
   margin: 0;
   padding: var(--sc-pad-y) var(--sc-pad-x);
   border: 0;
@@ -37,6 +36,7 @@ body { overflow: hidden; background: transparent; }
 #editor::placeholder { color: var(--sc-placeholder); opacity: 1; }
 /* マスク失敗・送信失敗・添付の案内など、伝えることがあるときだけ小さく出す。通常時は何も出さない (spec 10.4)。 */
 #status { display: none; font: 12px/1.4 var(--sc-font); color: #b84a00; padding: 2px var(--sc-pad-x); }
+:root[data-scheme="dark"] #status { color: #f5a361; }
 :root[data-state="MASKING_FAILED"] #status,
 :root[data-state="BLOCKED"] #status,
 #status:not(:empty) { display: block; }
@@ -49,4 +49,5 @@ body { overflow: hidden; background: transparent; }
 #confirm .confirm-actions { display: flex; gap: 8px; }
 #confirm button { font: 12px var(--sc-font); padding: 5px 12px; border-radius: 8px; border: 1px solid #8884; background: transparent; color: inherit; cursor: pointer; }
 #confirm button.primary { background: #0d0d0d; color: #fff; border-color: #0d0d0d; }
-@media (prefers-color-scheme: dark) { #confirm button.primary { background: #ececec; color: #0d0d0d; border-color: #ececec; } }
+/* 暗い表示は OS の設定ではなく、ページの表示に合わせる (applyTheme が data-scheme を付ける) */
+:root[data-scheme="dark"] #confirm button.primary { background: #ececec; color: #0d0d0d; border-color: #ececec; }

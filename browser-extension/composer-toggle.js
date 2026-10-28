@@ -40,17 +40,35 @@
   // 返り値: { count: 警告の件数, items: [{ name, count }] (多い順) }
   function summarizeWarning(aggregated, allowlist, confidential) {
     const allow = new Set(Array.isArray(allowlist) ? allowlist.map(String) : []);
-    const perName = new Map();
-    let count = 0;
+    const perCategory = Object.create(null);
     for (const row of Array.isArray(aggregated) ? aggregated : []) {
       if (!row || typeof row !== "object") continue;
       const value = row.value == null ? "" : String(row.value);
       if (!value.trim() || allow.has(value)) continue;
-      const name = CATEGORY_JA[row.category] || CATEGORY_JA.OTHER;
-      perName.set(name, (perName.get(name) || 0) + 1);
-      count++;
+      const cat = typeof row.category === "string" ? row.category : "OTHER";
+      perCategory[cat] = (perCategory[cat] || 0) + 1;
     }
-    const conf = Array.isArray(confidential) ? confidential.length : 0;
+    return summarizeCounts(perCategory, Array.isArray(confidential) ? confidential.length : 0);
+  }
+
+  // 種類ごとの件数 ({ PERSON: 2, ... }) と、機密と思われる文の件数から、警告の要約を作る。
+  // Secure Composer (iframe) から届く件数にも使うので、形を厳しく確かめる (docs/release-1.7.1.md の D-SC-04)。
+  // 知らない種類は「その他」、整数でない件数や負の件数は数えない
+  const MAX_COUNT = 9999;
+  const countOf = (n) => (Number.isInteger(n) && n > 0 ? Math.min(n, MAX_COUNT) : 0);
+  function summarizeCounts(perCategory, confidential) {
+    const perName = new Map();
+    let count = 0;
+    if (perCategory && typeof perCategory === "object") {
+      for (const key of Object.keys(perCategory)) {
+        const n = countOf(perCategory[key]);
+        if (!n) continue;
+        const name = Object.prototype.hasOwnProperty.call(CATEGORY_JA, key) ? CATEGORY_JA[key] : CATEGORY_JA.OTHER;
+        perName.set(name, (perName.get(name) || 0) + n);
+        count += n;
+      }
+    }
+    const conf = countOf(confidential);
     if (conf > 0) {
       perName.set(CONFIDENTIAL_JA, (perName.get(CONFIDENTIAL_JA) || 0) + conf);
       count += conf;
@@ -59,7 +77,7 @@
     return { count, items };
   }
 
-  const api = { summarizeWarning };
+  const api = { summarizeWarning, summarizeCounts };
   if (typeof module === "object" && module.exports) module.exports = api;
   if (typeof window === "undefined" || typeof document === "undefined" || typeof chrome === "undefined" || !chrome.storage) return;
   // content.js (同じ isolated world) が保存の確認を頼むための公開点
@@ -465,8 +483,14 @@
       setEnabled(!state.enabled);
     }));
     ui.close.addEventListener("click", safe(ui.close, () => { ui.popover.hidden = true; exportLayout(); }));
-    ui.maskOnce.addEventListener("click", safe(ui.maskOnce, () => { ui.popover.hidden = true; exportLayout(); reviewDraft(); }));
-    ui.turnOn.addEventListener("click", safe(ui.turnOn, () => { ui.popover.hidden = true; setEnabled(true); reviewDraft(); }));
+    // Secure Composer が下書きを受け持つ間は、下書きは iframe の中にある。「マスキングする」は iframe に
+    // 伏せてもらい、「オンにする」はオンにするだけ (送るときに iframe が伏せる) (D-SC-05)
+    ui.maskOnce.addEventListener("click", safe(ui.maskOnce, () => {
+      ui.popover.hidden = true;
+      exportLayout();
+      if (scOwnsDraft()) window.__piiGuardSC.adapter.maskDraft(); else reviewDraft();
+    }));
+    ui.turnOn.addEventListener("click", safe(ui.turnOn, () => { ui.popover.hidden = true; setEnabled(true); if (!scOwnsDraft()) reviewDraft(); }));
     document.documentElement.appendChild(host);
     raise(host);
   }
@@ -778,7 +802,12 @@
   function applyStored(stored) {
     const prevEnabled = state.enabled;
     let tintChanged = false;
-    if ("secureComposerEnabled" in stored) scActive = SC_HOST && stored.secureComposerEnabled !== false;
+    let scChanged = false;
+    if ("secureComposerEnabled" in stored) {
+      const next = SC_HOST && stored.secureComposerEnabled !== false;
+      // 下書きの持ち主 (iframe かネイティブ入力欄か) が変わったら、警告は調べ直す
+      if (next !== scActive) { scActive = next; scChanged = true; state.summary = { count: 0, items: [] }; }
+    }
     if ("interactive" in stored) state.interactive = stored.interactive !== false;
     if ("enabled" in stored) state.enabled = stored.enabled !== false;
     if ("chatTint" in stored) {
@@ -795,7 +824,7 @@
     if (state.enabled) state.summary = { count: 0, items: [] };
     render();
     applyTint(tintChanged);
-    if (!state.enabled && (prevEnabled !== state.enabled || "maskAllowlist" in stored || "maskForceList" in stored)) scheduleScan(0);
+    if (!state.enabled && (prevEnabled !== state.enabled || scChanged || "maskAllowlist" in stored || "maskForceList" in stored)) scheduleScan(0);
   }
   chrome.storage.local.get(["enabled", "interactive", "maskAllowlist", "maskForceList", "chatTint", "secureComposerEnabled", E2E_FLAG]).then((s) => {
     exposeForTests = s[E2E_FLAG] === true;
@@ -856,9 +885,9 @@
   }
   async function scan() {
     if (state.enabled || !state.el) return;
-    // Secure Composer が有効なホストでは、下書きは iframe 側。ネイティブ入力欄を走査しても
-    // 空なので警告は出さない (SC が入力隔離を担う)。
-    if (scActive) { if (state.summary.count) { state.summary = { count: 0, items: [] }; render(); } return; }
+    // Secure Composer が有効なホストでは、下書きは iframe 側にあり、ネイティブ入力欄は空。
+    // 警告の件数は iframe が調べて届ける (setScDraftInfo)。ここでは調べず、届いた件数も消さない
+    if (scActive) return;
     const engine = NS.engine;
     if (!engine || typeof engine.maskAggregated !== "function" || engine.ready === false) { scheduleScan(1000); return; }
     const text = readText(state.el);
@@ -873,6 +902,22 @@
       state.summary = { count: 0, items: [] };
     }
     render();
+  }
+
+  // F-SC-16: Secure Composer の下書きの、オフのときの検出結果 (種類ごとの件数と、機密と思われる文の件数)。
+  // アダプタ (同じ isolated world) が直接呼ぶ。ページのイベントでは届かないので、ページは警告を消せない
+  api.setScDraftInfo = function setScDraftInfo(p) {
+    if (!scActive) return;
+    state.summary = state.enabled || !p || typeof p !== "object"
+      ? { count: 0, items: [] }
+      : summarizeCounts(p.categories, p.confidential);
+    if (ui && !ui.popover.hidden) renderItems();
+    render();
+  };
+  // Secure Composer が今、下書きを受け持っているか (保護入力欄が出ている)
+  function scOwnsDraft() {
+    const a = scActive && window.__piiGuardSC && window.__piiGuardSC.adapter;
+    return !!(a && a.active && a.hasOverlay && typeof a.maskDraft === "function");
   }
 
   // ---- 下書きの確認 (ページ側にサイドバーを開いてもらい、承認結果を書き戻す) ---------
