@@ -177,6 +177,14 @@ const shotFooter = async (p, name) => {
   await p.screenshot({ path: path.join(SHOTS, `${name}.png`), clip: { x: box[0] - 16, y: Math.max(0, box[1] - 220), width: box[2] + 32, height: box[3] + 236 } });
 };
 const bgOf = (p, sel) => p.evaluate((s) => getComputedStyle(document.querySelector(s)).backgroundColor, sel);
+// 背景色が want になるまで待って、最後に読んだ色を返す。色は 0.25 秒かけて移るので、決まった時間だけ待って
+// 測ると、負荷が高いときに移る途中を読んでしまう (2026-10-28 の検証で、負荷 8 前後のときに落ちた)
+async function bgSettled(p, sel, want, ms = 5000) {
+  const end = Date.now() + ms;
+  let v = await bgOf(p, sel);
+  while (v !== want && Date.now() < end) { await p.waitForTimeout(100); v = await bgOf(p, sel); }
+  return v;
+}
 const send = async (p) => {
   await p.evaluate((t) => {
     fetch("/backend-api/conversation", { method: "POST", headers: { "content-type": "application/json" },
@@ -475,23 +483,24 @@ try {
   console.log("T-16 オンのときの背景色:");
   check(await bgOf(p, "main") === "rgb(252, 252, 252)", "色を選んでいなければ背景は元のまま");
   await sw.evaluate(() => chrome.storage.local.set({ chatTint: "#3b82f6" }));
-  await p.waitForTimeout(1200);
   const lightTint = TINT.tintedBackground("#3b82f6", "rgb(252, 252, 252)");
-  check(await bgOf(p, "main") === lightTint, `オンで、チャットの背景が選んだ色を混ぜた色になる (${await bgOf(p, "main")})`);
-  check(await bgOf(p, "body") === lightTint, "body も同じ色になる");
+  const tinted = await bgSettled(p, "main", lightTint);
+  check(tinted === lightTint, `オンで、チャットの背景が選んだ色を混ぜた色になる (${tinted})`);
+  check(await bgSettled(p, "body", lightTint) === lightTint, "body も同じ色になる");
   check(await bgOf(p, ".surface") === "rgb(255, 255, 255)", "入力欄の箱の色は変わらない");
   await shotFooter(p, "footer-tinted-light");
   await clickInPill(p, "toggle"); await p.waitForTimeout(1000);
-  check((await stored(sw, "enabled")) === false && await bgOf(p, "main") === "rgb(252, 252, 252)", "オフにすると元の色に戻る");
+  check((await stored(sw, "enabled")) === false && await bgSettled(p, "main", "rgb(252, 252, 252)") === "rgb(252, 252, 252)", "オフにすると元の色に戻る");
   await clickInPill(p, "toggle"); await p.waitForTimeout(1000);
-  check(await bgOf(p, "main") === lightTint, "オンに戻すとまた色が付く");
-  await p.emulateMedia({ colorScheme: "dark" }); await p.waitForTimeout(1500);
+  check(await bgSettled(p, "main", lightTint) === lightTint, "オンに戻すとまた色が付く");
+  await p.emulateMedia({ colorScheme: "dark" });
   const darkTint = TINT.tintedBackground("#3b82f6", "rgb(0, 0, 0)");
-  check(await bgOf(p, "main") === darkTint, `暗い表示では、暗い背景に混ぜた色になる (${await bgOf(p, "main")})`);
+  const darkBg = await bgSettled(p, "main", darkTint);
+  check(darkBg === darkTint, `暗い表示では、暗い背景に混ぜた色になる (${darkBg})`);
   check(await bgOf(p, ".surface") === "rgb(48, 48, 48)", "暗い表示でも入力欄の箱の色は変わらない");
   await shotFooter(p, "footer-tinted-dark");
-  await p.emulateMedia({ colorScheme: "light" }); await p.waitForTimeout(1500);
-  check(await bgOf(p, "main") === lightTint, "明るい表示に戻すと明るい側の色に戻る");
+  await p.emulateMedia({ colorScheme: "light" });
+  check(await bgSettled(p, "main", lightTint) === lightTint, "明るい表示に戻すと明るい側の色に戻る");
 
   console.log("T-17 設定画面のパレット:");
   const extId = new URL(sw.url()).host;
@@ -511,7 +520,7 @@ try {
   check((await stored(sw, "chatTint")) === "#22c55e", "色見本を押すと保存される");
   check(await opt.evaluate(() => (document.querySelector('input[name="chat-tint"]:checked') || {}).value) === "#22c55e", "押した色見本が選ばれた表示になる");
   await p.bringToFront(); await p.waitForTimeout(800);
-  check(await bgOf(p, "main") === TINT.tintedBackground("#22c55e", "rgb(252, 252, 252)"), "開いているタブにすぐ反映する");
+  check(await bgSettled(p, "main", TINT.tintedBackground("#22c55e", "rgb(252, 252, 252)")) === TINT.tintedBackground("#22c55e", "rgb(252, 252, 252)"), "開いているタブにすぐ反映する");
   await opt.bringToFront();
   const none = await swatchAt("");
   if (none) { await opt.mouse.click(none.x, none.y); await opt.waitForTimeout(600); }
