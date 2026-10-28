@@ -73,7 +73,10 @@
   const MAX_CHARS = 20000;
   const TICK_MS = 1000;
   const REVIEW_TIMEOUT_MS = 10 * 60 * 1000;
-  const LOG = (...a) => console.debug("[pii-guard] composer:", ...a);
+  // 動作ログ (docs/diagnostic-log.md)。コンソールには何も書かない
+  const DL = window.PiiGuardDiagLog;
+  const dlog = (code, d) => { if (DL) DL.log(code, d); };
+  const errorFields = (err, where) => (DL ? DL.errorFields(err, where) : {});
   const NS = window.__localMaskMCP; // isolated world のエンジン
   const T = window.PiiGuardTint;    // tint.js (色の計算)
   const STABLE_MS = 500;            // アイコンが動いてからクリックを受け付けるまで (D-22)
@@ -116,7 +119,7 @@
     return cs.opacity === "1" && cs.visibility === "visible" && cs.filter === "none" && cs.clipPath === "none" && cs.pointerEvents !== "none";
   }
   // ホストの属性 (style など) がこのスクリプト以外から変えられたら元に戻す
-  function guardHost(host, baseCss, onTamper) {
+  function guardHost(host, baseCss, onTamper, uiName) {
     // MutationObserver の通知は非同期なので、自分の書き込みかどうかはフラグではなく
     // 「今の属性が期待どおりか」で判断する (フラグ方式だと自分の書き込みに反応して無限に繰り返した)
     const expected = () => baseCss + (host.__pos || "");
@@ -133,7 +136,7 @@
         m.attributeName === "class" || m.attributeName === "hidden" ||
         (m.attributeName === "popover" && TOP_LAYER && host.getAttribute("popover") !== "manual")));
       if (!tampered) return;
-      LOG("host attributes were changed by the page; restoring");
+      dlog("ui.tampered", { ui: uiName, what: "attributes" });
       host.removeAttribute("class");
       host.removeAttribute("hidden");
       apply();
@@ -153,7 +156,8 @@
   const TOP_LAYER = typeof HTMLElement === "function" && typeof HTMLElement.prototype.showPopover === "function";
   const LAYER_CSS = '[data-pii-guard="composer-toggle"]::backdrop,[data-pii-guard="persist-confirm"]::backdrop{display:none!important}';
   let layerStyle = null;
-  let othersOpenedSinceRaise = false;
+  let othersOpenedSinceRaise = false; // 前に出し直してから、ページが別の要素をトップレイヤーに出したか
+  let tickRaiseSpent = false;         // 見回りで出し直したのに見えるようにならなかった (画面の外に出ているなど)。次の変化まで繰り返さない
   // 自分の外枠の ::backdrop を消す (D-32)。消さないと、自分の膜がページや埋め込みを覆う
   function ensureLayerStyle() {
     if (!TOP_LAYER) return;
@@ -183,14 +187,26 @@
     if (persistCurrent && persistUi && !persistUi.box.hidden) rs.push(persistUi.box.getBoundingClientRect());
     return rs;
   }
-  // サイトが入力欄の上を覆うつもりの表示か (D-33): モーダル、全画面、または自分の部品に重なる要素
-  function coversUs(el) {
-    if (el.matches(":modal, :fullscreen")) return true;
+  function overlapsUs(el) {
     const r = el.getBoundingClientRect();
     if (r.width === 0 && r.height === 0) return false;
     return ourRects().some((o) => r.left < o.right + 4 && o.left < r.right + 4 && r.top < o.bottom + 4 && o.top < r.bottom + 4);
   }
+  // サイトが入力欄の上を覆うつもりの表示か (D-33): モーダル、全画面、または自分の部品に重なる要素
+  const coversUs = (el) => el.matches(":modal, :fullscreen") || overlapsUs(el);
   const othersInTopLayer = () => [...document.querySelectorAll(":popover-open, :modal, :fullscreen")].filter((el) => !isOurHost(el));
+  // 動作ログ用: トップレイヤーにある自分以外の要素の説明 (タグ名、popover の値、role、モーダルか、重なっていたか)。文字は入れない
+  function describeLayers() {
+    try {
+      return othersInTopLayer().slice(0, 6).map((el) => ({
+        tag: el.tagName.toLowerCase(),
+        popover: el.hasAttribute("popover") ? (el.getAttribute("popover") || "auto") : "",
+        role: el.getAttribute("role") || "",
+        modal: el.matches(":modal"),
+        overlap: overlapsUs(el),
+      }));
+    } catch (_) { return []; }
+  }
   // 自分の外枠を、覆うつもりの表示が無ければいちばん上に出し直す
   function raiseIfClear(force) {
     if (!TOP_LAYER) return;
@@ -207,14 +223,18 @@
     if (!TOP_LAYER) return;
     ensureLayerStyle();
     if (host && ui && host.__pos !== "display:none;" && !host.matches(":popover-open")) {
-      LOG("the icon host was taken out of the top layer; restoring");
+      dlog("ui.tampered", { ui: "icon", what: "top-layer" });
       raise(host);
     }
     if (persistCurrent && persistHost && !persistHost.matches(":popover-open")) {
-      LOG("the confirmation host was taken out of the top layer; cancelling");
+      dlog("ui.tampered", { ui: "confirm", what: "top-layer" });
       finishPersist(false);
     }
-    if (host && ui && visibility.get(ui.toggle) === false) raiseIfClear(true);
+    if (host && ui && visibility.get(ui.toggle) === false) {
+      if (!tickRaiseSpent) { tickRaiseSpent = true; raiseIfClear(true); }
+    } else {
+      tickRaiseSpent = false;
+    }
   }
   function onToggleEvent(e) {
     const t = e.target;
@@ -222,12 +242,15 @@
     if (isOurHost(t)) {
       // 自分で出し直したときは開いたまま。閉じたままなら、サイトが閉じた (D-34)
       if (t.matches(":popover-open")) return;
-      if (t === persistHost && persistCurrent) { LOG("the confirmation host was closed by the page; cancelling"); finishPersist(false); return; }
+      if (t === persistHost && persistCurrent) { dlog("ui.tampered", { ui: "confirm", what: "top-layer" }); finishPersist(false); return; }
       raise(t);
       return;
     }
+    // 開いたら、覆うつもりの表示が無ければ上に戻る。閉じたら、覆っていた表示が消えて
+    // 上に戻れるようになったかもしれない (開いたまま残っている別の要素の下にいる場合)
     othersOpenedSinceRaise = othersOpenedSinceRaise || e.newState === "open";
-    raiseIfClear(e.newState === "closed");
+    tickRaiseSpent = false;
+    raiseIfClear(false);
   }
 
   // サービスごとの入力欄のヒント。外れていても下の汎用の判定で拾う
@@ -392,7 +415,7 @@
     host = document.createElement("div");
     host.setAttribute("data-pii-guard", "composer-toggle");
     host.__pos = "display:none;";
-    guardHost(host, HOST_CSS, () => place(true));
+    guardHost(host, HOST_CSS, () => place(true), "icon");
     // 閉じた Shadow DOM。ページのスクリプトは中の要素を取得も操作もできない。
     // 中身は固定の雛形だけで、入力欄の文章などの外部の値は入れない
     const shadow = host.attachShadow({ mode: "closed" });
@@ -600,7 +623,7 @@
     moved: "アイコンが動いた直後のため、受け付けませんでした。もう一度押してください",
   };
   function ignoredClick(reason) {
-    LOG(reason === "moved" ? "ignored a click: the control has just moved" : "ignored a click on a control that is not fully visible");
+    dlog("toggle.click_ignored", { reason, layers: describeLayers() });
     notice(IGNORED_TEXT[reason], reason);
   }
 
@@ -676,11 +699,12 @@
   }
 
   // 入力欄を囲む箱 (背景か枠線があり、入力欄より少しだけ大きい祖先)。浮かせる位置の基準。
-  // 見つからなければ入力欄そのもの
+  // 見つからなければ入力欄そのもの。Gemini では箱が入力欄の 9 段上にあるので、12 段まで探す (D-37)。
+  // 大きさの上限で、画面全体のような大きな祖先は選ばない
   function composerBox(el) {
     const er = el.getBoundingClientRect();
     let a = el.parentElement;
-    for (let i = 0; a && i < 8 && a !== document.body && a !== document.documentElement; i++, a = a.parentElement) {
+    for (let i = 0; a && i < 12 && a !== document.body && a !== document.documentElement; i++, a = a.parentElement) {
       const r = a.getBoundingClientRect();
       if (r.width === 0 && r.height === 0) continue; // display: contents
       if (r.height > er.height + 160 || r.width > er.width + 480) break;
@@ -747,7 +771,8 @@
     if (state.enabled) state.summary = { count: 0, items: [] };
     render();
     applyTint(false);
-    chrome.storage.local.set({ enabled: !!value }).catch((e) => LOG("storage write failed:", e && e.message));
+    dlog("settings.enabled", { value: value ? "on" : "off", via: "icon" });
+    chrome.storage.local.set({ enabled: !!value }).catch((e) => dlog("error", errorFields(e, "storage")));
     if (!state.enabled) scheduleScan(0);
   }
   function applyStored(stored) {
@@ -844,7 +869,7 @@
       if (seq !== state.scanSeq) return;
       state.summary = summarizeWarning(res && res.aggregated, state.allowlist, res && res.confidential);
     } catch (err) {
-      LOG("scan failed:", err && err.message);
+      dlog("error", errorFields(err, "draft-scan"));
       state.summary = { count: 0, items: [] };
     }
     render();
@@ -889,12 +914,12 @@
       if (masked === text) return;
       writeBack(el, masked);
       if (norm(readText(el)) !== norm(masked)) {
-        LOG("write-back mismatch; restoring the original text");
+        dlog("error", { where: "review", name: "InvalidStateError" });
         writeBack(el, text);
         notice("入力欄に書き戻せませんでした");
       }
     } catch (err) {
-      LOG("review failed:", err && err.message);
+      dlog("error", errorFields(err, "review"));
       notice("確認画面でエラーが起きました");
     } finally {
       state.reviewing = false;
@@ -1042,8 +1067,7 @@
     if (persistHost) return;
     persistHost = document.createElement("div");
     persistHost.setAttribute("data-pii-guard", "persist-confirm");
-    guardHost(persistHost, HOST_CSS,
-      () => { if (persistCurrent) { LOG("cancelling the pending confirmation after tampering"); finishPersist(false); } });
+    guardHost(persistHost, HOST_CSS, () => { if (persistCurrent) finishPersist(false); }, "confirm");
     const shadow = persistHost.attachShadow({ mode: "closed" });
     shadow.innerHTML = `<style>${PERSIST_STYLE}</style>
       <div class="box" hidden role="dialog" aria-label="PII Guard の確認">
@@ -1064,8 +1088,9 @@
     watchVisibility(persistUi.confirm);
     watchVisibility(persistUi.cancel);
     persistUi.confirm.addEventListener("click", (e) => {
-      if (!clickIsSafe(e, persistUi.confirm, persistHost)) { LOG("ignored a confirm click: the dialog is not fully visible"); return; }
-      if (Date.now() - persistShownAt < PERSIST_MIN_VISIBLE_MS) { LOG("ignored a confirm click: the dialog has just appeared"); return; }
+      if (!e || e.isTrusted !== true) return;
+      if (!clickIsSafe(e, persistUi.confirm, persistHost)) { dlog("confirm.click_ignored", { reason: "occluded", layers: describeLayers() }); return; }
+      if (Date.now() - persistShownAt < PERSIST_MIN_VISIBLE_MS) { dlog("confirm.click_ignored", { reason: "too-soon" }); return; }
       finishPersist(true);
     });
     persistUi.cancel.addEventListener("click", (e) => { if (e.isTrusted) finishPersist(false); });
@@ -1109,7 +1134,7 @@
     persistUi.box.hidden = true;
     exportPersistLayout();
     if (accepted) {
-      try { await persist(req); } catch (e) { LOG("persist failed:", e && e.message); }
+      try { await persist(req); } catch (e) { dlog("error", errorFields(e, "persist")); }
     }
     showNextPersist();
   }
@@ -1157,7 +1182,6 @@
     render();
     place(true);
     if (!state.enabled) scheduleScan(0);
-    LOG("attached to", el.tagName.toLowerCase() + (el.id ? "#" + el.id : ""));
   }
   function tick() {
     if (!state.el || !state.el.isConnected || !isVisible(state.el)) {

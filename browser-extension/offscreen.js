@@ -33,6 +33,8 @@ transformersEnv.allowRemoteModels = true;
 transformersEnv.allowLocalModels = false;
 
 const ML_MODEL_ID = "Xenova/distilbert-base-multilingual-cased-ner-hrl";
+// 動作ログ (docs/diagnostic-log.md)。この文書のエラーはコンソールではなくログに残す
+if (globalThis.PiiGuardDiagLog) globalThis.PiiGuardDiagLog.captureErrors("offscreen");
 
 /**
  * Reconstruct per-token character offsets from a WordPiece tokenizer

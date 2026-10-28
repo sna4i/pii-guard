@@ -39,6 +39,7 @@
         "https://*.manus.im/*"
       ],
       "js": [
+        "diag-log.js",
         "engine/dictionaries.js",
         "engine/patterns.js",
         "engine/classification.js",

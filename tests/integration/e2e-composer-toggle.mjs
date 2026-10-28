@@ -23,6 +23,7 @@
 //   T-24 外枠の popover 属性を消されたり閉じられたりしても元に戻し、保留中の確認は取り消す
 //   T-25 モーダルの <dialog> の上には出し直さない
 //   T-26 クリックを受け付けなかったとき、アイコンの吹き出しで理由を知らせる
+//   T-27 入力欄を囲む箱が深い所にあるサイト (Gemini) でも、アイコンをサイトのボタンに重ねない
 //
 // 使い方: node tests/integration/e2e-composer-toggle.mjs <unpacked 拡張機能ディレクトリ>
 // 環境変数 PII_E2E_SHOTS=<ディレクトリ> を付けると、下の段に置いたときの見た目を保存する
@@ -83,6 +84,20 @@ const dockableComposer = () => `<div class="surface"><div class="ComposerLayoutF
 <div class="min-w-0"><div class="contents"><div class="flex min-w-0 items-center"><div class="flex min-w-0 justify-end"><div class="flex items-center"><span data-state="closed" class="contents"><button type="button" aria-label="ChatGPT モデルを選択" data-composer-navigation-target="reasoning" style="height:36px;border:0;background:transparent;color:inherit">思考量 中程度</button></span></div></div>
 <div class="flex items-center"><div class="flex items-center"><span data-state="closed" class="contents"><button type="button" class="btn" aria-label="音声入力">${MIC}</button></span></div><div class="flex items-center" style="margin-left:8px"><button type="button" class="btn" aria-label="音声会話を開始">◉</button></div></div></div></div></div>
 </div></div>`;
+// Gemini の入力欄の作り (2026-10-28 にログインなしの実サイトで調べたもの): 白い箱 (角の丸み 32px、影) は
+// 入力欄の 9 段上の祖先で、箱の中の入力欄の右にモード選択のボタンとマイクがある
+const geminiLikePage = () => `<!doctype html><title>mock</title><style>
+html,body{margin:0;height:100%}body{background:linear-gradient(#eef3fc,#dce7fb)}
+main{height:100%;display:flex;flex-direction:column;justify-content:flex-end;padding:0 24px 48px;box-sizing:border-box}
+.pill{background:#fff;border-radius:32px;box-shadow:0 2px 8px rgba(0,0,0,.16);width:660px;margin:0 auto;padding:12px 16px;box-sizing:border-box}
+.row{display:flex;align-items:center;gap:8px}.ib{width:32px;height:32px;border:0;border-radius:50%;background:transparent;font-size:16px}
+#gm-mode{height:40px;border:0;background:transparent;font-size:14px;padding:0 12px}
+#gm-editor{min-height:24px;outline:none}
+</style><main><div class="container"><div class="pill" id="gm-pill"><div><div><div class="row">
+<button class="ib" id="gm-plus">+</button>
+<div style="flex:1"><div><div><div><div><div contenteditable="true" role="textbox" aria-label="Gemini に相談" id="gm-editor"></div></div></div></div></div></div>
+<button id="gm-mode">Flash-Lite ⌄</button><button class="ib" id="gm-mic">🎤</button>
+</div></div></div></div></div></main>`;
 // 目印の無い入力欄 (下の段に置けないとき)
 const plainComposer = () => `<div class="surface"><div contenteditable="true" role="textbox" class="ProseMirror" aria-label="ChatGPT に聞く"><p><br></p></div></div>`;
 const footerPage = () => `<!doctype html><title>mock</title><style>${COMPOSER_CSS}</style>
@@ -180,6 +195,7 @@ try {
     }
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     if (req.url.startsWith("/footer")) { res.end(footerPage()); return; }
+    if (req.url.startsWith("/gemini-like")) { res.end(geminiLikePage()); return; }
     if (req.url.startsWith("/chat-plain")) { res.end(chatPage(plainComposer())); return; }
     if (req.url.startsWith("/chat")) { res.end(chatPage(dockableComposer())); return; }
     const kind = req.url.startsWith("/ce") ? "ce" : req.url.startsWith("/none") ? "none" : "ta";
@@ -561,8 +577,14 @@ try {
   console.log("T-22 同じ状態で保存の確認:");
   await p.evaluate(() => window.postMessage({ source: "mask-mcp-inpage", type: "add-allowlist", value: "toplayer-ok@example.com" }, "*"));
   await p.waitForTimeout(1500); // 確認は出てから 0.5 秒たつまで押せない
+  const cBefore = await p.evaluate((sel) => { const h = document.querySelector(sel); return h ? { pending: h.dataset.pending, layout: h.dataset.layout, open: h.matches(":popover-open") } : null; }, CONFIRM);
   await clickConfirm(p, "confirm"); await p.waitForTimeout(800);
-  check(((await stored(sw, "maskAllowlist")) || []).includes("toplayer-ok@example.com"), "トップレイヤーの要素があっても、確認の「追加」が押せる");
+  const addedOk = ((await stored(sw, "maskAllowlist")) || []).includes("toplayer-ok@example.com");
+  check(addedOk, "トップレイヤーの要素があっても、確認の「追加」が押せる");
+  if (!addedOk) {
+    const diag = await sw.evaluate(async () => Object.entries(await chrome.storage.local.get(null)).filter(([k]) => k.startsWith("diagLog:")).flatMap(([, v]) => v).filter((e) => /confirm|ui\./.test(e.code)).slice(-5));
+    console.log(`    診断: 押す前の確認=${JSON.stringify(cBefore)} 動作ログ=${JSON.stringify(diag)}`);
+  }
   await sw.evaluate(() => chrome.storage.local.get("maskAllowlist").then((s) => chrome.storage.local.set({ maskAllowlist: (s.maskAllowlist || []).filter((v) => v !== "toplayer-ok@example.com") })));
 
   console.log("T-23 アイコンに重なるトップレイヤーの要素:");
@@ -634,6 +656,18 @@ try {
   await p.evaluate(() => document.getElementById("modal").close());
   await p.waitForTimeout(1500);
   check(await pageSeesVisible(HOST), "モーダルを閉じれば、アイコンはまた見えている");
+
+  console.log("T-27 入力欄を囲む箱が深い所にあるサイト (Gemini の作り):");
+  await p.goto("https://chatgpt.com/gemini-like"); await p.waitForTimeout(3500);
+  const gl = await layoutOf(p);
+  const gt = gl && gl.toggle;
+  const pill = await rectOf(p, "#gm-pill");
+  const mode = await rectOf(p, "#gm-mode");
+  const mic = await rectOf(p, "#gm-mic");
+  check(!!gt, "アイコンが出る");
+  check(gt && !overlaps(gt, mode) && !overlaps(gt, mic), `アイコンがサイトのボタン (モード選択、マイク) に重ならない (toggle=${JSON.stringify(gt)} モード選択=${JSON.stringify(mode)})`);
+  check(gt && pill && gt[0] >= pill[0] + pill[2], `アイコンは入力欄の白い箱の右の外側に出る (toggle=${JSON.stringify(gt)} 箱=${JSON.stringify(pill)})`);
+  check(gt && pill && Math.abs((gt[1] + gt[3] / 2) - (pill[1] + pill[3] / 2)) <= 2, "縦は箱の中央にそろう");
 
   check(errs.length === 0, `ページの JS エラーなし${errs.length ? ": " + errs.slice(0, 3).join(" | ") : ""}`);
 } catch (e) {

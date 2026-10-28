@@ -3,6 +3,8 @@
 // for the maskAllowlist key in chrome.storage.local.
 
 const $ = (id) => document.getElementById(id);
+const DLOG = window.PiiGuardDiagLog; // 動作ログ (docs/diagnostic-log.md)
+if (DLOG) DLOG.captureErrors("options");
 
 // --- Allowlist CRUD -----------------------------------------------------
 
@@ -206,7 +208,6 @@ const ML_HF_ORIGINS = [
 
 async function requestMlHostPermission() {
   if (!chrome.permissions || typeof chrome.permissions.request !== "function") {
-    console.warn("[ml] chrome.permissions API unavailable; falling back to true");
     return true;
   }
   try {
@@ -215,7 +216,7 @@ async function requestMlHostPermission() {
   try {
     return await chrome.permissions.request({ origins: ML_HF_ORIGINS });
   } catch (e) {
-    console.warn("[ml] permission request failed:", e?.message || e);
+    if (window.PiiGuardDiagLog) PiiGuardDiagLog.log("error", PiiGuardDiagLog.errorFields(e, "options"));
     return false;
   }
 }
@@ -294,24 +295,19 @@ async function ensureLlmHostPermission(rawUrl) {
   const pattern = toOriginPattern(rawUrl);
   if (!pattern) return false;
   if (!chrome || !chrome.permissions || typeof chrome.permissions.request !== "function") {
-    console.warn(
-      "[pii-guard] chrome.permissions API unavailable — falling back to direct fetch for",
-      pattern
-    );
     return true;
   }
   try {
     const already = await chrome.permissions.contains({ origins: [pattern] });
     if (already) return true;
   } catch (err) {
-    console.warn("[pii-guard] chrome.permissions.contains failed:", err);
     // Fall through and try request() — contains() failure shouldn't block.
   }
   try {
     const granted = await chrome.permissions.request({ origins: [pattern] });
     return granted === true;
   } catch (err) {
-    console.warn("[pii-guard] chrome.permissions.request failed:", err);
+    if (window.PiiGuardDiagLog) PiiGuardDiagLog.log("error", PiiGuardDiagLog.errorFields(err, "options"));
     return false;
   }
 }
@@ -848,6 +844,7 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   $("opt-enabled").addEventListener("change", (e) => {
+    if (window.PiiGuardDiagLog) PiiGuardDiagLog.log("settings.enabled", { value: e.target.checked ? "on" : "off", via: "options" });
     chrome.storage.local.set({ enabled: e.target.checked });
   });
   $("opt-interactive").addEventListener("change", (e) => {
@@ -935,4 +932,102 @@ document.addEventListener("DOMContentLoaded", () => {
       prewarmMl();
     });
   }
+});
+
+// --- タブと動作ログ (docs/diagnostic-log.md の D-LG-07) --------------------------
+// 表示は textContent だけで組む。記録の中身は diag-log.js の検めを通った決まった値だけ
+const TABS = { settings: { btn: "tabbtn-settings", panel: "tab-settings" }, log: { btn: "tabbtn-log", panel: "tab-log" } };
+const LEVEL_JA = { info: "情報", warn: "注意", error: "エラー" };
+let logShown = [];
+let logTimer = null;
+
+function selectTab(name, focus) {
+  for (const [key, t] of Object.entries(TABS)) {
+    const on = key === name;
+    const btn = $(t.btn);
+    btn.setAttribute("aria-selected", on ? "true" : "false");
+    btn.tabIndex = on ? 0 : -1;
+    $(t.panel).hidden = !on;
+    if (on && focus) btn.focus();
+  }
+  try { history.replaceState(null, "", name === "log" ? "#log" : location.pathname); } catch (_) { /* 何もしない */ }
+  if (name === "log") renderLog();
+}
+
+async function renderLog() {
+  if (!DLOG) return;
+  const days = Number($("log-days").value) || DLOG.RETENTION_DAYS;
+  const warnOnly = $("log-level").value === "warn";
+  let entries = [];
+  try { entries = await DLOG.readAll(chrome.storage.local, { days }); } catch (e) { DLOG.log("error", DLOG.errorFields(e, "options")); }
+  if (warnOnly) entries = entries.filter((e) => e.lv === "warn" || e.lv === "error");
+  logShown = entries;
+  const tbody = $("log-rows");
+  tbody.textContent = "";
+  for (const e of entries) {
+    const tr = document.createElement("tr");
+    const time = document.createElement("td");
+    time.className = "log-time";
+    time.textContent = DLOG.timeStr(e.t);
+    const lvCell = document.createElement("td");
+    const lv = document.createElement("span");
+    lv.className = `lv lv-${e.lv}`;
+    lv.textContent = LEVEL_JA[e.lv] || e.lv;
+    lvCell.appendChild(lv);
+    const site = document.createElement("td");
+    site.className = "log-site";
+    site.textContent = e.site || "拡張機能";
+    const msg = document.createElement("td");
+    msg.textContent = DLOG.format(e) + (e.n > 1 ? ` ×${e.n}` : "");
+    if (e.src === "page") {
+      const note = document.createElement("span");
+      note.className = "log-note";
+      note.textContent = "ページ側から報告";
+      msg.appendChild(note);
+    }
+    tr.append(time, lvCell, site, msg);
+    tbody.appendChild(tr);
+  }
+  $("log-empty").hidden = entries.length > 0;
+}
+
+function scheduleRenderLog() {
+  clearTimeout(logTimer);
+  logTimer = setTimeout(() => { if (!$("tab-log").hidden) renderLog(); }, 300);
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  $("tabbtn-settings").addEventListener("click", () => selectTab("settings"));
+  $("tabbtn-log").addEventListener("click", () => selectTab("log"));
+  // 左右の矢印キーでタブを移る
+  for (const id of ["tabbtn-settings", "tabbtn-log"]) {
+    $(id).addEventListener("keydown", (e) => {
+      if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+      e.preventDefault();
+      selectTab(id === "tabbtn-settings" ? "log" : "settings", true);
+    });
+  }
+  $("log-days").addEventListener("change", renderLog);
+  $("log-level").addEventListener("change", renderLog);
+  $("log-copy").addEventListener("click", async () => {
+    const version = chrome.runtime.getManifest().version;
+    const head = `PII Guard ${version} の動作ログ (${$("log-days").selectedOptions[0].textContent}、${$("log-level").selectedOptions[0].textContent})`;
+    const text = [head, ...logShown.map((e) => DLOG.formatLine(e))].join("\n");
+    try {
+      await navigator.clipboard.writeText(text);
+      $("log-status").textContent = `${logShown.length} 件をコピーしました`;
+    } catch (_) {
+      $("log-status").textContent = "コピーできませんでした";
+    }
+  });
+  $("log-clear").addEventListener("click", async () => {
+    if (!confirm("動作ログをすべて消しますか？")) return;
+    await DLOG.clear(chrome.storage.local);
+    $("log-status").textContent = "動作ログを消しました";
+    renderLog();
+  });
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === "local" && Object.keys(changes).some((k) => k.startsWith("diagLog"))) scheduleRenderLog();
+  });
+  if (location.hash === "#log") selectTab("log");
 });

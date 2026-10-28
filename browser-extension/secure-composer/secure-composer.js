@@ -23,6 +23,10 @@
   const rootEl = document.documentElement;
 
   const settings = { enabled: true, maskForceList: [], mlEnabled: false, piiSendWarning: true };
+  // 動作ログ (docs/diagnostic-log.md)。件数や理由だけで、文章は残さない
+  const DLG = window.PiiGuardDiagLog;
+  const dl = (code, d) => { if (DLG) DLG.log(code, d); };
+  if (DLG) DLG.captureErrors("secure-composer");
   let composing = false;         // IME 変換中
   let lastReportedHeight = 0;
 
@@ -141,6 +145,7 @@
       catch (e) {
         if (settings.enabled) {
           machine.to("MASKING_FAILED", { error: String((e && e.message) || e) });
+          dl("send.blocked", { reason: "unmaskable", via: "secure-composer" });
           setStatus("端末内のマスキングに失敗したよ。送信は止めた。下書きはそのまま。");
           return;
         }
@@ -154,6 +159,7 @@
         const residual = leak ? leak.findLeaks(finalText, settings.maskForceList.map((e) => e.value)) : [];
         if (residual.length) {
           machine.to("MASKING_FAILED", { reason: "residual" });
+          dl("send.blocked", { reason: "unmaskable", via: "secure-composer" });
           setStatus("マスキングの確認に失敗したよ。送信は止めた。");
           return;
         }
@@ -161,7 +167,7 @@
       // 個人情報を検出したときは送信前に確認を出す (無いときは無言で送る)。
       if (piiCount > 0 && settings.piiSendWarning) {
         const ok = await confirmPii(piiCount);
-        if (!ok) { machine.to("EDITING"); setStatus(""); return; } // 取消: 下書きはそのまま
+        if (!ok) { machine.to("EDITING"); setStatus(""); dl("send.cancelled", { via: "secure-composer" }); return; } // 取消: 下書きはそのまま
       }
       machine.to("COMMIT_READY");
       machine.to("SUBMITTING");
@@ -174,6 +180,7 @@
         return;
       }
       machine.to("SENT");
+      if (settings.enabled && maskedCount > 0) dl("send.masked", { via: "secure-composer" });
       // F-SC-10: 確認機能 OFF でも「マスクした件数」をピルに知らせ、黄色+メッセージを出させる。
       if (settings.enabled && maskedCount > 0) boundary.post("maskinfo", { maskedCount });
       editor.value = "";
@@ -245,7 +252,7 @@
   (async () => {
     await loadSettings();
     const ok = await waitEngine(8000);
-    if (!ok) { machine.block("engine-timeout"); setStatus("保護エンジンを読み込めなかった。"); boundary.post("blocked", { reason: "engine" }); return; }
+    if (!ok) { machine.block("engine-timeout"); dl("engine.unavailable", { where: "secure-composer" }); setStatus("保護エンジンを読み込めなかった。"); boundary.post("blocked", { reason: "engine" }); return; }
     machine.to("SECURE_READY");
     autosize();
     boundary.post("ready", {});

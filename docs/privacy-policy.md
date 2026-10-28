@@ -32,8 +32,9 @@ PII Guard は、Claude / ChatGPT / Gemini / Manus などの AI チャット
   指定した**ローカル/LAN 上の LLM サーバー** (例: `http://localhost:11434`)
   にテキストを POST。拡張機能の開発者や第三者には届きません。
 - **収集データなし** — 拡張機能は開発者が運営するサーバーに何も送りません。
-- **保存データ: ローカルブラウザストレージのみ** — 設定だけを
-  `chrome.storage.local` に保存。テキスト本文や検出結果は保存しません。
+- **保存データ: ローカルブラウザストレージのみ** — 設定と、v1.7.1 からの動作ログ
+  (日時・出来事の種類・件数・ホスト名だけ。14 日で自動削除) を `chrome.storage.local` に保存。
+  テキスト本文や検出した値は保存しません。
 
 ---
 
@@ -67,9 +68,11 @@ Local Mask MCP persists a small number of user preferences to
 | `localLlmMode` *(v0.5.0+)* | `"detect"` (augment regex) or `"replace"` (tag-based rewrite) |
 | `localLlmTimeoutMs` *(v0.5.0+)* | Timeout in ms (default 120000) |
 | `localLlmKind` *(v0.5.0+)* | `"ollama"` or `"openai-compat"` API shape |
+| `diagLog:YYYY-MM-DD`, `diagLogDays` *(v1.7.1+)* | Activity log shown in the options page "ログ" tab: time, event type, counts, reason and host names only. Never the typed text, detected values, file names, request bodies, or URL paths and queries. Entries older than 14 days are deleted automatically |
 
 `chrome.storage.local` data stays in your browser profile; it is not
-synced to Google or transmitted anywhere by the extension.
+synced to Google or transmitted anywhere by the extension. From v1.7.1
+the extension writes nothing to the browser console.
 
 ## 3. Data flow (what actually happens on the page)
 

@@ -12,7 +12,10 @@
 (() => {
   if (!/(^|\.)(chatgpt\.com|openai\.com)$/.test(location.hostname)) return;
   const SC = window.__piiGuardSC;
-  if (!SC || !SC.boundary) { console.warn("[pii-guard] secure-composer boundary missing"); return; }
+  if (!SC || !SC.boundary) {
+    if (window.PiiGuardDiagLog) window.PiiGuardDiagLog.log("error", { where: "secure-composer", name: "NotFoundError" });
+    return;
+  }
 
   const EXT = chrome.runtime.getURL("secure-composer/secure-composer.html");
   const Z = "2147483646";

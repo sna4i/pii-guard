@@ -25,6 +25,22 @@
   const TAG_IN = "mask-mcp-inpage";   // injected → content
   const TAG_OUT = "mask-mcp-content"; // content → injected
 
+  // 動作ログ (docs/diagnostic-log.md)。コンソールには何も書かない (R-LG-01)
+  const DL = window.PiiGuardDiagLog;
+  const dlog = (code, d) => { if (DL) DL.log(code, d); };
+  if (DL) DL.captureErrors("content", { ownOnly: true });
+  // ページの世界 (injected.js など) からの記録。ページのスクリプトも送れるので、
+  // Service Worker で検め直し「ページ側から報告」として残す。1 分に 60 件まで (D-LG-03)
+  let pageLogWindow = 0;
+  let pageLogCount = 0;
+  function forwardPageLog(entry) {
+    if (!DL || !entry || typeof entry !== "object" || typeof entry.code !== "string") return;
+    const now = Date.now();
+    if (now - pageLogWindow > 60000) { pageLogWindow = now; pageLogCount = 0; }
+    if (++pageLogCount > 60) return;
+    DL.log(entry.code, entry.d && typeof entry.d === "object" ? entry.d : {}, { src: "page" });
+  }
+
   const GATEWAY_URL = "http://127.0.0.1:8081/v1/extension/sanitize";
   const GATEWAY_AGGREGATED_URL =
     "http://127.0.0.1:8081/v1/extension/sanitize/aggregated";
@@ -75,16 +91,7 @@
   // Also completes the PNA preflight + TCP warmup for the common
   // gateway-mode path. Sets gatewayReachable for Hybrid dispatch.
   (async () => {
-    const t0 = Date.now();
-    const ok = await probeGateway();
-    const elapsed = Date.now() - t0;
-    if (ok) {
-      console.debug("[pii-guard] gateway warmup ok in", elapsed + "ms");
-    } else {
-      console.debug(
-        "[pii-guard] gateway unreachable at warmup — standalone engine will handle masking"
-      );
-    }
+    await probeGateway();
   })();
 
   // 1) Inject the page-world scripts in order:
@@ -139,11 +146,6 @@
   // 原文の持ち出しガード (F-EG-01〜04)。injected.js が使うので先に読む
   injectScript("security/egress-guard.js");
   injectScript("injected.js");
-  console.debug(
-    "[pii-guard] injected",
-    ENGINE_FILES.length + 4,
-    "scripts (engine + ui + hook)"
-  );
 
   // Push the current ``interactive`` + ``uiMode`` preferences into
   // MAIN world as soon as we can. The injected script reads them off
@@ -301,6 +303,8 @@
     const data = event.data;
     if (!data || data.source !== TAG_IN) return;
 
+    if (data.type === "diag-log") { forwardPageLog(data.entry); return; }
+
     // Allowlist add (no id — fire-and-forget write to chrome.storage).
     // 除外リストと常に伏せる語の変更 (サイドバーから)。ページ側 (MAIN world) からの
     // メッセージはサイトのスクリプトにも送れるので、ここでは保存しない。isolated world の
@@ -310,7 +314,7 @@
       if (typeof confirm === "function") {
         confirm({ type: data.type, value: data.value, category: typeof data.category === "string" ? data.category : null });
       } else {
-        console.warn(`[pii-guard] ${data.type} ignored: the confirmation UI is not available`);
+        dlog("error", { where: "persist", name: "NotSupportedError" });
       }
       return;
     }
@@ -402,7 +406,6 @@
   // failure so the caller can fall back to ``confirmSendUnmasked``.
   async function callGateway(url, payload) {
     let responseBody = null;
-    const t0 = Date.now();
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), GATEWAY_TIMEOUT_MS);
@@ -417,38 +420,14 @@
         });
         if (resp.ok) {
           responseBody = await resp.json();
-          const elapsed = Date.now() - t0;
-          if (elapsed > 1500) {
-            console.info(
-              "[pii-guard] gateway slow:",
-              elapsed + "ms",
-              "url:",
-              url
-            );
-          }
         } else {
-          console.warn("[pii-guard] gateway returned", resp.status, "for", url);
+          dlog("gateway.status", { status: resp.status });
         }
       } finally {
         clearTimeout(timer);
       }
-    } catch (err) {
-      const elapsed = Date.now() - t0;
-      if (err && err.name === "AbortError") {
-        console.warn(
-          "[pii-guard] gateway timed out after",
-          elapsed + "ms (limit",
-          GATEWAY_TIMEOUT_MS + "ms)."
-        );
-      } else {
-        console.warn(
-          "[pii-guard] gateway call failed after",
-          elapsed + "ms:",
-          err?.message || err,
-          "url:",
-          url
-        );
-      }
+    } catch (_) {
+      dlog("gateway.status", { status: 0 });
     }
     return responseBody;
   }
@@ -639,12 +618,6 @@
     const TIMEOUT_DELAY_MS = 2000;
     let warmupTries = 0;
     let timeoutTries = 0;
-    const callStart = Date.now();
-    console.debug(
-      "[pii-guard] llm fetch start:",
-      url,
-      "timeout=" + (config.timeoutMs || 120000) + "ms",
-    );
     while (true) {
       try {
         const resp = await chrome.runtime.sendMessage({
@@ -660,11 +633,6 @@
             ? j?.choices?.[0]?.message?.content
             : j?.message?.content;
           result = result || null;
-          console.debug(
-            `[pii-guard] llm fetch OK in ${Date.now() - callStart}ms, content=${
-              result ? result.length + " chars" : "EMPTY"
-            }${result ? "" : " (check num_predict / think settings)"}`,
-          );
           break;
         }
         const warming =
@@ -674,9 +642,6 @@
           /loading model|model is still loading|server loading/i.test(resp.body);
         if (warming && warmupTries < WARMUP_MAX) {
           warmupTries++;
-          console.debug(
-            `[pii-guard] llm warming up (${warmupTries}/${WARMUP_MAX}), waiting ${WARMUP_DELAY_MS}ms…`
-          );
           await new Promise((r) => setTimeout(r, WARMUP_DELAY_MS));
           continue;
         }
@@ -688,38 +653,20 @@
           /abort|aborted|AbortError/i.test(resp.error);
         if (abortLike && timeoutTries < TIMEOUT_MAX) {
           timeoutTries++;
-          console.debug(
-            `[pii-guard] llm inference timeout (${timeoutTries}/${TIMEOUT_MAX}), retrying…`
-          );
           await new Promise((r) => setTimeout(r, TIMEOUT_DELAY_MS));
           continue;
         }
-        if (resp && resp.status === 403) {
-          console.warn(
-            "[pii-guard] Ollama returned 403 (CORS). Set OLLAMA_ORIGINS=" +
-              "chrome-extension://* or restart ollama with " +
-              "OLLAMA_ORIGINS=* env. Docker: `docker run -e OLLAMA_ORIGINS=* ...` " +
-              "or `docker exec ollama sh -c 'export OLLAMA_ORIGINS=*'` then restart."
-          );
-        } else {
-          console.debug(
-            "[pii-guard] llm call non-ok:",
-            resp && (resp.status || resp.error),
-            resp && resp.body && resp.body.slice(0, 200)
-          );
-        }
+        // 応答の中身は残さない (LLM の出力に入力が含まれる)。番号だけ
+        dlog("llm.http", { status: resp && Number.isInteger(resp.status) ? resp.status : 0 });
         break;
       } catch (err) {
         const isAbort = err && err.name === "AbortError";
         if (isAbort && timeoutTries < TIMEOUT_MAX) {
           timeoutTries++;
-          console.debug(
-            `[pii-guard] llm inference timeout (${timeoutTries}/${TIMEOUT_MAX}), retrying…`
-          );
           await new Promise((r) => setTimeout(r, TIMEOUT_DELAY_MS));
           continue;
         }
-        console.debug("[pii-guard] llm call failed:", err?.message || err);
+        dlog("error", DL ? DL.errorFields(err, "llm") : {});
         break;
       }
     }

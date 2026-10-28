@@ -3,6 +3,8 @@
 // detection count. Standalone-only build: no gateway probe.
 
 const $ = (id) => document.getElementById(id);
+const DL = window.PiiGuardDiagLog; // 動作ログ (docs/diagnostic-log.md)
+if (DL) DL.captureErrors("popup");
 
 async function loadEnabled() {
   const { enabled = true } = await chrome.storage.local.get("enabled");
@@ -10,6 +12,7 @@ async function loadEnabled() {
 }
 
 async function saveEnabled(value) {
+  if (DL) { DL.log("settings.enabled", { value: value ? "on" : "off", via: "popup" }); DL.flushNow(); }
   await chrome.storage.local.set({ enabled: value });
 }
 

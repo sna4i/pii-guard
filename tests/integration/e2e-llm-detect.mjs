@@ -40,9 +40,14 @@ const LLM_ONLY = ["西川", "品質保証部", "ホタル"];
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pii-e2e-llm-"));
 let server, ctx;
 const received = [];
-const logs = [];
+let swForLog = null;
 let failed = false;
 const check = (ok, msg) => { console.log(`  ${ok ? "✓" : "✗"} ${msg}`); if (!ok) failed = true; };
+// 1.7.1 から拡張機能はコンソールに書かない。LLM の判定の結果は動作ログ (docs/diagnostic-log.md) で読む
+const diagEntries = (sw) => sw.evaluate(async () => {
+  const all = await chrome.storage.local.get(null);
+  return Object.entries(all).filter(([k]) => k.startsWith("diagLog:")).flatMap(([, v]) => v).sort((a, b) => b.t - a.t);
+});
 
 try {
   const crt = path.join(tmp, "server.crt"), k = path.join(tmp, "server.key");
@@ -69,6 +74,7 @@ try {
            "--ignore-certificate-errors", "--no-sandbox"],
   });
   const sw = ctx.serviceWorkers()[0] || (await ctx.waitForEvent("serviceworker", { timeout: 25000 }));
+  swForLog = sw;
   // 拡張機能は初回起動時 (onInstalled) に既定値を書き込み、LLM を無効にする。
   // それより先に設定を書くと上書きされるので、既定値が入るのを待ってから書く。
   await sw.evaluate(async () => {
@@ -90,7 +96,6 @@ try {
   const page = await ctx.newPage();
   const errs = [];
   page.on("pageerror", (e) => errs.push(String(e)));
-  page.on("console", (m) => { const t = m.text(); if (t.includes("[pii-guard]")) logs.push(t); });
   await page.goto("https://chatgpt.com/");
   await page.waitForTimeout(3500);
 
@@ -105,12 +110,13 @@ try {
   }, TEXT);
 
   // LLM の結果が統合されるまで待つ (CPU だけで動かすと数十秒かかる)
-  const merged = () => logs.find((l) => /llm detect merge:|llm detect: (ok_empty|failed|all LLM entities filtered)/.test(l));
-  for (let i = 0; i < 240 && !merged(); i++) await page.waitForTimeout(1000);
+  const llmResult = async () => (await diagEntries(sw)).find((e) => e.code === "llm.detect") || null;
+  let merged = null;
+  for (let i = 0; i < 240 && !(merged = await llmResult()); i++) await page.waitForTimeout(1000);
 
   console.log("LLM:");
-  console.log(`    ${merged() || "(統合のログなし)"}`);
-  check(/llm detect merge: \+[1-9]/.test(merged() || ""), "LLM の検出結果が統合された");
+  console.log(`    ${merged ? `${merged.d.status} (追加 ${merged.d.added ?? 0} 件、除外 ${merged.d.filtered ?? 0} 件)` : "(判定の記録なし)"}`);
+  check(!!merged && merged.d.status === "found" && merged.d.added >= 1, "LLM の検出結果が統合された");
 
   const host = await page.evaluateHandle(() => [...document.querySelectorAll("*")].find((e) => e.shadowRoot));
   await host.evaluate((h) =>
@@ -128,9 +134,10 @@ try {
   console.error("テスト実行エラー:", e?.message || e);
   failed = true;
 } finally {
-  if (failed) {
-    console.log("\n拡張機能のログ (失敗の調査用):");
-    for (const l of logs.slice(-25)) console.log(`    ${l.slice(0, 200)}`);
+  if (failed && swForLog) {
+    console.log("\n拡張機能の動作ログ (失敗の調査用):");
+    const entries = await diagEntries(swForLog).catch(() => []);
+    for (const e of entries.slice(0, 25)) console.log(`    ${new Date(e.t).toISOString()} ${e.lv} ${e.code} ${JSON.stringify(e.d)}`);
   }
   if (ctx) await ctx.close().catch(() => {});
   if (server) await new Promise((r) => server.close(r));
