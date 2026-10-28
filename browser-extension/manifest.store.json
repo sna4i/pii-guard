@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "PII Guard",
-  "version": "1.7.0",
+  "version": "1.7.1",
   "description": "AIチャットへの送信前に、個人情報や機密の数値を端末内で自動検出してマスキング。入力内容を第三者のサーバーへ送信しません。",
   "permissions": [
     "storage",
