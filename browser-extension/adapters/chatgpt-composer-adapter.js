@@ -204,6 +204,12 @@
   }
   function schedulePlace() { if (placeTimer) return; placeTimer = requestAnimationFrame(() => { placeTimer = 0; place(); }); }
 
+  // 書き込めたかを確かめるための形。ChatGPT の入力欄 (ProseMirror) は行を段落 (<p>) にするので、innerText
+  // では段落の間が "\n\n" になる (下書きの改行は "\n")。行頭の "- " や "1. " を箇条書きに、"**" を太字に
+  // 変えることもある。空白と、行頭の箇条書き・見出し・引用の印と、強調の記号を除いて比べる
+  function comparable(s) {
+    return String(s || "").replace(/^[ \t]*(?:[-*+>]|#{1,6}|\d+[.)])[ \t]+/gm, "").replace(/[\s*_`~]+/g, "");
+  }
   // ネイティブ入力欄にマスク済み/原文を書いて正規送信する。原文はここで初めてネイティブに入る。
   function writeNative(el, text) {
     if (el.tagName === "TEXTAREA") {
@@ -218,7 +224,7 @@
     range.selectNodeContents(el);
     sel.removeAllRanges(); sel.addRange(range);
     document.execCommand("insertText", false, text);
-    return (el.innerText || "").replace(/\n+$/, "").includes(text.slice(0, Math.min(16, text.length)));
+    return comparable(el.innerText).includes(comparable(text).slice(0, 16));
   }
   function fireEnter(el) {
     for (const type of ["keydown", "keypress", "keyup"]) {

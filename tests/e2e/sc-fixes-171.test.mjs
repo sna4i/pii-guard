@@ -11,6 +11,8 @@
 // T-SC-16 オフで個人情報を書くとアイコンが黄色になる。ページのイベントでは消せない。オンでは黄色にならない
 // T-SC-17 黄色の内訳の「マスキングする」で下書きが伏せ字になり、黄色が消える
 // T-SC-18 除外リストの値は、オンで送っても残り、オフの警告にも数えられない
+// T-SC-19 先頭の近くに改行がある複数行の下書きも送れる (ChatGPT の入力欄は行を段落にし、innerText では段落の間が "\n\n")
+// T-SC-19b 送れなかったときは、下書きを残し、理由を動作ログ (send.failed) に残す
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { launch, FAKE_PII, sleep } from "../fixtures/harness.mjs";
@@ -211,4 +213,45 @@ test("T-SC-18 除外リストの値は伏せず、オフの警告にも数えな
   await page.close();
   await h.setStorage({ enabled: true, maskAllowlist: [] });
   assert.notEqual(p.tone, "warning", "除外リストの値だけなのに黄色になった");
+});
+
+test("T-SC-19 先頭の近くに改行がある複数行の下書きも送れる", async () => {
+  await h.setStorage({ enabled: true });
+  h.server.clear();
+  const { page, frame } = await openThread();
+  const ta = frame.locator("textarea");
+  await ta.click();
+  const lines = ["1 行目", "- 2 行目", `3 行目の電話は ${FAKE_PII.phone}`];
+  for (let i = 0; i < lines.length; i++) {
+    await ta.pressSequentially(lines[i], { delay: 2 });
+    if (i < lines.length - 1) await ta.press("Shift+Enter");
+  }
+  await h.enter(page, frame); // 個人情報があるので確認バーが出る。enter() が「マスキングして送信」を押す
+  await sleep(2500);
+  const sc = await frame.evaluate(() => ({ status: document.getElementById("status").textContent, len: document.getElementById("editor").value.length }));
+  const conv = h.server.byKind("conversation");
+  const body = conv.map((r) => r.body).join("\n");
+  await page.close();
+  assert.equal(conv.length, 1, `送れていない (${JSON.stringify(sc)})`);
+  assert.ok(["1 行目", "2 行目", "3 行目"].every((l) => body.includes(l)), "行が送られていない");
+  assert.ok(!body.includes(FAKE_PII.phone), "伏せ字にされていない");
+  assert.equal(sc.len, 0, "送ったあと保護入力欄が空になっていない");
+});
+
+test("T-SC-19b 送れなかったときは、下書きを残し、理由を動作ログに残す", async () => {
+  await h.setStorage({ enabled: true });
+  h.server.clear();
+  const { page, frame } = await openThread("&rejectWrite=1");
+  await h.type(page, frame, "動作ログの確認の文です");
+  await h.enterNoConfirm(page, frame);
+  await sleep(2500);
+  const sc = await frame.evaluate(() => ({ status: document.getElementById("status").textContent, len: document.getElementById("editor").value.length }));
+  const all = await h.getStorage(null);
+  await page.close();
+  const failed = Object.entries(all).filter(([k]) => k.startsWith("diagLog:")).flatMap(([, v]) => (Array.isArray(v) ? v : []))
+    .filter((e) => e && e.code === "send.failed");
+  assert.equal(h.server.byKind("conversation").length, 0, "送られてしまった");
+  assert.match(sc.status, /送信できなかった/, "送れなかったことを知らせていない");
+  assert.ok(sc.len > 0, "下書きが消えた");
+  assert.ok(failed.some((e) => e.d && e.d.reason === "write-failed" && e.d.via === "secure-composer"), `動作ログに理由が無い: ${JSON.stringify(failed)}`);
 });

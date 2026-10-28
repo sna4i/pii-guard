@@ -49,6 +49,8 @@
       text: (d, L) => `送信を取り消しました${paren([L.via])}` },
     "send.blocked": { lv: "warn", fields: { reason: E({ unmaskable: "伏せ字にできなかった", "lists-unavailable": "除外リストなどを読めなかった", "unknown-format": "知らない送信の形式", "hook-error": "処理の失敗", "engine-unavailable": "検出エンジンが使えない" }), via: VIA },
       text: (d, L) => `送信を止めました${paren([L.reason, L.via])}` },
+    "send.failed": { lv: "warn", fields: { reason: E({ "write-failed": "サイトの入力欄に書き込めなかった", "no-composer": "サイトの入力欄が見つからない", busy: "前の送信の途中", "no-response": "応答が無い" }), via: VIA },
+      text: (d, L) => `送信できませんでした${paren([L.reason, L.via])}` },
     "egress.blocked": { lv: "warn", fields: { dest: "host", via: VIA },
       text: (d, L) => `送信以外の通信を止めました${paren([d.dest ? `宛先 ${d.dest}` : "", L.via])}` },
     "egress.scrubbed": { lv: "info", fields: { dest: "host", via: VIA },

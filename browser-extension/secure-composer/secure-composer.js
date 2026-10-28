@@ -220,6 +220,12 @@
 
   // ---- 送信 ------------------------------------------------------------------
   let submitting = false;
+  // 送れなかった理由 (動作ログの send.failed)。アダプタの doCommit の error と、境界の時間切れから決める
+  const COMMIT_ERRORS = { "write failed": "write-failed", "no native composer": "no-composer", busy: "busy" };
+  function commitFailReason(resp) {
+    if (!resp || !resp.ok) return "no-response";
+    return COMMIT_ERRORS[resp.result && resp.result.error] || undefined;
+  }
   async function submit() {
     if (submitting) return;                       // 二重送信の防止 (INV)
     if (!machine.is("EDITING", "SECURE_READY", "SENT", "MASKING_FAILED")) return;
@@ -266,6 +272,7 @@
       const committed = resp && resp.ok && resp.result && resp.result.committed === true;
       if (!committed) {
         // 送信できなかった → 下書きを残し、編集に戻す。原文の自動再送はしない (INV-2 / P0-10)
+        dl("send.failed", { reason: commitFailReason(resp), via: "secure-composer" });
         machine.to("EDITING");
         setStatus("送信できなかった。もう一度 Enter で送れるよ。");
         return;

@@ -163,6 +163,7 @@ test("T-LG-04 every code formats to a Japanese sentence without placeholders", (
     "send.masked": { via: "fetch", attachments: 1 },
     "send.cancelled": { via: "ws" },
     "send.blocked": { reason: "unknown-format", via: "xhr" },
+    "send.failed": { reason: "write-failed", via: "secure-composer" },
     "egress.blocked": { dest: "api.amplitude.com", via: "beacon" },
     "egress.scrubbed": { dest: "browser-intake-datadoghq.com", via: "fetch" },
     "attach.masked": { count: 2, how: "drop" },

@@ -27,6 +27,8 @@
     worker: q.get("worker") === "1",
     draft: q.get("draft") === "1",
     prepareRequired: q.get("prepareRequired") === "1",
+    // 入力欄が拡張機能の書き込みを受け付けない (書いた直後に空に戻す)。送れなかったときの動きを試す
+    rejectWrite: q.get("rejectWrite") === "1",
   };
   const PREPARE_DEBOUNCE_MS = 350;
   const MODEL = "gpt-6-thinking";
@@ -145,6 +147,9 @@
     form.appendChild(attachInput);
     form.addEventListener("submit", (e) => { e.preventDefault(); submit("button"); });
     if (sendBtn && sendBtn.type !== "submit") sendBtn.addEventListener("click", () => submit("button"));
+    if (FLAGS.rejectWrite) editor.addEventListener("input", () => {
+      if (editor.tagName === "TEXTAREA") editor.value = ""; else editor.innerHTML = "<p><br></p>";
+    }, true);
     editor.addEventListener("input", onInput);
     editor.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
