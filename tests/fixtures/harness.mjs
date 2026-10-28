@@ -1,7 +1,7 @@
 // tests/fixtures/harness.mjs — 拡張機能を読み込んだ Chromium + モックの ChatGPT + CDP の記録係。
 //
-// - ブラウザは persistent context (拡張機能はこれでしか読めない)。headed が既定
-//   (DISPLAY が無い CI では xvfb-run で包む)
+// - ブラウザは persistent context (拡張機能はこれでしか読めない)。ヘッドレスが既定で、
+//   窓を出して調べるときは PII_E2E_HEADED=1 (browser-mode.mjs)
 // - chatgpt.com はモックサーバへ向ける (--host-resolver-rules)。証明書は自己署名
 // - CDP の記録係は --remote-debugging-port で別につなぐ (cdp-recorder.mjs)
 // - close() はブラウザ・サーバ・一時ディレクトリをすべて片付け、ブラウザのプロセスが
@@ -17,6 +17,7 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { startMockChatGPT } from "./mock-chatgpt/server.mjs";
+import { browserMode } from "./browser-mode.mjs";
 import { startCdpRecorder } from "./cdp-recorder.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -84,8 +85,7 @@ export async function launch(opts = {}) {
   };
   try {
     ctx = await chromium.launchPersistentContext(userDataDir, {
-      headless: process.env.PII_E2E_HEADLESS === "1",
-      channel: "chromium",
+      ...browserMode(),
       viewport: opts.viewport || { width: 1200, height: 860 },
       args: [
         `--disable-extensions-except=${EXT_DIR}`,

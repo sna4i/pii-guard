@@ -17,6 +17,7 @@
 // 終了コード: 0 = LLM を使うすべてのモードで、形式の値が一部も漏れず、伏せ字が壊れず、LLM が応答した
 //             1 = それ以外
 import { chromium } from "playwright";
+import { browserMode } from "../fixtures/browser-mode.mjs";
 import https from "node:https";
 import fs from "node:fs";
 import os from "node:os";
@@ -54,7 +55,7 @@ async function runMode(model) {
     });
     await new Promise((r) => server.listen(0, "127.0.0.1", r));
     ctx = await chromium.launchPersistentContext(path.join(tmp, "profile"), {
-      headless: false, ignoreHTTPSErrors: true,
+      ...browserMode(), ignoreHTTPSErrors: true,
       args: [`--disable-extensions-except=${EXT}`, `--load-extension=${EXT}`,
              `--host-resolver-rules=MAP chatgpt.com 127.0.0.1:${server.address().port}`,
              "--ignore-certificate-errors", "--no-sandbox"],

@@ -13,6 +13,7 @@
 // モックサーバとブラウザはこのスクリプト自身が起動し、finally で必ず閉じる。
 // 終了コード: 0 = 全検査合格 / 1 = 失敗
 import { chromium } from "playwright";
+import { browserMode } from "../fixtures/browser-mode.mjs";
 import https from "node:https";
 import fs from "node:fs";
 import os from "node:os";
@@ -55,7 +56,7 @@ try {
   });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
   ctx = await chromium.launchPersistentContext(path.join(tmp, "profile"), {
-    headless: false, ignoreHTTPSErrors: true,
+    ...browserMode(), ignoreHTTPSErrors: true,
     args: [`--disable-extensions-except=${EXT}`, `--load-extension=${EXT}`, `--host-resolver-rules=MAP chatgpt.com 127.0.0.1:${server.address().port}`, "--ignore-certificate-errors", "--no-sandbox"],
   });
   const sw = ctx.serviceWorkers()[0] || (await ctx.waitForEvent("serviceworker", { timeout: 25000 }));

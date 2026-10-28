@@ -19,6 +19,7 @@
 //
 // 終了コード: 0 = 全検査合格 / 1 = 失敗
 import { chromium } from "playwright";
+import { browserMode } from "../fixtures/browser-mode.mjs";
 import https from "node:https";
 import fs from "node:fs";
 import os from "node:os";
@@ -68,7 +69,7 @@ try {
   const port = server.address().port;
 
   ctx = await chromium.launchPersistentContext(path.join(tmp, "profile"), {
-    headless: false, ignoreHTTPSErrors: true,
+    ...browserMode(), ignoreHTTPSErrors: true,
     args: [`--disable-extensions-except=${EXT}`, `--load-extension=${EXT}`,
            `--host-resolver-rules=MAP chatgpt.com 127.0.0.1:${port}`,
            "--ignore-certificate-errors", "--no-sandbox"],
