@@ -69,6 +69,7 @@
 | `send.masked` | info | 送信を伏せ字にしました ({via}) | via: fetch/xhr/ws/secure-composer、attachments: 添付の件数 |
 | `send.cancelled` | info | 送信を取り消しました | via |
 | `send.blocked` | warn | 送信を止めました ({reason}) | reason: 伏せ字にできなかった/リストを読めなかった/知らない形式/処理の失敗、via |
+| `send.failed` | warn | 送信できませんでした ({reason}) | reason: サイトの入力欄に書き込めなかった/入力欄が見つからない/前の送信の途中/応答が無い、via (1.7.1 の P-SC-06 で追加) |
 | `egress.blocked` | warn | 送信以外の通信を止めました (宛先 {dest}) | dest (host)、via: fetch/xhr/beacon/ws |
 | `egress.scrubbed` | info | 送信以外の通信の個人情報を伏せ字にしました (宛先 {dest}) | dest (host)、via |
 | `attach.masked` | info | 添付を伏せ字にしました ({count} 件) | count, how: ボタン/ドラッグ/貼り付け |
