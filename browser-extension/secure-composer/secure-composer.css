@@ -37,6 +37,8 @@ body { overflow: hidden; background: transparent; }
 /* マスク失敗・送信失敗・添付の案内など、伝えることがあるときだけ小さく出す。通常時は何も出さない (spec 10.4)。 */
 #status { display: none; font: 12px/1.4 var(--sc-font); color: #b84a00; padding: 2px var(--sc-pad-x); }
 :root[data-scheme="dark"] #status { color: #f5a361; }
+/* 送る前の検出を待つ間の「確認中…」(D-SC-11)。注意の色ではなく、プレースホルダの色で控えめに */
+#status.busy { color: var(--sc-placeholder, #8a8a8a); }
 :root[data-state="MASKING_FAILED"] #status,
 :root[data-state="BLOCKED"] #status,
 #status:not(:empty) { display: block; }

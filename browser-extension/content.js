@@ -161,6 +161,17 @@
   // V-02: 除外リスト・常に伏せる語が変わったことだけを MAIN world に知らせる番号 (中身からは作らない)
   let listsVersion = 0;
 
+  // ML がオンなら、ページを開いた時点でモデルを読み込んでおく (docs/release-1.7.1.md の D-SC-12)。送るときに
+  // 読み込み (初回は取得に 1 分近く、キャッシュからでも温まるまでは 13〜22 秒) を待たずに済むようにする。ページごとに 1 回。読み込み済みなら
+  // Service Worker は何もしない。content script は対応サイトすべてで動くので、保護入力欄以外の経路にも効く
+  let mlPrewarmSent = false;
+  function prewarmMl() {
+    if (mlPrewarmSent) return;
+    mlPrewarmSent = true;
+    try { chrome.runtime.sendMessage({ type: "ML_PREWARM" }, () => void chrome.runtime.lastError); }
+    catch (_) { /* 拡張機能が更新された直後など、Service Worker に届かないとき */ }
+  }
+
   async function broadcastSettings() {
     let interactive = true;
     let uiMode = "sidebar";
@@ -204,6 +215,7 @@
       interactive = true;
       uiMode = "sidebar";
     }
+    if (mlEnabled) prewarmMl();
     window.postMessage(
       {
         source: TAG_OUT,

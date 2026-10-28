@@ -61,7 +61,8 @@ function pidsFor(userDataDir) {
 }
 
 /**
- * @param {{ query?: string, storage?: object, viewport?: object }} [opts]
+ * @param {{ query?: string, storage?: object, viewport?: object, hostRules?: string[] }} [opts]
+ *   hostRules: --host-resolver-rules に足す行 (例: モデルの取得先を tarpit.mjs に向ける)
  */
 export async function launch(opts = {}) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pii-sc-e2e-"));
@@ -90,7 +91,7 @@ export async function launch(opts = {}) {
       args: [
         `--disable-extensions-except=${EXT_DIR}`,
         `--load-extension=${EXT_DIR}`,
-        `--host-resolver-rules=MAP chatgpt.com 127.0.0.1:${server.port},MAP chat.openai.com 127.0.0.1:${server.port}`,
+        `--host-resolver-rules=${[`MAP chatgpt.com 127.0.0.1:${server.port}`, `MAP chat.openai.com 127.0.0.1:${server.port}`, ...(opts.hostRules || [])].join(",")}`,
         "--ignore-certificate-errors",
         "--disable-quic",
         "--no-sandbox",

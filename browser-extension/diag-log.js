@@ -51,6 +51,8 @@
       text: (d, L) => `送信を止めました${paren([L.reason, L.via])}` },
     "send.failed": { lv: "warn", fields: { reason: E({ "write-failed": "サイトの入力欄に書き込めなかった", "no-composer": "サイトの入力欄が見つからない", busy: "前の送信の途中", "no-response": "応答が無い" }), via: VIA },
       text: (d, L) => `送信できませんでした${paren([L.reason, L.via])}` },
+    "ml.skipped": { lv: "warn", fields: { reason: E({ timeout: "時間内に終わらなかった", error: "失敗した" }), where: E({ send: "送信", "mask-draft": "マスキングする" }) },
+      text: (d, L) => `ML の判定なしで続けました${paren([L.reason, L.where])}` },
     "egress.blocked": { lv: "warn", fields: { dest: "host", via: VIA },
       text: (d, L) => `送信以外の通信を止めました${paren([d.dest ? `宛先 ${d.dest}` : "", L.via])}` },
     "egress.scrubbed": { lv: "info", fields: { dest: "host", via: VIA },

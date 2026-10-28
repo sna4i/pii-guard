@@ -40,7 +40,7 @@
     rootEl.dataset.state = state;
     boundary.post("state", { state });
   });
-  function setStatus(msg) { statusEl.textContent = msg || ""; }
+  function setStatus(msg) { statusEl.textContent = msg || ""; statusEl.classList.remove("busy"); }
 
   // ---- 設定 (chrome.storage から直接。ページを経由しない) ----------------------
   async function loadSettings() {
@@ -153,13 +153,37 @@
     });
     if (!res || typeof res.sanitized_text !== "string") throw new Error("mask produced no text");
     const all = Array.isArray(res.detections) ? res.detections : [];
+    // ML の判定を使えたか (off / ok / timeout / error / unavailable)。時間切れと失敗は呼び手が知らせる (D-SC-10)
+    const ml = res.ml && typeof res.ml.status === "string" ? res.ml.status : "off";
     // 除外リストの値は伏せない (F-SC-18)。除いたときは、残りの検出だけで伏せ字を作り直す
     const allowed = allowedMatcher();
     const kept = all.filter((d) => !(d && (allowed(String(d.text)) || allowed(text.slice(d.start, d.end)))));
-    if (kept.length === all.length) return { text: res.sanitized_text, count: all.length };
+    if (kept.length === all.length) return { text: res.sanitized_text, count: all.length, ml };
     const agg = NS.engine.aggregate;
     if (!agg || typeof agg.applySpans !== "function") throw new Error("engine not ready");
-    return { text: agg.applySpans(text, kept), count: kept.length };
+    return { text: agg.applySpans(text, kept), count: kept.length, ml };
+  }
+
+  // 送る前の検出に 0.3 秒より長くかかるときだけ「確認中…」を出す (F-SC-22、D-SC-11)。ML なしなら数ミリ秒で終わる
+  const BUSY_MS = 300;
+  const BUSY_TEXT = "確認中…";
+  async function withBusyNotice(work) {
+    const timer = setTimeout(() => { setStatus(BUSY_TEXT); statusEl.classList.add("busy"); autosize(); }, BUSY_MS);
+    try { return await work(); }
+    finally {
+      clearTimeout(timer);
+      if (statusEl.textContent === BUSY_TEXT) { setStatus(""); autosize(); }
+    }
+  }
+
+  // ML の判定を使えなかった (時間切れ / 失敗) ときの記録と一言 (F-SC-21、D-SC-10)。
+  // 正規表現と辞書の検出だけで伏せたことを利用者に伝える。待つ上限はエンジン (engine/onnx-detector.js) にある
+  const ML_WHY = { timeout: "ML の判定が間に合わなかった", error: "ML の判定に失敗した", unavailable: "ML の判定に失敗した" };
+  function noteMlSkipped(ml, where, did) {
+    const why = ML_WHY[ml];
+    if (!why) return;
+    dl("ml.skipped", { reason: ml === "timeout" ? "timeout" : "error", where });
+    flashStatus(`${why}ので、辞書と正規表現だけで${did}よ。`);
   }
 
   // ---- オフのときの下書きの警告 (F-SC-16、D-SC-04) ---------------------------------
@@ -201,7 +225,7 @@
     const text = editor.value;
     if (!text.trim() || submitting) return;
     let res;
-    try { res = await maskText(text); }
+    try { res = await withBusyNotice(() => maskText(text)); }
     catch (e) {
       dl("error", errorFields(e));
       flashStatus("端末内のマスキングに失敗したよ。下書きはそのまま。");
@@ -215,6 +239,7 @@
     if (!replaced) editor.value = res.text;
     if (machine.is("SECURE_READY", "SENT", "MASKING_FAILED")) machine.to("EDITING");
     autosize();
+    noteMlSkipped(res.ml, "mask-draft", "伏せた");
     scheduleDraftScan(0);
   }
 
@@ -238,7 +263,7 @@
       machine.to("MASKING");
       // 常に検出する (ON はマスク結果を使い、OFF は件数を警告に使う)。
       let res;
-      try { res = await maskText(text); }
+      try { res = await withBusyNotice(() => maskText(text)); }
       catch (e) {
         if (settings.enabled) {
           machine.to("MASKING_FAILED", { error: String((e && e.message) || e) });
@@ -284,6 +309,8 @@
       editor.value = "";
       autosize();
       scheduleDraftScan(0); // オフの警告を消す
+      // オフのときは ML を警告の件数にしか使っていないので、知らせない (D-SC-10)
+      if (settings.enabled) noteMlSkipped(res.ml, "send", "伏せて送った");
       machine.to("SECURE_READY");
     } finally {
       submitting = false;

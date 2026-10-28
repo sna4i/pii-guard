@@ -270,17 +270,27 @@
 
   // Async variant: same as runPipeline but also invokes the ML detector
   // (transformers.js NER via the service worker) when opts.mlEnabled is
-  // truthy. ML failures degrade silently — regex/dict detections always
-  // survive even if the SW is asleep / WASM hasn't loaded yet.
-  async function runPipelineAsync(text, opts, deps) {
+  // truthy. ML failures degrade — regex/dict detections always survive
+  // even if the SW is asleep / WASM hasn't loaded yet — and the wait is
+  // capped (opts.mlTimeoutMs, docs/release-1.7.1.md D-SC-09) so a model
+  // that is still loading can never stall a send. Returns { dets, ml };
+  // ml.status is "off" / "ok" / "timeout" / "error" / "unavailable"
+  // (onnx-detector.js) so callers can tell the user when ML was skipped.
+  async function runPipelineWithMl(text, opts, deps) {
     let dets = collectRawDetections(text, opts, deps);
+    let ml = { status: "off" };
     if (opts.mlEnabled && deps.onnxDetector) {
       try {
-        const mlDets = await deps.onnxDetector.detectViaMl(text);
+        const r = await deps.onnxDetector.detectViaMl(text, { timeoutMs: opts.mlTimeoutMs });
+        ml = { status: r && typeof r.status === "string" ? r.status : "error" };
+        const mlDets = r && Array.isArray(r.detections) ? r.detections : [];
         if (mlDets.length > 0) dets = dets.concat(mlDets);
-      } catch (_) { /* fall through with regex-only */ }
+      } catch (_) { ml = { status: "error" }; /* fall through with regex-only */ }
     }
-    return finishPipeline(dets, opts, deps);
+    return { dets: finishPipeline(dets, opts, deps), ml };
+  }
+  async function runPipelineAsync(text, opts, deps) {
+    return (await runPipelineWithMl(text, opts, deps)).dets;
   }
 
   // 「意味として機密」な文の警告。**検出 span とは別枠で返す**。
@@ -320,9 +330,9 @@
     }
     const kws = opts.forceMaskKeywords || deps.forceMask.DEFAULT_KEYWORDS;
     const cats = opts.forceMaskCategories || deps.forceMask.DEFAULT_CATEGORIES;
-    const dets = opts.mlEnabled
-      ? await runPipelineAsync(text, opts, deps)
-      : runPipeline(text, opts, deps);
+    const { dets, ml } = opts.mlEnabled
+      ? await runPipelineWithMl(text, opts, deps)
+      : { dets: runPipeline(text, opts, deps), ml: { status: "off" } };
     let agg = deps.aggregate.aggregateDetections(dets);
     const fired = deps.forceMask.detectForceMaskTrigger(text, kws);
     const forced = deps.forceMask.resolveForcedCategories(fired, cats);
@@ -331,6 +341,7 @@
       original_text: text, aggregated: agg, audit_id: generateAuditId(),
       force_masked_categories: forced,
       confidential: collectConfidential(text, opts, deps),
+      ml,
     };
   }
 
@@ -338,9 +349,9 @@
   async function maskSanitize(text, options) {
     const opts = options || {};
     const deps = resolveDeps();
-    const dets = opts.mlEnabled
-      ? await runPipelineAsync(text, opts, deps)
-      : runPipeline(text, opts, deps);
+    const { dets, ml } = opts.mlEnabled
+      ? await runPipelineWithMl(text, opts, deps)
+      : { dets: runPipeline(text, opts, deps), ml: { status: "off" } };
     const sanitized = deps.aggregate.applyTagMask(text, dets);
     const enriched = dets.map((d) => ({
       entity_type: d.entity_type, start: d.start, end: d.end, score: d.score,
@@ -352,6 +363,7 @@
       original_length: text.length, sanitized_text: sanitized,
       detections: enriched, forwarded: false,
       confidential: collectConfidential(text, opts, deps),
+      ml,
     };
   }
 
