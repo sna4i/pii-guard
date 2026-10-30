@@ -2,14 +2,16 @@
 // service worker to run the bundled NER pipeline on a piece of text and
 // converts the result into the existing detection shape.
 //
-// The actual ONNX inference happens in background.js (ML_DETECT
-// handler). This file only knows how to:
-//   1. Send a text via chrome.runtime.sendMessage.
+// The actual ONNX inference happens in the offscreen document behind
+// background.js (ML_DETECT handler). This file only knows how to:
+//   1. Send a text via chrome.runtime.sendMessage, waiting at most
+//      DETECT_TIMEOUT_MS for the answer (docs/release-1.7.1.md, D-SC-09).
 //   2. Map aggregated NER entity_groups (PER/LOC/ORG/MISC) onto the
 //      project's entity_types so downstream classification / severity
 //      / category maps already cover them.
-//   3. Surface a graceful empty-array on any error so the engine can
-//      fall back to regex-only without a hard fault.
+//   3. Surface an empty result plus a status ("timeout" / "error" /
+//      "unavailable") on any failure so the engine can fall back to
+//      regex-only without a hard fault, and callers can tell the user.
 //
 // The ML detector is OFF by default. The settings flag mlEnabled
 // (mirrored into NS.settings by content.js) gates whether the engine
@@ -45,50 +47,66 @@
     );
   }
 
+  // 返事を待つ上限 (docs/release-1.7.1.md の D-SC-09)。判定そのものは 20,000 字でも 1.5 秒以内 (計測) なので、
+  // 遅い端末でも収まる。モデルの読み込み中 (キャッシュからでも、温まるまでは 13〜22 秒) や取得が止まったときはここで諦め、
+  // 正規表現と辞書の検出だけで続ける。上限が無いと、保護入力欄の送信がいつまでも待っていた (P-SC-07)
+  const DETECT_TIMEOUT_MS = 8000;
+
   /**
    * Send a text to the SW for NER inference.
    *
    * @param {string} text — input to analyse
-   * @returns {Promise<Array<{entity_group:string, score:number, word:string, start:number, end:number}>>}
-   *   Aggregated entities; empty on disabled / error.
+   * @param {{ timeoutMs?: number }} [opts] — how long to wait for the SW (default DETECT_TIMEOUT_MS)
+   * @returns {Promise<{ entities: Array<{entity_group:string, score:number, word:string, start:number, end:number}>,
+   *   status: "ok"|"timeout"|"error"|"unavailable" }>}
+   *   Aggregated entities (empty unless status is "ok"). Never rejects.
    */
-  function callMlDetect(text) {
-    if (!hasChromeRuntime() || typeof text !== "string" || !text) {
-      return Promise.resolve([]);
-    }
+  function callMlDetect(text, opts) {
+    if (!hasChromeRuntime()) return Promise.resolve({ entities: [], status: "unavailable" });
+    if (typeof text !== "string" || !text) return Promise.resolve({ entities: [], status: "ok" });
+    const timeoutMs = opts && Number.isFinite(opts.timeoutMs) && opts.timeoutMs > 0 ? opts.timeoutMs : DETECT_TIMEOUT_MS;
     return new Promise((resolve) => {
+      let settled = false;
+      const finish = (entities, status) => {
+        if (settled) return; // 上限のあとに届いた返事は捨てる
+        settled = true;
+        clearTimeout(timer);
+        resolve({ entities, status });
+      };
+      const timer = setTimeout(() => finish([], "timeout"), timeoutMs);
       try {
         chrome.runtime.sendMessage({ type: "ML_DETECT", text }, (resp) => {
           if (chrome.runtime.lastError) {
             // SW asleep / disconnected — engine retries next request.
-            resolve([]);
+            finish([], "error");
             return;
           }
           if (!resp || resp.ok !== true || !Array.isArray(resp.entities)) {
-            resolve([]);
+            finish([], "error");
             return;
           }
-          resolve(resp.entities);
+          finish(resp.entities, "ok");
         });
       } catch (_) {
-        resolve([]);
+        finish([], "error");
       }
     });
   }
 
   /**
    * Run NER and return Detection objects ready to merge with regex /
-   * dictionary detections in engine.runPipeline().
+   * dictionary detections in engine.js.
    *
    * @param {string} text
-   * @returns {Promise<Array<Detection>>} where Detection = {
+   * @param {{ timeoutMs?: number }} [opts] — passed to callMlDetect
+   * @returns {Promise<{ detections: Array<Detection>, status: string }>} where Detection = {
    *   entity_type, start, end, text, score, action
-   * }
+   * } and status is callMlDetect's.
    */
-  async function detectViaMl(text) {
-    const raw = await callMlDetect(text);
+  async function detectViaMl(text, opts) {
+    const { entities, status } = await callMlDetect(text, opts);
     const out = [];
-    for (const e of raw) {
+    for (const e of entities) {
       const grp = String(e.entity_group || "").toUpperCase();
       const entity_type = NER_LABEL_MAP[grp];
       if (!entity_type) continue;
@@ -104,10 +122,10 @@
         action: "masked",
       });
     }
-    return out;
+    return { detections: out, status };
   }
 
-  const api = { detectViaMl, callMlDetect, NER_LABEL_MAP };
+  const api = { detectViaMl, callMlDetect, NER_LABEL_MAP, DETECT_TIMEOUT_MS };
   if (typeof module === "object" && module.exports) module.exports = api;
   if (root && typeof root === "object") {
     root.__localMaskMCP = root.__localMaskMCP || {};

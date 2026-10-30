@@ -80,7 +80,21 @@
     return `rgb(${mix(b.r, t.r)}, ${mix(b.g, t.g)}, ${mix(b.b, t.b)})`;
   }
 
-  const api = { PRESETS, LIGHT_RATIO, DARK_RATIO, normalizeTint, parseColor, luminance, sameColor, tintedBackground };
+  // 下から上へ並べた色 (layers[0] がいちばん下) を、不透明な土台 base の上に重ねた色。
+  // ChatGPT の保護入力欄の面の色を、半透明の箱とその下の色から求めるのに使う (docs/release-1.7.1.md の D-SC-01)
+  function flatten(layers, base) {
+    let r = base.r, g = base.g, b = base.b;
+    for (const c of layers || []) {
+      if (!c) continue;
+      const a = Math.max(0, Math.min(1, typeof c.a === "number" ? c.a : 1));
+      r = c.r * a + r * (1 - a);
+      g = c.g * a + g * (1 - a);
+      b = c.b * a + b * (1 - a);
+    }
+    return { r: Math.round(r), g: Math.round(g), b: Math.round(b), a: 1 };
+  }
+
+  const api = { PRESETS, LIGHT_RATIO, DARK_RATIO, normalizeTint, parseColor, luminance, sameColor, tintedBackground, flatten };
   if (typeof module === "object" && module.exports) module.exports = api;
   if (root) root.PiiGuardTint = api;
 })(typeof globalThis !== "undefined" ? globalThis : this);

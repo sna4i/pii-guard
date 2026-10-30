@@ -12,12 +12,19 @@
 (() => {
   if (!/(^|\.)(chatgpt\.com|openai\.com)$/.test(location.hostname)) return;
   const SC = window.__piiGuardSC;
-  if (!SC || !SC.boundary) { console.warn("[pii-guard] secure-composer boundary missing"); return; }
+  if (!SC || !SC.boundary) {
+    if (window.PiiGuardDiagLog) window.PiiGuardDiagLog.log("error", { where: "secure-composer", name: "NotFoundError" });
+    return;
+  }
 
   const EXT = chrome.runtime.getURL("secure-composer/secure-composer.html");
   const Z = "2147483646";
   const EDITOR_SEL = '#prompt-textarea, div.ProseMirror[contenteditable="true"], textarea#mobile-composer-prompt';
   const SEND_SEL = '#composer-submit-button, [data-testid="send-button"], button[data-composer-submit], button[type="submit"][aria-label*="送信"], button[aria-label*="Send"]';
+  // 送信ボタンの場所。ChatGPT は回答を作っている間 (考え中を含む)、ここに停止のボタンを出す (isStopButton)
+  const SLOT_SEL = '#composer-submit-button, [data-testid="send-button"], button[data-composer-submit], button[type="submit"]';
+  const BUTTON_WAIT_MS = 1500; // 書いてから送信ボタンが出るのを待つ (ChatGPT は文字が入ってから描き直して出す)
+  const ACCEPT_WAIT_MS = 5000; // 送ってから、ChatGPT が受け付けた (入力欄が空になった) のを待つ (D-SC-15)
 
   let active = false;
   let scReady = false;        // iframe が ready を報告済みか (fail-closed 判定に使う)
@@ -29,8 +36,22 @@
   let placeTimer = 0;
   let lastRect = "";
   let iframeHeight = 0;
+  let draftEmpty = true;      // iframe の下書きが空か (空なら ChatGPT の入力欄の高さを元に戻す)
+  let appliedMinH = 0;        // ChatGPT の入力欄に付けた高さ (px、枠と余白を含む)。0 なら付けていない
+  let appliedW = 0;           // そのときの入力欄の幅 (px)
+  let nativeCap = 0;          // ChatGPT の入力欄が伸びきらなかったときの見えている高さ (iframe の上限にする)
+  let raisedUp = false;       // 保護入力欄を入力欄の行から上に伸ばしているか (ChatGPT の入力欄が伸びない並び、D-SC-17)
+  // 上に伸ばしている間の見た目。会話の上に重なった板に見えるように、角丸と薄い縁と影を付ける
+  const RAISED_SHADOW = "0 0 0 1px rgba(127,127,127,0.28), 0 -6px 18px rgba(0,0,0,0.22)";
   const E2E_FLAG = "__pii_guard_e2e";
   let exposeForTests = false;
+  // 拡張機能との連絡が切れたか (読み込み直し・更新・オフのあと、開いたままのタブに残った古い部品)。
+  // 切れると chrome.runtime.id を読めなくなる (docs/release-1.7.1.md の D-SC-21)
+  let orphaned = false;
+  const STALE_TEXT = "PII Guard が更新か停止されたので、この入力欄は使えなくなったよ。このタブを読み込み直してね。";
+  function contextAlive() {
+    try { return !!(chrome.runtime && chrome.runtime.id); } catch (_) { return false; }
+  }
 
   const isEditable = (el) => !!el && (el.tagName === "TEXTAREA" || el.isContentEditable);
   function visible(el) {
@@ -45,23 +66,69 @@
     return null;
   }
 
-  // ネイティブ入力欄の見た目を測る。入力面の色は、透明でない背景を持つ親までさかのぼる。
+  // 色を { r, g, b, a } にする。getComputedStyle が oklch() などで返す色は、canvas に塗って sRGB で
+  // 読み直す (composer-toggle.js の toRgb と同じ。getImageData は乗算済みでない値を返す)
+  const TINT = window.PiiGuardTint;
+  let colorCtx = null;
+  function toRgb(color) {
+    const direct = TINT && TINT.parseColor(color);
+    if (direct) return direct;
+    if (typeof color !== "string" || !color.trim()) return null;
+    try {
+      if (!colorCtx) {
+        const cv = document.createElement("canvas");
+        cv.width = 1; cv.height = 1;
+        colorCtx = cv.getContext("2d", { willReadFrequently: true });
+      }
+      colorCtx.fillStyle = "#010203";
+      const sentinel = colorCtx.fillStyle;
+      colorCtx.fillStyle = color;
+      if (colorCtx.fillStyle === sentinel) return null; // 読めない色
+      colorCtx.clearRect(0, 0, 1, 1);
+      colorCtx.fillRect(0, 0, 1, 1);
+      const d = colorCtx.getImageData(0, 0, 1, 1).data;
+      return { r: d[0], g: d[1], b: d[2], a: d[3] / 255 };
+    } catch (_) { return null; }
+  }
+  // ページの明るい/暗い。color-scheme がどちらか一方ならそれ、両方 (light dark) なら OS の設定
+  function pageScheme() {
+    const cs = (getComputedStyle(document.documentElement).colorScheme || "").trim();
+    if (/\bdark\b/.test(cs) && !/\blight\b/.test(cs)) return "dark";
+    if (/\blight\b/.test(cs) && !/\bdark\b/.test(cs)) return "light";
+    try { return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"; } catch (_) { return "light"; }
+  }
+  // 入力面の色 (D-SC-01, F-SC-14): 入力欄から <html> まで背景色を下から重ねる。半透明の色はその下の色と重ねる。
+  // ChatGPT の角丸の箱は入力欄の 8 段ほど上にあるので、段数で打ち切らない
+  function surfaceOf(el) {
+    const above = []; // 入力欄に近いものから順
+    let base = null;
+    for (let node = el; node && node.nodeType === 1; node = node.parentElement) {
+      const c = toRgb(getComputedStyle(node).backgroundColor);
+      if (!c || c.a <= 0.01) continue;
+      if (c.a >= 0.99) { base = c; break; }
+      above.push(c);
+    }
+    if (!base) base = pageScheme() === "dark" ? { r: 33, g: 33, b: 33, a: 1 } : { r: 255, g: 255, b: 255, a: 1 };
+    return TINT ? TINT.flatten(above.reverse(), base) : base;
+  }
+
+  // ネイティブ入力欄の見た目を測る
   function readTheme(el) {
     const cs = getComputedStyle(el);
-    let surface = "";
-    let node = el;
-    for (let i = 0; i < 6 && node; i++) {
-      const b = getComputedStyle(node).backgroundColor;
-      if (b && b !== "transparent" && !/rgba\(0,\s*0,\s*0,\s*0\)/.test(b)) { surface = b; break; }
-      node = node.parentElement;
-    }
-    if (!surface) surface = /dark/i.test(document.documentElement.className) ? "#303030" : "#ffffff";
+    const s = surfaceOf(el);
     const ph = el.getAttribute("data-placeholder") || el.getAttribute("placeholder") ||
       (el.getAttribute("aria-label") || "").trim() || "ChatGPT に聞く";
+    const scheme = TINT && TINT.luminance(s) < 0.5 ? "dark" : "light";
+    // 高さの上限 (D-SC-02): iframe の中の vh や innerHeight は iframe 自身の高さなので、ページ側で測って渡す。
+    // ChatGPT の入力欄が伸びきらなかったときは、その高さを上限にする (D-SC-03)
+    const maxHeight = Math.max(24, Math.min(Math.round(window.innerHeight * 0.4), nativeCap || Infinity));
     return {
       fontFamily: cs.fontFamily, fontSize: cs.fontSize, lineHeight: cs.lineHeight === "normal" ? "1.5" : cs.lineHeight,
       color: cs.color, caretColor: cs.caretColor && cs.caretColor !== "auto" ? cs.caretColor : cs.color,
-      surface, padY: cs.paddingTop, padX: cs.paddingLeft, placeholder: ph,
+      surface: `rgb(${s.r}, ${s.g}, ${s.b})`, scheme, maxHeight,
+      // 上に伸ばしている間は、文の欄を下 (入力欄の行) に置き、案内と確認をその上に出してもらう (D-SC-18)
+      anchor: raisedUp ? "bottom" : "top",
+      padY: cs.paddingTop, padX: cs.paddingLeft, placeholder: ph,
       placeholderColor: "rgba(127,127,127,0.8)", dir: cs.direction,
     };
   }
@@ -72,6 +139,12 @@
     host.setAttribute("data-pii-guard-secure", "1");
     host.style.cssText = `position:fixed;z-index:${Z};margin:0;padding:0;border:0;overflow:hidden;` +
       `box-shadow:none;background:transparent;pointer-events:auto;`;
+    if (orphaned) {
+      // 連絡が切れたあとに入力欄が作り直された (SPA の移動): 新しい入力欄にも知らせを重ねる
+      (document.body || document.documentElement).appendChild(host);
+      showStaleNotice();
+      return;
+    }
     iframe = document.createElement("iframe");
     iframe.src = EXT;
     iframe.title = "PII Guard Secure Composer";
@@ -82,12 +155,139 @@
     if (exposeForTests) host.setAttribute("data-sc-host", "1");
   }
 
+  // 連絡が切れたときの知らせ (D-SC-21)。古い保護入力欄 (iframe) を外し、閉じた Shadow DOM の文と
+  // 「読み込み直す」ボタンに置き換える。色は ChatGPT の入力欄から測る (拡張機能の機能は使わない)。
+  // ChatGPT の入力欄の Enter と mousedown は止めたまま (保護されないまま送らない)
+  let staleButton = null;
+  function showStaleNotice() {
+    if (!host) return;
+    host.textContent = "";
+    iframe = null;
+    const t = native ? readTheme(native) : { surface: "rgb(255, 255, 255)", color: "rgb(13, 13, 13)", fontFamily: "system-ui" };
+    const box = document.createElement("div");
+    box.style.cssText = "display:block;width:100%;height:100%;margin:0;padding:0;border:0;";
+    const shadow = box.attachShadow({ mode: "closed" });
+    shadow.innerHTML = `<style>
+      .stale { box-sizing: border-box; display: flex; align-items: center; gap: 10px; min-height: 100%; margin: 0;
+        padding: 6px 10px; font: 13px/1.45 system-ui, sans-serif; }
+      .stale span { flex: 1; min-width: 0; }
+      .stale button { flex: none; font: inherit; padding: 4px 12px; border-radius: 8px; border: 1px solid rgba(127,127,127,0.55);
+        background: transparent; color: inherit; cursor: pointer; }
+    </style><div class="stale"><span></span><button type="button">読み込み直す</button></div>`;
+    const wrap = shadow.querySelector(".stale");
+    wrap.style.background = t.surface;
+    wrap.style.color = t.color;
+    if (t.fontFamily) wrap.style.fontFamily = t.fontFamily;
+    shadow.querySelector("span").textContent = STALE_TEXT;
+    staleButton = shadow.querySelector("button");
+    staleButton.addEventListener("click", (e) => { if (e.isTrusted) location.reload(); });
+    host.appendChild(box);
+    // 知らせが入る高さ。1 行の並びに入らなければ、place() が上に伸ばす (D-SC-17)
+    iframeHeight = Math.ceil(wrap.scrollHeight) || 40;
+    draftEmpty = false;
+    lastRect = "";
+    if (exposeForTests) host.setAttribute("data-sc-stale", "1");
+  }
+  function goStale() {
+    if (orphaned) return;
+    orphaned = true;
+    if (host && host.isConnected) showStaleNotice();
+    schedulePlace();
+  }
+  // テスト用: 「読み込み直す」ボタンの位置 (箱の左上からの相対) をホストの data 属性に写す
+  function exportStaleLayout() {
+    if (!exposeForTests || !host || !staleButton) return;
+    const h = host.getBoundingClientRect();
+    const b = staleButton.getBoundingClientRect();
+    host.dataset.staleButton = JSON.stringify([b.left - h.left, b.top - h.top, b.width, b.height].map(Math.round));
+  }
+
+  // ChatGPT の入力欄の高さを、iframe の下書きの高さに合わせる (D-SC-03, F-SC-15)。入力欄に min-height を
+  // 付けると、ChatGPT の入力欄の箱ごと伸びる (2026-10-28 に利用者の画面で確認)。文字は入れない。
+  // 幅が付けたときのままなら、下書きの高さにそのまま合わせる。幅が変わったとき (ChatGPT が並びを切り替えた
+  // とき) は、1 行分を超えて低くなるまで縮めない。高さと並びが互いを変えて、行ったり来たりしないようにする
+  function fitNativeHeight() {
+    if (!native) return;
+    if (draftEmpty || !iframeHeight) {
+      if (appliedMinH) { native.style.minHeight = ""; appliedMinH = 0; appliedW = 0; }
+      if (nativeCap) { nativeCap = 0; pushTheme(); }
+      return;
+    }
+    const cs = getComputedStyle(native);
+    const w = Math.round(native.getBoundingClientRect().width);
+    const slack = w === appliedW ? 0 : (parseFloat(cs.lineHeight) || 24);
+    const lost = appliedMinH > 0 && !native.style.minHeight; // ページが style を書き換えて、付けた高さが消えた
+    if (lost || iframeHeight > appliedMinH || iframeHeight < appliedMinH - slack) {
+      const extra = cs.boxSizing === "border-box" ? 0
+        : (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0) + (parseFloat(cs.borderTopWidth) || 0) + (parseFloat(cs.borderBottomWidth) || 0);
+      appliedMinH = iframeHeight;
+      appliedW = w;
+      native.style.minHeight = Math.max(0, iframeHeight - extra) + "px";
+    }
+  }
+  function restoreNativeHeight() {
+    if (native && appliedMinH) native.style.minHeight = "";
+    appliedMinH = 0;
+    appliedW = 0;
+    nativeCap = 0;
+  }
+  // 入力欄の見えている範囲。ChatGPT は入力欄の親 (max-height と overflow:auto) で入力欄を切り取るので、
+  // 親の上限より高くすると、入力欄の矩形は親の外 (下の段のボタンの上) にはみ出す。切り取る祖先と重ねる
+  function visibleRect(el) {
+    const r = el.getBoundingClientRect();
+    let { left, top, right, bottom } = r;
+    for (let node = el.parentElement; node && node !== document.body && node !== document.documentElement; node = node.parentElement) {
+      const cs = getComputedStyle(node);
+      if (cs.overflowX === "visible" && cs.overflowY === "visible") continue;
+      const p = node.getBoundingClientRect();
+      left = Math.max(left, p.left + (parseFloat(cs.borderLeftWidth) || 0));
+      top = Math.max(top, p.top + (parseFloat(cs.borderTopWidth) || 0));
+      right = Math.min(right, p.right - (parseFloat(cs.borderRightWidth) || 0));
+      bottom = Math.min(bottom, p.bottom - (parseFloat(cs.borderBottomWidth) || 0));
+    }
+    return { left, top, width: Math.max(0, right - left), height: Math.max(0, bottom - top) };
+  }
+
+  // 入力欄の 2 行分の高さ (行の高さ × 2 + 上下の余白)。見えている範囲がこれより低ければ、伸びない並びとみなす
+  function twoLines(el) {
+    const cs = getComputedStyle(el);
+    const lh = parseFloat(cs.lineHeight) || (parseFloat(cs.fontSize) || 16) * 1.5;
+    return 2 * lh + (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
+  }
+
   function place() {
     if (!active || !native || !native.isConnected) return;
-    const r = native.getBoundingClientRect();
+    fitNativeHeight();
+    const r = visibleRect(native);
     if (r.width < 40 || r.height < 8) { host && (host.style.display = "none"); return; }
-    const h = Math.max(iframeHeight || r.height, Math.min(r.height, 40));
-    const top = r.top; // ネイティブの入力面の上端に合わせる
+    // 保護入力欄は ChatGPT の入力欄の見えている範囲にぴったり重ねる。要る高さに足りないとき:
+    //  - 2 行分以上見えている (2 段の並びで ChatGPT の上限に達した): その高さを iframe の上限として渡し、
+    //    iframe の中でスクロールさせる (D-SC-03)
+    //  - 2 行分も見えない、または 1 行の並び (data-composer-layout="single-line") で、ChatGPT の入力欄が伸びない:
+    //    下の端を入力欄の行に置いたまま、保護入力欄を上に伸ばす。高さは画面の 40% まで (D-SC-17)
+    let top = r.top; // ネイティブの入力面の上端に合わせる
+    let h = r.height;
+    let up = false;
+    if (iframeHeight > r.height + 2 && !draftEmpty) {
+      const layoutEl = native.closest("[data-composer-layout]");
+      const singleLine = !!layoutEl && layoutEl.getAttribute("data-composer-layout") === "single-line";
+      if (r.height >= twoLines(native) && !singleLine) {
+        const cap = Math.round(r.height);
+        if (cap !== nativeCap) { nativeCap = cap; pushTheme(); }
+      } else {
+        up = true;
+        const bottom = r.top + r.height;
+        top = Math.max(8, bottom - Math.min(iframeHeight, Math.round(window.innerHeight * 0.4)));
+        h = bottom - top;
+      }
+    }
+    if (up !== raisedUp) {
+      raisedUp = up;
+      if (up) nativeCap = 0; // 上に伸ばす間は、見えている範囲を上限にしない
+      host.style.borderRadius = up ? "12px" : "0";
+      host.style.boxShadow = up ? RAISED_SHADOW : "none";
+      pushTheme();
+    }
     const key = `${Math.round(r.left)},${Math.round(top)},${Math.round(r.width)},${Math.round(h)}`;
     if (key === lastRect && host.style.display !== "none") return;
     lastRect = key;
@@ -97,9 +297,16 @@
     host.style.width = Math.round(r.width) + "px";
     host.style.height = Math.round(h) + "px";
     if (exposeForTests) host.setAttribute("data-sc-rect", key);
+    if (orphaned) exportStaleLayout();
   }
   function schedulePlace() { if (placeTimer) return; placeTimer = requestAnimationFrame(() => { placeTimer = 0; place(); }); }
 
+  // 書き込めたかを確かめるための形。ChatGPT の入力欄 (ProseMirror) は行を段落 (<p>) にするので、innerText
+  // では段落の間が "\n\n" になる (下書きの改行は "\n")。行頭の "- " や "1. " を箇条書きに、"**" を太字に
+  // 変えることもある。空白と、行頭の箇条書き・見出し・引用の印と、強調の記号を除いて比べる
+  function comparable(s) {
+    return String(s || "").replace(/^[ \t]*(?:[-*+>]|#{1,6}|\d+[.)])[ \t]+/gm, "").replace(/[\s*_`~]+/g, "");
+  }
   // ネイティブ入力欄にマスク済み/原文を書いて正規送信する。原文はここで初めてネイティブに入る。
   function writeNative(el, text) {
     if (el.tagName === "TEXTAREA") {
@@ -114,11 +321,62 @@
     range.selectNodeContents(el);
     sel.removeAllRanges(); sel.addRange(range);
     document.execCommand("insertText", false, text);
-    return (el.innerText || "").replace(/\n+$/, "").includes(text.slice(0, Math.min(16, text.length)));
+    return comparable(el.innerText).includes(comparable(text).slice(0, 16));
   }
   function fireEnter(el) {
     for (const type of ["keydown", "keypress", "keyup"]) {
       el.dispatchEvent(new KeyboardEvent(type, { key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true }));
+    }
+  }
+  // 送信と停止のボタンは、ChatGPT の入力欄を含む form の中で探す。会話の中のボタン
+  // (「読み上げを停止」など) を取り違えないため。form が無い作りでは文書全体で探す
+  const scopeOf = (el) => el.closest("form") || document;
+  function shown(b) {
+    if (!b || !b.isConnected || b.offsetParent === null) return false;
+    const r = b.getBoundingClientRect();
+    return r.width > 0 && r.height > 0 && getComputedStyle(b).visibility !== "hidden";
+  }
+  // 停止のボタンか (docs/release-1.7.1.md の D-SC-13)。送信ボタンと同じ要素や同じ id のことがあるので、送信ボタンを
+  // 探すときも除く。
+  //  - ログインなしの画面は、送信ボタンそのものが aria-label を data-stop-label (「生成を中止」) に替える
+  //    (2026-10-29 に実サイトで確認)
+  //  - ログイン後は data-testid="stop-button" と見込む (実物は未確認)
+  //  - 言葉 (停止・中止・stop) で見分けるのは送信ボタンの場所だけ。form の中の「アップロードを中止」などを取り違えない
+  function isStopButton(b) {
+    if (b.matches('[data-testid*="stop"]')) return true;
+    const label = b.getAttribute("aria-label") || "";
+    const stopLabel = b.getAttribute("data-stop-label");
+    if (stopLabel && label === stopLabel) return true;
+    return b.matches(SLOT_SEL) && /停止|中止|stop/i.test(label);
+  }
+  // ChatGPT が回答を作っている途中か (停止のボタンが見えている)
+  function pageBusy(el) {
+    for (const b of scopeOf(el).querySelectorAll("button")) if (shown(b) && isStopButton(b)) return true;
+    return false;
+  }
+  function findSendButton(scope) {
+    for (const b of scope.querySelectorAll(SEND_SEL)) if (shown(b) && !b.disabled && !isStopButton(b)) return b;
+    return null;
+  }
+  // ChatGPT の入力欄が空か (空白と記号を除いて何も残っていない)
+  const nativeEmpty = (el) => comparable(el.tagName === "TEXTAREA" ? el.value : el.innerText) === "";
+  function clearNative(el) {
+    if (el.tagName === "TEXTAREA") { writeNative(el, ""); return; }
+    el.focus();
+    const sel = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    sel.removeAllRanges(); sel.addRange(range);
+    document.execCommand("delete");
+  }
+  // fn が値を返すまで 50 ms ごとに試す。ms を過ぎたら null
+  async function waitFor(fn, ms) {
+    const end = Date.now() + ms;
+    for (;;) {
+      const v = fn();
+      if (v) return v;
+      if (Date.now() >= end) return null;
+      await new Promise((r) => setTimeout(r, 50));
     }
   }
   async function doCommit(payload) {
@@ -129,14 +387,26 @@
       if (text == null) return { committed: false, error: "no text" };
       const el = findNative();
       if (!el) return { committed: false, error: "no native composer" };
+      // 回答を作っている途中は ChatGPT が受け付けない。書かずに返し、下書きは保護入力欄に残す (F-SC-24)
+      if (pageBusy(el)) return { committed: false, error: "page busy" };
       const wrote = writeNative(el, text);
       if (!wrote) return { committed: false, error: "write failed" };
-      // 正規送信: 送信ボタンがあれば押す。なければ Enter。
-      await new Promise((r) => setTimeout(r, 0));
-      const btn = document.querySelector(SEND_SEL);
-      if (btn && !btn.disabled && btn.offsetParent !== null) btn.click();
-      else fireEnter(el);
-      return { committed: true };
+      // 正規送信: 送信ボタンが出るのを待って押す。form の中に出なければ文書全体を一度だけ探し、
+      // それでも無ければ Enter (F-SC-26)
+      const btn = (await waitFor(() => findSendButton(scopeOf(el)), BUTTON_WAIT_MS)) || findSendButton(document);
+      const path = btn ? "button" : "enter";
+      if (btn) btn.click();
+      else { el.focus(); fireEnter(el); }
+      // 受け付けたか: 入力欄が空になった、または停止のボタンが出た (回答を作り始めた) (F-SC-25)。
+      // 書いた入力欄が外れたときも受け付けたとみなす (新しい会話を送ると、ChatGPT は会話の画面に移って入力欄を
+      // 作り直す。外れた要素には書いた文が残るので、空かどうかでは判断できない)
+      const accepted = await waitFor(() => !el.isConnected || nativeEmpty(el) || pageBusy(el), ACCEPT_WAIT_MS);
+      if (!accepted) {
+        // 書いた文を残すと、保護入力欄の裏に隠れたままになる。消して、下書きは保護入力欄に残してもらう
+        clearNative(el);
+        return { committed: false, error: "not accepted", path };
+      }
+      return { committed: true, path };
     } catch (e) {
       return { committed: false, error: String((e && e.message) || e) };
     } finally {
@@ -157,7 +427,13 @@
   function connectBoundary() {
     boundary = SC.boundary.connect("sc-content");
     boundary.on("commit", (payload) => doCommit(payload));
-    boundary.on("resize", (p) => { if (p && typeof p.height === "number") { iframeHeight = p.height; schedulePlace(); } return true; });
+    boundary.on("resize", (p) => {
+      if (p && typeof p.height === "number") { iframeHeight = p.height; draftEmpty = p.empty === true; schedulePlace(); }
+      return true;
+    });
+    // F-SC-16: オフのときの下書きの検出結果 (件数と種類の名前だけ)。同じ isolated world の composer-toggle の
+    // 関数を直接呼ぶ。window のイベントはページも送れるので使わない (警告を消させない)
+    boundary.on("draftinfo", (p) => { setPillDraftInfo(p); return true; });
     boundary.on("ready", () => { scReady = true; pushTheme(); schedulePlace(); reportLive(active && !!native); return true; });
     boundary.on("state", () => true);
     // F-SC-10: SC がマスクした件数を同じ ISOLATED world の composer-toggle (ピル) へ渡す。
@@ -195,12 +471,24 @@
   window.addEventListener("dragenter", (e) => { if (isFileDrag(e)) dragPassthrough(); }, true);
   window.addEventListener("dragover", (e) => { if (isFileDrag(e)) dragPassthrough(); }, true);
   window.addEventListener("drop", () => { dragPassUntil = 0; }, true); // 落とし終えたらすぐ戻す
-  function pushTheme() { if (boundary && native) boundary.post("theme", readTheme(native)); }
+  function pushTheme() {
+    if (!boundary || !native || orphaned) return;
+    const t = readTheme(native);
+    // iframe の要素の color-scheme も中と同じにする (違うと、ブラウザが iframe の下に不透明な地を敷く)
+    if (iframe && iframe.style.colorScheme !== t.scheme) iframe.style.colorScheme = t.scheme;
+    boundary.post("theme", t);
+  }
+  function setPillDraftInfo(p) {
+    try {
+      const ct = window.__localMaskMCP && window.__localMaskMCP.composerToggle;
+      if (ct && typeof ct.setScDraftInfo === "function") ct.setScDraftInfo(p || {});
+    } catch (_) { /* 何もしない */ }
+  }
 
   function attach(el) {
     native = el;
     ensureHost();
-    if (!boundary) connectBoundary();
+    if (!boundary && !orphaned) connectBoundary();
     // ネイティブ入力欄にフォーカスが来たら iframe に移す (原文をネイティブに打たせない)
     native.addEventListener("focusin", redirectFocus);
     native.addEventListener("mousedown", onNativeDown, true);
@@ -210,32 +498,41 @@
     pushTheme();
     schedulePlace();
   }
-  function redirectFocus() { if (boundary) boundary.post("focus", {}); }
-  function onNativeDown(e) { if (active) { e.preventDefault(); if (boundary) boundary.post("focus", {}); } }
+  // 連絡が切れたあとは iframe に頼めないので、フォーカスは知らせのボタンへ (D-SC-21)
+  function focusComposer() {
+    if (orphaned) { if (staleButton) try { staleButton.focus(); } catch (_) {} return; }
+    if (boundary) boundary.post("focus", {});
+  }
+  function redirectFocus() { focusComposer(); }
+  function onNativeDown(e) { if (active) { e.preventDefault(); focusComposer(); } }
   function onNativeKey(e) {
     if (!active || committing) {
       // commit 中 (doCommit がボタンを押す瞬間) はネイティブのキーに触らない
       return;
     }
-    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); e.stopImmediatePropagation(); if (boundary) boundary.post("focus", {}); }
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); e.stopImmediatePropagation(); focusComposer(); }
   }
 
   function teardownOverlay() {
     active = false;
     scReady = false;
     if (host) host.style.display = "none";
+    restoreNativeHeight();
+    setPillDraftInfo({}); // 保護入力欄の下書きの警告は、外したら残さない
     reportLive(false); // overlay を外したら即 injected.js をマスクに戻す
   }
 
   // SPA の作り直し・表示変化に追従。ネイティブが差し替わったら貼り直す。
   function sync() {
+    if (!orphaned && !contextAlive()) goStale();
     const el = findNative();
-    if (el && el !== native) { if (native) { native.removeEventListener("focusin", redirectFocus); native.removeEventListener("mousedown", onNativeDown, true); native.removeEventListener("keydown", onNativeKey, true); } active = true; attach(el); }
+    if (el && el !== native) { if (native) { restoreNativeHeight(); native.removeEventListener("focusin", redirectFocus); native.removeEventListener("mousedown", onNativeDown, true); native.removeEventListener("keydown", onNativeKey, true); } active = true; attach(el); }
     else if (el && !active) { active = true; host && (host.style.display = "block"); }
-    else if (!el) { native = null; if (host) host.style.display = "none"; reportLive(false); } // 入力欄が消えたら素通ししない
+    else if (!el) { restoreNativeHeight(); native = null; if (host) host.style.display = "none"; reportLive(false); } // 入力欄が消えたら素通ししない
     if (active) schedulePlace();
     // 入力欄があり iframe も ready なら live を再確認 (SPA の作り直しからの復帰)。
-    reportLive(active && scReady && !!native);
+    // 連絡が切れたあとは知らせない (content.js も拡張機能の機能を使えず、設定を配り直せない)
+    if (!orphaned) reportLive(active && scReady && !!native);
   }
 
   let enabled = true; // secureComposerEnabled
@@ -257,7 +554,8 @@
     const mo = new MutationObserver(() => scheduleSync());
     mo.observe(document.documentElement, { childList: true, subtree: true });
     window.addEventListener("scroll", schedulePlace, true);
-    window.addEventListener("resize", () => { pushTheme(); schedulePlace(); }, true);
+    // 窓の大きさが変わると ChatGPT の入力欄の上限も変わるので、伸びきらなかった高さは測り直す
+    window.addEventListener("resize", () => { nativeCap = 0; pushTheme(); schedulePlace(); }, true);
     setInterval(sync, 1000);
     scheduleSync();
   }
@@ -268,5 +566,11 @@
   else init();
 
   // テスト用の最小の公開点 (E2E フラグのときだけ意味を持つ)
-  window.__piiGuardSC.adapter = { findNative, get active() { return active; }, get hasOverlay() { return !!(host && host.style.display !== "none"); } };
+  // maskDraft: 黄色の内訳の「マスキングする」(F-SC-17)。composer-toggle (同じ isolated world) が呼ぶ
+  window.__piiGuardSC.adapter = {
+    findNative,
+    get active() { return active; },
+    get hasOverlay() { return !!(host && host.style.display !== "none"); },
+    maskDraft() { if (boundary && active) boundary.post("mask-draft", {}); },
+  };
 })();

@@ -22,20 +22,30 @@
   const confirmCancelBtn = document.getElementById("confirm-cancel");
   const rootEl = document.documentElement;
 
-  const settings = { enabled: true, maskForceList: [], mlEnabled: false, piiSendWarning: true };
+  const settings = { enabled: true, maskForceList: [], maskAllowlist: [], mlEnabled: false, piiSendWarning: true };
+  const SETTING_KEYS = ["enabled", "maskForceList", "maskAllowlist", "mlEnabled", "piiSendWarning"];
+  // 動作ログ (docs/diagnostic-log.md)。件数や理由だけで、文章は残さない
+  const DLG = window.PiiGuardDiagLog;
+  const dl = (code, d) => { if (DLG) DLG.log(code, d); };
+  const errorFields = (e) => (DLG ? DLG.errorFields(e, "secure-composer") : {});
+  if (DLG) DLG.captureErrors("secure-composer");
   let composing = false;         // IME 変換中
   let lastReportedHeight = 0;
+  let lastReportedEmpty = true;
+  // 高さの上限 (px)。iframe の中の vh や innerHeight は iframe 自身の高さなので、ページ側 (アダプタ) が
+  // 画面の高さから測って theme で渡す (docs/release-1.7.1.md の D-SC-02)。届くまではこの値
+  let maxHeight = 320;
 
   machine.onChange((state) => {
     rootEl.dataset.state = state;
     boundary.post("state", { state });
   });
-  function setStatus(msg) { statusEl.textContent = msg || ""; }
+  function setStatus(msg) { statusEl.textContent = msg || ""; statusEl.classList.remove("busy"); }
 
   // ---- 設定 (chrome.storage から直接。ページを経由しない) ----------------------
   async function loadSettings() {
     try {
-      const s = await chrome.storage.local.get(["enabled", "maskForceList", "mlEnabled", "piiSendWarning"]);
+      const s = await chrome.storage.local.get(SETTING_KEYS);
       settings.enabled = s.enabled !== false;
       settings.mlEnabled = s.mlEnabled === true;
       settings.piiSendWarning = s.piiSendWarning !== false; // 既定 ON: PII を見つけたら送信前に確認
@@ -43,12 +53,21 @@
         ? s.maskForceList.map((e) => (typeof e === "string" ? { value: e, category: "OTHER" }
             : e && typeof e.value === "string" ? { value: e.value, category: typeof e.category === "string" ? e.category : "OTHER" } : null)).filter(Boolean)
         : [];
+      settings.maskAllowlist = Array.isArray(s.maskAllowlist) ? s.maskAllowlist.filter((v) => typeof v === "string") : [];
     } catch (_) { /* 既定のまま */ }
   }
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area !== "local") return;
-    if ("enabled" in changes || "maskForceList" in changes || "mlEnabled" in changes || "piiSendWarning" in changes) loadSettings();
+    if (area !== "local" || !SETTING_KEYS.some((k) => k in changes)) return;
+    // オン/オフやリストが変わったら、オフの警告を出し直す (オフにした直後でも下書きの個人情報で黄色にする)
+    loadSettings().then(() => scheduleDraftScan(0));
   });
+  // 除外リストの値か (F-SC-18、D-SC-06)。常に伏せる語にも入っている値は伏せる
+  // (送る前の裏取りは、常に伏せる語の生値が残っていると送信を止めるため)
+  function allowedMatcher() {
+    const allow = new Set(settings.maskAllowlist);
+    const force = new Set(settings.maskForceList.map((e) => e.value));
+    return (v) => allow.has(v) && !force.has(v);
+  }
 
   // ---- エンジン待ち ----------------------------------------------------------
   function engineReady() { return !!(NS.engine && NS.engine.ready && typeof NS.engine.maskSanitize === "function"); }
@@ -69,18 +88,39 @@
     set("--sc-pad-y", t.padY); set("--sc-pad-x", t.padX); set("--sc-placeholder", t.placeholderColor);
     if (typeof t.placeholder === "string") editor.setAttribute("placeholder", t.placeholder);
     if (typeof t.dir === "string") editor.setAttribute("dir", t.dir);
+    // ページの明るい/暗い (F-SC-14)。iframe の要素にも同じ値をアダプタが付ける
+    if (t.scheme === "dark" || t.scheme === "light") { rootEl.style.colorScheme = t.scheme; rootEl.dataset.scheme = t.scheme; }
+    // ChatGPT の入力欄が伸びない並びでは、アダプタが保護入力欄を上に伸ばす。そのときは文の欄を下 (入力欄の行) に
+    // 置き、案内と確認をその上に出す (D-SC-18)
+    if (t.anchor === "bottom" || t.anchor === "top") rootEl.dataset.anchor = t.anchor;
+    if (Number.isFinite(t.maxHeight) && t.maxHeight >= 24) {
+      maxHeight = Math.round(t.maxHeight);
+      rootEl.style.setProperty("--sc-max-h", maxHeight + "px");
+    }
     autosize();
   }
 
+  // 下書きの高さをアダプタに知らせる。アダプタは ChatGPT の入力欄をこの高さに伸ばし、保護入力欄を重ね直す
+  // (D-SC-03)。empty は「空の入力欄だけで、確認や案内も出ていない」(ChatGPT の入力欄を元の高さに戻してよい)
   function autosize() {
+    let extra = 0;
+    if (confirmEl && !confirmEl.hidden) extra += confirmEl.offsetHeight;      // PII 確認バーのぶん伸ばす
+    if (statusEl && getComputedStyle(statusEl).display !== "none") extra += statusEl.offsetHeight;
     editor.style.height = "auto";
-    const h = Math.min(editor.scrollHeight, Math.round(window.innerHeight * 0.45) || 400);
-    editor.style.height = h + "px";
-    let total = h;
-    if (confirmEl && !confirmEl.hidden) total += confirmEl.offsetHeight;      // PII 確認バーのぶん伸ばす
-    if (statusEl && getComputedStyle(statusEl).display !== "none") total += statusEl.offsetHeight;
-    total = Math.ceil(total);
-    if (total !== lastReportedHeight) { lastReportedHeight = total; boundary.post("resize", { height: total }); }
+    // 確認や案内も上限の中に収める。下書きが長いときは入力欄の中をスクロールさせ、確認のボタンは常に見せる
+    // (入力欄の最低の高さは CSS の min-height で 1 行を保つ)
+    editor.style.height = Math.min(editor.scrollHeight, Math.max(0, maxHeight - extra)) + "px";
+    // 縦のスクロールは、はみ出しが下の余白より大きい (文の行が隠れる) ときだけ許す。高さの端数や余白だけの
+    // はみ出しでスクロールバーを出さない (D-SC-19)
+    const padB = parseFloat(getComputedStyle(editor).paddingBottom) || 0;
+    editor.style.overflowY = editor.scrollHeight - editor.clientHeight > padB + 1 ? "auto" : "hidden";
+    const total = Math.ceil(editor.offsetHeight + extra);
+    const empty = editor.value === "" && confirmEl.hidden && !statusEl.textContent;
+    if (total !== lastReportedHeight || empty !== lastReportedEmpty) {
+      lastReportedHeight = total;
+      lastReportedEmpty = empty;
+      boundary.post("resize", { height: total, empty });
+    }
   }
 
   // PII 検出時の送信前確認。表示して iframe を伸ばし、ボタンが押されるまで待つ。
@@ -119,12 +159,113 @@
       mlEnabled: settings.mlEnabled,
     });
     if (!res || typeof res.sanitized_text !== "string") throw new Error("mask produced no text");
-    const count = Array.isArray(res.detections) ? res.detections.length : 0;
-    return { text: res.sanitized_text, count };
+    const all = Array.isArray(res.detections) ? res.detections : [];
+    // ML の判定を使えたか (off / ok / timeout / error / unavailable)。時間切れと失敗は呼び手が知らせる (D-SC-10)
+    const ml = res.ml && typeof res.ml.status === "string" ? res.ml.status : "off";
+    // 除外リストの値は伏せない (F-SC-18)。除いたときは、残りの検出だけで伏せ字を作り直す
+    const allowed = allowedMatcher();
+    const kept = all.filter((d) => !(d && (allowed(String(d.text)) || allowed(text.slice(d.start, d.end)))));
+    if (kept.length === all.length) return { text: res.sanitized_text, count: all.length, ml };
+    const agg = NS.engine.aggregate;
+    if (!agg || typeof agg.applySpans !== "function") throw new Error("engine not ready");
+    return { text: agg.applySpans(text, kept), count: kept.length, ml };
+  }
+
+  // 0.3 秒より長くかかるときだけ、待っていることを出す。送る前の検出は「確認中…」(F-SC-22、D-SC-11。
+  // ML なしなら数ミリ秒で終わる)、送る操作は「送信中…」(D-SC-16。ChatGPT が受け付けるのを確かめる間)
+  const BUSY_MS = 300;
+  async function withBusyNotice(work, text = "確認中…") {
+    const timer = setTimeout(() => { setStatus(text); statusEl.classList.add("busy"); autosize(); }, BUSY_MS);
+    try { return await work(); }
+    finally {
+      clearTimeout(timer);
+      if (statusEl.textContent === text) { setStatus(""); autosize(); }
+    }
+  }
+
+  // ML の判定を使えなかった (時間切れ / 失敗) ときの記録と一言 (F-SC-21、D-SC-10)。
+  // 正規表現と辞書の検出だけで伏せたことを利用者に伝える。待つ上限はエンジン (engine/onnx-detector.js) にある
+  const ML_WHY = { timeout: "ML の判定が間に合わなかった", error: "ML の判定に失敗した", unavailable: "ML の判定に失敗した" };
+  function noteMlSkipped(ml, where, did) {
+    const why = ML_WHY[ml];
+    if (!why) return;
+    dl("ml.skipped", { reason: ml === "timeout" ? "timeout" : "error", where });
+    flashStatus(`${why}ので、辞書と正規表現だけで${did}よ。`);
+  }
+
+  // ---- オフのときの下書きの警告 (F-SC-16、D-SC-04) ---------------------------------
+  // 入力が止まって 0.4 秒後に調べ、種類ごとの件数と、機密と思われる文の件数だけをアダプタに送る。
+  // アダプタはアイコン (composer-toggle) に渡す。文章や値は iframe の外に出さない
+  const SCAN_MS = 400;
+  const SCAN_MAX_CHARS = 20000;
+  let scanTimer = 0;
+  let scanSeq = 0;
+  function scheduleDraftScan(delay) {
+    clearTimeout(scanTimer);
+    scanTimer = setTimeout(scanDraft, delay == null ? SCAN_MS : delay);
+  }
+  async function scanDraft() {
+    const seq = ++scanSeq;
+    const text = editor.value.slice(0, SCAN_MAX_CHARS);
+    const info = { categories: {}, confidential: 0 };
+    if (!settings.enabled && text.trim() && engineReady()) {
+      try {
+        const res = await NS.engine.maskAggregated(text, { userForceMaskEntries: settings.maskForceList, mlEnabled: false });
+        const allowed = allowedMatcher();
+        for (const row of Array.isArray(res && res.aggregated) ? res.aggregated : []) {
+          const v = row && row.value != null ? String(row.value) : "";
+          if (!v.trim() || allowed(v)) continue;
+          const cat = typeof row.category === "string" ? row.category : "OTHER";
+          info.categories[cat] = (info.categories[cat] || 0) + 1;
+        }
+        info.confidential = Array.isArray(res && res.confidential) ? res.confidential.length : 0;
+      } catch (e) { dl("error", errorFields(e)); }
+    }
+    if (seq !== scanSeq) return; // 調べている間に次の入力が来た
+    boundary.post("draftinfo", info);
+  }
+
+  // 黄色の内訳の「マスキングする」(F-SC-17、D-SC-05)。下書きを伏せ字にした文に置き換える。
+  // 確認画面はページの側 (MAIN world) にあり、下書きを見せると原文がページに渡るので、ここで直接伏せる。
+  // 置き換えは編集の操作として行い、Ctrl+Z で元に戻せるようにする
+  async function maskDraft() {
+    const text = editor.value;
+    if (!text.trim() || submitting) return;
+    let res;
+    try { res = await withBusyNotice(() => maskText(text)); }
+    catch (e) {
+      dl("error", errorFields(e));
+      flashStatus("端末内のマスキングに失敗したよ。下書きはそのまま。");
+      return;
+    }
+    if (editor.value !== text || res.text === text) { scheduleDraftScan(0); return; } // 調べている間に書き換えられた / 伏せる所が無い
+    editor.focus();
+    editor.select();
+    let replaced = false;
+    try { replaced = document.execCommand("insertText", false, res.text) && editor.value === res.text; } catch (_) { replaced = false; }
+    if (!replaced) editor.value = res.text;
+    if (machine.is("SECURE_READY", "SENT", "MASKING_FAILED")) machine.to("EDITING");
+    autosize();
+    noteMlSkipped(res.ml, "mask-draft", "伏せた");
+    scheduleDraftScan(0);
   }
 
   // ---- 送信 ------------------------------------------------------------------
   let submitting = false;
+  // 送れなかった理由 (動作ログの send.failed)。アダプタの doCommit の error と、境界の時間切れから決める
+  const COMMIT_ERRORS = {
+    "write failed": "write-failed", "no native composer": "no-composer", busy: "busy",
+    "page busy": "page-busy", "not accepted": "not-accepted",
+  };
+  function commitFailReason(resp) {
+    if (!resp || !resp.ok) return "no-response";
+    return COMMIT_ERRORS[resp.result && resp.result.error] || undefined;
+  }
+  // 送り方 (送信ボタン / Enter のキー)。受け付けられなかったときに、どちらで送ったかを動作ログに残す
+  function commitPath(resp) {
+    const p = resp && resp.ok && resp.result && resp.result.path;
+    return p === "button" || p === "enter" ? p : undefined;
+  }
   async function submit() {
     if (submitting) return;                       // 二重送信の防止 (INV)
     if (!machine.is("EDITING", "SECURE_READY", "SENT", "MASKING_FAILED")) return;
@@ -137,10 +278,11 @@
       machine.to("MASKING");
       // 常に検出する (ON はマスク結果を使い、OFF は件数を警告に使う)。
       let res;
-      try { res = await maskText(text); }
+      try { res = await withBusyNotice(() => maskText(text)); }
       catch (e) {
         if (settings.enabled) {
           machine.to("MASKING_FAILED", { error: String((e && e.message) || e) });
+          dl("send.blocked", { reason: "unmaskable", via: "secure-composer" });
           setStatus("端末内のマスキングに失敗したよ。送信は止めた。下書きはそのまま。");
           return;
         }
@@ -154,6 +296,7 @@
         const residual = leak ? leak.findLeaks(finalText, settings.maskForceList.map((e) => e.value)) : [];
         if (residual.length) {
           machine.to("MASKING_FAILED", { reason: "residual" });
+          dl("send.blocked", { reason: "unmaskable", via: "secure-composer" });
           setStatus("マスキングの確認に失敗したよ。送信は止めた。");
           return;
         }
@@ -161,23 +304,31 @@
       // 個人情報を検出したときは送信前に確認を出す (無いときは無言で送る)。
       if (piiCount > 0 && settings.piiSendWarning) {
         const ok = await confirmPii(piiCount);
-        if (!ok) { machine.to("EDITING"); setStatus(""); return; } // 取消: 下書きはそのまま
+        if (!ok) { machine.to("EDITING"); setStatus(""); dl("send.cancelled", { via: "secure-composer" }); return; } // 取消: 下書きはそのまま
       }
       machine.to("COMMIT_READY");
       machine.to("SUBMITTING");
-      const resp = await boundary.request("commit", { text: finalText, masked: settings.enabled }, 20000);
+      const resp = await withBusyNotice(() => boundary.request("commit", { text: finalText, masked: settings.enabled }, 20000), "送信中…");
       const committed = resp && resp.ok && resp.result && resp.result.committed === true;
       if (!committed) {
         // 送信できなかった → 下書きを残し、編集に戻す。原文の自動再送はしない (INV-2 / P0-10)
+        const reason = commitFailReason(resp);
+        dl("send.failed", { reason, path: commitPath(resp), via: "secure-composer" });
         machine.to("EDITING");
-        setStatus("送信できなかった。もう一度 Enter で送れるよ。");
+        setStatus(reason === "page-busy"
+          ? "ChatGPT が回答を作っている途中だよ。終わったら、もう一度 Enter で送ってね。"
+          : "送信できなかった。もう一度 Enter で送れるよ。");
         return;
       }
       machine.to("SENT");
+      if (settings.enabled && maskedCount > 0) dl("send.masked", { via: "secure-composer" });
       // F-SC-10: 確認機能 OFF でも「マスクした件数」をピルに知らせ、黄色+メッセージを出させる。
       if (settings.enabled && maskedCount > 0) boundary.post("maskinfo", { maskedCount });
       editor.value = "";
       autosize();
+      scheduleDraftScan(0); // オフの警告を消す
+      // オフのときは ML を警告の件数にしか使っていないので、知らせない (D-SC-10)
+      if (settings.enabled) noteMlSkipped(res.ml, "send", "伏せて送った");
       machine.to("SECURE_READY");
     } finally {
       submitting = false;
@@ -190,6 +341,7 @@
   editor.addEventListener("input", () => {
     if (machine.is("SECURE_READY", "SENT", "MASKING_FAILED")) machine.to("EDITING");
     autosize();
+    if (!settings.enabled) scheduleDraftScan();
   });
   editor.addEventListener("keydown", (e) => {
     // IME 変換確定の Enter を送信にしない (keyCode 229 / isComposing)
@@ -238,6 +390,7 @@
   boundary.on("theme", (t) => { applyTheme(t); return true; });
   boundary.on("focus", () => { try { editor.focus(); } catch (_) {} return true; });
   boundary.on("submit", () => { submit(); return true; });          // ネイティブの送信ボタン押下の中継
+  boundary.on("mask-draft", () => { maskDraft(); return true; });   // 黄色の内訳の「マスキングする」
   boundary.on("ping", () => ({ state: machine.get(), height: lastReportedHeight }));
   // content script は原文を取りに来られない。commit は iframe → content の一方向だけ。
 
@@ -245,9 +398,10 @@
   (async () => {
     await loadSettings();
     const ok = await waitEngine(8000);
-    if (!ok) { machine.block("engine-timeout"); setStatus("保護エンジンを読み込めなかった。"); boundary.post("blocked", { reason: "engine" }); return; }
+    if (!ok) { machine.block("engine-timeout"); dl("engine.unavailable", { where: "secure-composer" }); setStatus("保護エンジンを読み込めなかった。"); boundary.post("blocked", { reason: "engine" }); return; }
     machine.to("SECURE_READY");
     autosize();
+    if (!settings.enabled && editor.value.trim()) scheduleDraftScan(0); // エンジンを待つ間に書かれた下書き
     boundary.post("ready", {});
     boundary.onReady(() => boundary.post("ready", {}));
   })();

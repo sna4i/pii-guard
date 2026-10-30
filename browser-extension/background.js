@@ -36,6 +36,49 @@
 //      ML_PREWARM.
 //   2. Forward the message there with target:"offscreen".
 //   3. Relay the offscreen response back to the original sender.
+import "./diag-log.js";
+
+// ---- 動作ログ (docs/diagnostic-log.md) ----------------------------------------
+// 保存は Service Worker だけが行う (D-LG-03)。書き込みは 1 本の列に並べ、0.3 秒まとめてから書く (D-LG-04)
+const DL = globalThis.PiiGuardDiagLog;
+const EXT_BASE = chrome.runtime.getURL("");
+let diagQueue = [];
+let diagTimer = null;
+let diagChain = Promise.resolve();
+function queueDiag(entries) {
+  for (const e of entries) if (e) diagQueue.push(e);
+  if (!diagTimer && diagQueue.length) diagTimer = setTimeout(flushDiag, 300);
+}
+function flushDiag() {
+  diagTimer = null;
+  const batch = diagQueue.splice(0);
+  if (!batch.length) return;
+  diagChain = diagChain.then(() => DL.append(chrome.storage.local, batch)).catch(() => {});
+}
+DL.setSink((batch) => queueDiag(batch.map((e) => DL.sanitize(e, { src: "background", site: null }))));
+DL.captureErrors("background");
+diagChain = diagChain.then(() => DL.purge(chrome.storage.local)).catch(() => {});
+function hostOf(url) {
+  try { return new URL(url).hostname; } catch (_) { return null; }
+}
+// 設定の変更 (値は残さず、何を変えたかだけ)。オン/オフは、変えた画面 (アイコン、メニュー、設定画面) が残す
+const SETTING_KINDS = {
+  maskAllowlist: "allowlist", maskForceList: "forcelist", chatTint: "tint", uiMode: "mode", interactive: "mode",
+  localLlmEnabled: "llm", localLlmUrl: "llm", localLlmModel: "llm", localLlmMode: "llm", localLlmTimeoutMs: "llm",
+  mlEnabled: "engine", secureComposerEnabled: "secure-composer",
+};
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== "local") return;
+  const kinds = new Set();
+  for (const k of Object.keys(changes)) if (SETTING_KINDS[k]) kinds.add(SETTING_KINDS[k]);
+  for (const what of kinds) DL.log("settings.changed", { what });
+});
+chrome.runtime.onInstalled.addListener((details) => {
+  if (details && details.reason === "update") {
+    DL.log("ext.updated", { from: details.previousVersion, to: chrome.runtime.getManifest().version });
+  }
+});
+
 const OFFSCREEN_DOCUMENT_PATH = "offscreen.html";
 let creatingOffscreenPromise = null;
 
@@ -189,6 +232,20 @@ const EGRESS_TTL_MS = 30 * 60 * 1000; // 持ち出しガードの記憶を残す
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || typeof message.type !== "string") {
+    return false;
+  }
+
+  if (message.type === "DIAG_LOG") {
+    // 出どころは受け手が決める。拡張機能のページか content script か。ページの世界から
+    // content script が中継したものだけを "page" にする。サイトはタブの URL のホスト名
+    const fromExtensionPage = typeof sender.url === "string" && sender.url.startsWith(EXT_BASE);
+    const site = sender.tab && sender.tab.url && !sender.tab.url.startsWith(EXT_BASE) ? hostOf(sender.tab.url) : null;
+    const list = Array.isArray(message.entries) ? message.entries.slice(0, 50) : [];
+    queueDiag(list.map((e) => DL.sanitize(e, {
+      src: fromExtensionPage ? "extension" : (e && e.src === "page" ? "page" : "content"),
+      site,
+    })));
+    sendResponse({ ok: true });
     return false;
   }
 

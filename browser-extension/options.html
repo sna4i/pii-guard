@@ -11,7 +11,12 @@
       <span class="version" id="version">v0.4.0</span>
     </header>
 
-    <main>
+    <nav class="tabs" role="tablist" aria-label="設定画面のタブ">
+      <button type="button" class="tab" role="tab" id="tabbtn-settings" aria-controls="tab-settings" aria-selected="true">設定</button>
+      <button type="button" class="tab" role="tab" id="tabbtn-log" aria-controls="tab-log" aria-selected="false" tabindex="-1">ログ</button>
+    </nav>
+
+    <main id="tab-settings" role="tabpanel" aria-labelledby="tabbtn-settings">
       <section class="card">
         <h2>マスキング除外リスト</h2>
         <p class="hint">
@@ -198,6 +203,47 @@
       </section>
     </main>
 
+    <!-- 動作ログ (docs/diagnostic-log.md の D-LG-07)。表示は options.js が textContent だけで組む -->
+    <main id="tab-log" role="tabpanel" aria-labelledby="tabbtn-log" hidden>
+      <section class="card">
+        <h2>動作ログ</h2>
+        <p class="hint">
+          PII Guard が何をしたかの記録です。たとえば、送信を伏せ字にした、通信を止めた、入力欄のアイコンへのクリックを受け付けなかった、など。
+          端末の中に 14 日分だけ残し、それより古いものは自動で消します。外部には送りません。
+        </p>
+        <p class="hint">
+          入力した文章、見つけた値、ファイル名、送信の中身は記録しません。不具合を伝えるときは「コピー」を押して、その内容を貼り付けてください。
+        </p>
+        <div class="log-tools">
+          <label class="log-filter">期間
+            <select id="log-days">
+              <option value="1">今日</option>
+              <option value="7">7 日</option>
+              <option value="14" selected>14 日</option>
+            </select>
+          </label>
+          <label class="log-filter">種類
+            <select id="log-level">
+              <option value="all" selected>すべて</option>
+              <option value="warn">注意とエラー</option>
+            </select>
+          </label>
+          <span class="log-spacer"></span>
+          <button type="button" id="log-copy" class="btn-secondary">コピー</button>
+          <button type="button" id="log-clear" class="btn-danger">すべて消す</button>
+        </div>
+        <p id="log-status" class="hint log-status" role="status" aria-live="polite"></p>
+        <div class="log-table-wrap">
+          <table class="log-table">
+            <thead><tr><th scope="col">日時</th><th scope="col">種類</th><th scope="col">場所</th><th scope="col">内容</th></tr></thead>
+            <tbody id="log-rows"></tbody>
+          </table>
+        </div>
+        <p id="log-empty" class="hint" hidden>この期間の記録はありません。</p>
+      </section>
+    </main>
+
+    <script src="diag-log.js"></script>
     <script src="tint.js"></script>
     <script src="options.js"></script>
   </body>

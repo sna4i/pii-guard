@@ -61,7 +61,9 @@
   const engineReady = () => !!(NS.engine && NS.engine.ready && typeof NS.engine.maskSanitize === "function");
   const isText = (file) => TEXT_EXT.test(file.name || "") || TEXT_MIME.test(file.type || "");
   const opts = () => ({ userForceMaskEntries: settings.maskForceList, mlEnabled: settings.mlEnabled });
-  const LOG = (...a) => console.debug("[pii-guard] attachment-guard:", ...a); // 値は出さない (件数と経路だけ)
+  // 動作ログ (docs/diagnostic-log.md)。件数と経路だけを残し、ファイル名は残さない
+  const DL = window.PiiGuardDiagLog;
+  const dlog = (code, d) => { if (DL) DL.log(code, d); };
 
   // 日本の CSV は Shift_JIS、Windows のツールは UTF-16 で書くことが多い。UTF-8 決め打ちだと
   // 文字化けで検出できず、UTF-16 は数字の間に NUL が挟まってパターンをすり抜ける。
@@ -122,8 +124,13 @@
     return { masked, blocked, unmasked, maskedCount };
   }
 
-  function notifyPill(r, reason) {
+  // how: picker (ファイルの選択) / drop (ドラッグ) / paste (貼り付け)
+  function notifyPill(r, reason, how) {
     const detail = { maskedCount: r.maskedCount, blocked: r.blocked.slice(), unmasked: r.unmasked.slice(), reason: reason || "" };
+    const maskedFiles = Array.isArray(r.masked) ? r.masked.length - r.unmasked.length : 0;
+    if (maskedFiles > 0) dlog("attach.masked", { count: maskedFiles, how });
+    if (r.blocked.length) dlog("attach.blocked", { count: r.blocked.length, reason: reason === "dialog" || reason === "no-target" ? reason : "binary", how });
+    if (r.unmasked.length) dlog("attach.unmasked", { count: r.unmasked.length });
     try { window.dispatchEvent(new CustomEvent("mask-mcp:attachment", { detail })); } catch (_) {}
     if (exposeForTests) NS.__lastAttachment = { ...detail, at: Date.now() };
   }
@@ -169,7 +176,7 @@
     reentrant.add(input);
     setInputFiles(input, r.masked); // ブロック分は除外。マスク済み (OFF なら元のまま) だけを渡す
     input.dispatchEvent(new Event("change", { bubbles: true }));
-    notifyPill(r);
+    notifyPill(r, "", "picker");
   }
 
   // ---- ドラッグ&ドロップ (F-SC-13 / F-EG-05) ------------------------------------------
@@ -192,7 +199,7 @@
     const files = Array.from(e.dataTransfer.files || []);
     if (!settings.enabled) {
       // マスキング OFF: ページの drop 処理にそのまま任せる (行き先もページのまま)。未マスクだけ知らせる。
-      if (files.length) notifyPill({ maskedCount: 0, blocked: [], unmasked: files.map((f) => f.name) });
+      if (files.length) notifyPill({ maskedCount: 0, blocked: [], unmasked: files.map((f) => f.name) }, "", "drop");
       return;
     }
     // ページに元ファイルを渡さない。ブラウザの既定動作 (ファイルを開く) も止める。
@@ -204,7 +211,7 @@
     if (t && t.closest && t.closest('[role="dialog"], dialog')) {
       // 行き先 (プロジェクトのファイル等) を入力欄の添付と取り違えないよう止める。
       closePageDropUi(t);
-      notifyPill({ maskedCount: 0, blocked: files.map((f) => f.name), unmasked: [] }, "dialog");
+      notifyPill({ maskedCount: 0, blocked: files.map((f) => f.name), unmasked: [] }, "dialog", "drop");
       return;
     }
     const r = await processFiles(files);
@@ -217,15 +224,12 @@
         reentrant.add(input);
         setInputFiles(input, r.masked);
         input.dispatchEvent(new Event("change", { bubbles: true }));
-        LOG(`drop → file input (${r.masked.length} file(s))`);
       } else if (!IS_CHATGPT && t && t.isConnected) {
         // input の無いサイト: マスク済みの File を載せた drop を、落とした場所へ投げ直す
         const ev = new DragEvent("drop", { bubbles: true, cancelable: true, composed: true, ...point, dataTransfer: dataTransferOf(r.masked) });
         ours.add(ev);
         const accepted = !t.dispatchEvent(ev);
-        LOG(`drop → re-dispatched on <${t.tagName.toLowerCase()}> (${r.masked.length} file(s), page ${accepted ? "accepted" : "did not cancel"})`);
       } else {
-        LOG(`drop → no target (target ${t ? (t.isConnected ? "connected" : "detached") : "none"})`);
         // 渡し先が見つからない: 送らない (fail-closed)
         closePageDropUi(t);
         r.blocked.push(...r.masked.map((f) => f.name));
@@ -233,7 +237,7 @@
         reason = "no-target";
       }
     }
-    notifyPill(r, reason);
+    notifyPill(r, reason, "drop");
   }
 
   // ---- ファイルの貼り付け (F-EG-05) ---------------------------------------------------
@@ -243,7 +247,7 @@
     const cd = e.clipboardData;
     const files = cd && cd.files ? Array.from(cd.files) : [];
     if (!files.length) return;
-    if (!settings.enabled) { notifyPill({ maskedCount: 0, blocked: [], unmasked: files.map((f) => f.name) }); return; }
+    if (!settings.enabled) { notifyPill({ maskedCount: 0, blocked: [], unmasked: files.map((f) => f.name) }, "", "paste"); return; }
     const text = cd.getData("text/plain");
     const html = cd.getData("text/html");
     const target = e.target;
@@ -263,7 +267,7 @@
         try { document.execCommand("insertText", false, text); } catch (_) {}
       }
     }
-    if (r.maskedCount || r.blocked.length) notifyPill(r);
+    if (r.maskedCount || r.blocked.length) notifyPill(r, "", "paste");
   }
 
   // document_start で、ページのスクリプトより先に window の capture に付ける。
