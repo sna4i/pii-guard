@@ -54,6 +54,13 @@ body.v2026 .ProseMirror{color:#ececec}
 /* 入力欄の親は、高さの上限を超えると入力欄を切り取ってスクロールする (2025 年の実物は親に max-h-52 と overflow-auto。
    2026 年の実物でどの段かは未確認) */
 body.v2026 [data-composer-input-layout]{max-height:13rem;overflow-y:auto}
+/* single2026 (app.js の buildSingle2026): 1 行の並び。入力欄の親は 1 行分 (36px) で切り取り、入力欄に min-height を
+   付けても見えている範囲は増えない (2026-10-30 の利用者のスクショの症状から。実物の作りは未確認) */
+body.v2026 [data-composer-footer-responsive][data-composer-rows=inline]{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:4px}
+body.v2026 [data-composer-rows=inline] .footer-left{grid-column:1;grid-row:1}
+body.v2026 [data-composer-rows=inline] .AdaptiveFooterInput-zji599{grid-column:2;grid-row:1}
+body.v2026 [data-composer-rows=inline] .footer-right{grid-column:3;grid-row:1;display:flex;align-items:center;gap:4px}
+body.v2026 [data-composer-input-layout=single-line]{max-height:36px;overflow:hidden}
 </style></head>
 <body><nav><a href="/" data-nav="new">新しいチャット</a><a href="/c/abc123" data-nav="c">会話A</a></nav>
 <!-- 実物 (2026-10-18 ログイン後) と同じく、スレッド側の入れ物のクラス名にも "composer" を含む -->

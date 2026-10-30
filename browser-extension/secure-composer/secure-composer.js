@@ -90,6 +90,9 @@
     if (typeof t.dir === "string") editor.setAttribute("dir", t.dir);
     // ページの明るい/暗い (F-SC-14)。iframe の要素にも同じ値をアダプタが付ける
     if (t.scheme === "dark" || t.scheme === "light") { rootEl.style.colorScheme = t.scheme; rootEl.dataset.scheme = t.scheme; }
+    // ChatGPT の入力欄が伸びない並びでは、アダプタが保護入力欄を上に伸ばす。そのときは文の欄を下 (入力欄の行) に
+    // 置き、案内と確認をその上に出す (D-SC-18)
+    if (t.anchor === "bottom" || t.anchor === "top") rootEl.dataset.anchor = t.anchor;
     if (Number.isFinite(t.maxHeight) && t.maxHeight >= 24) {
       maxHeight = Math.round(t.maxHeight);
       rootEl.style.setProperty("--sc-max-h", maxHeight + "px");
@@ -107,6 +110,10 @@
     // 確認や案内も上限の中に収める。下書きが長いときは入力欄の中をスクロールさせ、確認のボタンは常に見せる
     // (入力欄の最低の高さは CSS の min-height で 1 行を保つ)
     editor.style.height = Math.min(editor.scrollHeight, Math.max(0, maxHeight - extra)) + "px";
+    // 縦のスクロールは、はみ出しが下の余白より大きい (文の行が隠れる) ときだけ許す。高さの端数や余白だけの
+    // はみ出しでスクロールバーを出さない (D-SC-19)
+    const padB = parseFloat(getComputedStyle(editor).paddingBottom) || 0;
+    editor.style.overflowY = editor.scrollHeight - editor.clientHeight > padB + 1 ? "auto" : "hidden";
     const total = Math.ceil(editor.offsetHeight + extra);
     const empty = editor.value === "" && confirmEl.hidden && !statusEl.textContent;
     if (total !== lastReportedHeight || empty !== lastReportedEmpty) {

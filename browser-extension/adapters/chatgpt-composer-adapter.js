@@ -40,6 +40,9 @@
   let appliedMinH = 0;        // ChatGPT の入力欄に付けた高さ (px、枠と余白を含む)。0 なら付けていない
   let appliedW = 0;           // そのときの入力欄の幅 (px)
   let nativeCap = 0;          // ChatGPT の入力欄が伸びきらなかったときの見えている高さ (iframe の上限にする)
+  let raisedUp = false;       // 保護入力欄を入力欄の行から上に伸ばしているか (ChatGPT の入力欄が伸びない並び、D-SC-17)
+  // 上に伸ばしている間の見た目。会話の上に重なった板に見えるように、角丸と薄い縁と影を付ける
+  const RAISED_SHADOW = "0 0 0 1px rgba(127,127,127,0.28), 0 -6px 18px rgba(0,0,0,0.22)";
   const E2E_FLAG = "__pii_guard_e2e";
   let exposeForTests = false;
 
@@ -116,6 +119,8 @@
       fontFamily: cs.fontFamily, fontSize: cs.fontSize, lineHeight: cs.lineHeight === "normal" ? "1.5" : cs.lineHeight,
       color: cs.color, caretColor: cs.caretColor && cs.caretColor !== "auto" ? cs.caretColor : cs.color,
       surface: `rgb(${s.r}, ${s.g}, ${s.b})`, scheme, maxHeight,
+      // 上に伸ばしている間は、文の欄を下 (入力欄の行) に置き、案内と確認をその上に出してもらう (D-SC-18)
+      anchor: raisedUp ? "bottom" : "top",
       padY: cs.paddingTop, padX: cs.paddingLeft, placeholder: ph,
       placeholderColor: "rgba(127,127,127,0.8)", dir: cs.direction,
     };
@@ -183,19 +188,46 @@
     return { left, top, width: Math.max(0, right - left), height: Math.max(0, bottom - top) };
   }
 
+  // 入力欄の 2 行分の高さ (行の高さ × 2 + 上下の余白)。見えている範囲がこれより低ければ、伸びない並びとみなす
+  function twoLines(el) {
+    const cs = getComputedStyle(el);
+    const lh = parseFloat(cs.lineHeight) || (parseFloat(cs.fontSize) || 16) * 1.5;
+    return 2 * lh + (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0);
+  }
+
   function place() {
     if (!active || !native || !native.isConnected) return;
     fitNativeHeight();
     const r = visibleRect(native);
     if (r.width < 40 || r.height < 8) { host && (host.style.display = "none"); return; }
-    // 保護入力欄は ChatGPT の入力欄の見えている範囲にぴったり重ねる。入力欄が上限で伸びきらなかったら、
-    // その高さを iframe の上限として渡し、iframe の中でスクロールさせる
+    // 保護入力欄は ChatGPT の入力欄の見えている範囲にぴったり重ねる。要る高さに足りないとき:
+    //  - 2 行分以上見えている (2 段の並びで ChatGPT の上限に達した): その高さを iframe の上限として渡し、
+    //    iframe の中でスクロールさせる (D-SC-03)
+    //  - 2 行分も見えない、または 1 行の並び (data-composer-layout="single-line") で、ChatGPT の入力欄が伸びない:
+    //    下の端を入力欄の行に置いたまま、保護入力欄を上に伸ばす。高さは画面の 40% まで (D-SC-17)
+    let top = r.top; // ネイティブの入力面の上端に合わせる
+    let h = r.height;
+    let up = false;
     if (iframeHeight > r.height + 2 && !draftEmpty) {
-      const cap = Math.round(r.height);
-      if (cap !== nativeCap) { nativeCap = cap; pushTheme(); }
+      const layoutEl = native.closest("[data-composer-layout]");
+      const singleLine = !!layoutEl && layoutEl.getAttribute("data-composer-layout") === "single-line";
+      if (r.height >= twoLines(native) && !singleLine) {
+        const cap = Math.round(r.height);
+        if (cap !== nativeCap) { nativeCap = cap; pushTheme(); }
+      } else {
+        up = true;
+        const bottom = r.top + r.height;
+        top = Math.max(8, bottom - Math.min(iframeHeight, Math.round(window.innerHeight * 0.4)));
+        h = bottom - top;
+      }
     }
-    const h = r.height;
-    const top = r.top; // ネイティブの入力面の上端に合わせる
+    if (up !== raisedUp) {
+      raisedUp = up;
+      if (up) nativeCap = 0; // 上に伸ばす間は、見えている範囲を上限にしない
+      host.style.borderRadius = up ? "12px" : "0";
+      host.style.boxShadow = up ? RAISED_SHADOW : "none";
+      pushTheme();
+    }
     const key = `${Math.round(r.left)},${Math.round(top)},${Math.round(r.width)},${Math.round(h)}`;
     if (key === lastRect && host.style.display !== "none") return;
     lastRect = key;

@@ -34,6 +34,10 @@ body { overflow: hidden; background: transparent; }
   overflow-wrap: anywhere;
 }
 #editor::placeholder { color: var(--sc-placeholder); opacity: 1; }
+/* ChatGPT の入力欄が伸びない並びで、上に伸ばしているとき (D-SC-18): 文の欄を下 (入力欄の行) に置き、
+   案内と確認はその上に出す */
+:root[data-anchor="bottom"] body { display: flex; flex-direction: column-reverse; }
+:root[data-anchor="bottom"] body > * { flex: none; }
 /* マスク失敗・送信失敗・添付の案内など、伝えることがあるときだけ小さく出す。通常時は何も出さない (spec 10.4)。 */
 #status { display: none; font: 12px/1.4 var(--sc-font); color: #b84a00; padding: 2px var(--sc-pad-x); }
 :root[data-scheme="dark"] #status { color: #f5a361; }
