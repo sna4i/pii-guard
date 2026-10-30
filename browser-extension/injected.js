@@ -1916,6 +1916,10 @@
 
   if (typeof WebSocket !== "undefined") {
     const originalWsSend = WebSocket.prototype.send;
+    // 閉じかけ (2)・閉じた (3) 接続への send() は、ブラウザがデータを捨てたうえで「WebSocket is already in
+    // CLOSING or CLOSED state.」をコンソールに出す。ここを通すとその出どころがこの拡張機能の行に見えるので、
+    // 呼ぶ前に確かめて黙って戻る。どちらにしても何も送られない (docs/release-1.7.1.md の D-EG-08)
+    const sendRaw = (ws, args) => (ws.readyState === 2 || ws.readyState === 3 ? undefined : originalWsSend.apply(ws, args));
     WebSocket.prototype.send = function patchedWsSend(data) {
       let asyncHandled = false;
       try {
@@ -1943,7 +1947,7 @@
               const redacted = redactUrl(url);
               (async () => {
                 if (!(await isEnabled())) {
-                  originalWsSend.apply(ws, args);
+                  sendRaw(ws, args);
                   return;
                 }
                 try {
@@ -1953,7 +1957,7 @@
                     redacted
                   );
                   if (!result.changed) {
-                    originalWsSend.apply(ws, args);
+                    sendRaw(ws, args);
                     return;
                   }
                 const newFrame = serializeSocketIoEvent(
@@ -1961,7 +1965,7 @@
                   wrapped.restore(result.body)
                 );
                 plog("send.masked", { via: "ws" });
-                originalWsSend.call(ws, newFrame);
+                sendRaw(ws, [newFrame]);
               } catch (err) {
                 if (
                   err &&
@@ -1991,10 +1995,10 @@
             const sb = syncBody(data);
             const r = guardDecide(String(this.url || ""), sb.unreadable ? { unreadable: true } : sb.bytes ? { bytes: sb.bytes } : { text: sb.text });
             if (r.action === "block") return undefined; // フレームを落とす (接続は保つ)
-            if (r.action === "scrub") return originalWsSend.call(this, r.text != null ? r.text : r.bytes);
+            if (r.action === "scrub") return sendRaw(this, [r.text != null ? r.text : r.bytes]);
           }
         } catch (_) { /* 判定できないときは従来どおり */ }
-        return originalWsSend.apply(this, arguments);
+        return sendRaw(this, arguments);
       }
     };
   }
