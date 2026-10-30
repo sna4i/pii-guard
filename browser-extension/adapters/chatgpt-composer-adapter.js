@@ -45,6 +45,13 @@
   const RAISED_SHADOW = "0 0 0 1px rgba(127,127,127,0.28), 0 -6px 18px rgba(0,0,0,0.22)";
   const E2E_FLAG = "__pii_guard_e2e";
   let exposeForTests = false;
+  // 拡張機能との連絡が切れたか (読み込み直し・更新・オフのあと、開いたままのタブに残った古い部品)。
+  // 切れると chrome.runtime.id を読めなくなる (docs/release-1.7.1.md の D-SC-21)
+  let orphaned = false;
+  const STALE_TEXT = "PII Guard が更新か停止されたので、この入力欄は使えなくなったよ。このタブを読み込み直してね。";
+  function contextAlive() {
+    try { return !!(chrome.runtime && chrome.runtime.id); } catch (_) { return false; }
+  }
 
   const isEditable = (el) => !!el && (el.tagName === "TEXTAREA" || el.isContentEditable);
   function visible(el) {
@@ -132,6 +139,12 @@
     host.setAttribute("data-pii-guard-secure", "1");
     host.style.cssText = `position:fixed;z-index:${Z};margin:0;padding:0;border:0;overflow:hidden;` +
       `box-shadow:none;background:transparent;pointer-events:auto;`;
+    if (orphaned) {
+      // 連絡が切れたあとに入力欄が作り直された (SPA の移動): 新しい入力欄にも知らせを重ねる
+      (document.body || document.documentElement).appendChild(host);
+      showStaleNotice();
+      return;
+    }
     iframe = document.createElement("iframe");
     iframe.src = EXT;
     iframe.title = "PII Guard Secure Composer";
@@ -140,6 +153,53 @@
     host.appendChild(iframe);
     (document.body || document.documentElement).appendChild(host);
     if (exposeForTests) host.setAttribute("data-sc-host", "1");
+  }
+
+  // 連絡が切れたときの知らせ (D-SC-21)。古い保護入力欄 (iframe) を外し、閉じた Shadow DOM の文と
+  // 「読み込み直す」ボタンに置き換える。色は ChatGPT の入力欄から測る (拡張機能の機能は使わない)。
+  // ChatGPT の入力欄の Enter と mousedown は止めたまま (保護されないまま送らない)
+  let staleButton = null;
+  function showStaleNotice() {
+    if (!host) return;
+    host.textContent = "";
+    iframe = null;
+    const t = native ? readTheme(native) : { surface: "rgb(255, 255, 255)", color: "rgb(13, 13, 13)", fontFamily: "system-ui" };
+    const box = document.createElement("div");
+    box.style.cssText = "display:block;width:100%;height:100%;margin:0;padding:0;border:0;";
+    const shadow = box.attachShadow({ mode: "closed" });
+    shadow.innerHTML = `<style>
+      .stale { box-sizing: border-box; display: flex; align-items: center; gap: 10px; min-height: 100%; margin: 0;
+        padding: 6px 10px; font: 13px/1.45 system-ui, sans-serif; }
+      .stale span { flex: 1; min-width: 0; }
+      .stale button { flex: none; font: inherit; padding: 4px 12px; border-radius: 8px; border: 1px solid rgba(127,127,127,0.55);
+        background: transparent; color: inherit; cursor: pointer; }
+    </style><div class="stale"><span></span><button type="button">読み込み直す</button></div>`;
+    const wrap = shadow.querySelector(".stale");
+    wrap.style.background = t.surface;
+    wrap.style.color = t.color;
+    if (t.fontFamily) wrap.style.fontFamily = t.fontFamily;
+    shadow.querySelector("span").textContent = STALE_TEXT;
+    staleButton = shadow.querySelector("button");
+    staleButton.addEventListener("click", (e) => { if (e.isTrusted) location.reload(); });
+    host.appendChild(box);
+    // 知らせが入る高さ。1 行の並びに入らなければ、place() が上に伸ばす (D-SC-17)
+    iframeHeight = Math.ceil(wrap.scrollHeight) || 40;
+    draftEmpty = false;
+    lastRect = "";
+    if (exposeForTests) host.setAttribute("data-sc-stale", "1");
+  }
+  function goStale() {
+    if (orphaned) return;
+    orphaned = true;
+    if (host && host.isConnected) showStaleNotice();
+    schedulePlace();
+  }
+  // テスト用: 「読み込み直す」ボタンの位置 (箱の左上からの相対) をホストの data 属性に写す
+  function exportStaleLayout() {
+    if (!exposeForTests || !host || !staleButton) return;
+    const h = host.getBoundingClientRect();
+    const b = staleButton.getBoundingClientRect();
+    host.dataset.staleButton = JSON.stringify([b.left - h.left, b.top - h.top, b.width, b.height].map(Math.round));
   }
 
   // ChatGPT の入力欄の高さを、iframe の下書きの高さに合わせる (D-SC-03, F-SC-15)。入力欄に min-height を
@@ -237,6 +297,7 @@
     host.style.width = Math.round(r.width) + "px";
     host.style.height = Math.round(h) + "px";
     if (exposeForTests) host.setAttribute("data-sc-rect", key);
+    if (orphaned) exportStaleLayout();
   }
   function schedulePlace() { if (placeTimer) return; placeTimer = requestAnimationFrame(() => { placeTimer = 0; place(); }); }
 
@@ -411,7 +472,7 @@
   window.addEventListener("dragover", (e) => { if (isFileDrag(e)) dragPassthrough(); }, true);
   window.addEventListener("drop", () => { dragPassUntil = 0; }, true); // 落とし終えたらすぐ戻す
   function pushTheme() {
-    if (!boundary || !native) return;
+    if (!boundary || !native || orphaned) return;
     const t = readTheme(native);
     // iframe の要素の color-scheme も中と同じにする (違うと、ブラウザが iframe の下に不透明な地を敷く)
     if (iframe && iframe.style.colorScheme !== t.scheme) iframe.style.colorScheme = t.scheme;
@@ -427,7 +488,7 @@
   function attach(el) {
     native = el;
     ensureHost();
-    if (!boundary) connectBoundary();
+    if (!boundary && !orphaned) connectBoundary();
     // ネイティブ入力欄にフォーカスが来たら iframe に移す (原文をネイティブに打たせない)
     native.addEventListener("focusin", redirectFocus);
     native.addEventListener("mousedown", onNativeDown, true);
@@ -437,14 +498,19 @@
     pushTheme();
     schedulePlace();
   }
-  function redirectFocus() { if (boundary) boundary.post("focus", {}); }
-  function onNativeDown(e) { if (active) { e.preventDefault(); if (boundary) boundary.post("focus", {}); } }
+  // 連絡が切れたあとは iframe に頼めないので、フォーカスは知らせのボタンへ (D-SC-21)
+  function focusComposer() {
+    if (orphaned) { if (staleButton) try { staleButton.focus(); } catch (_) {} return; }
+    if (boundary) boundary.post("focus", {});
+  }
+  function redirectFocus() { focusComposer(); }
+  function onNativeDown(e) { if (active) { e.preventDefault(); focusComposer(); } }
   function onNativeKey(e) {
     if (!active || committing) {
       // commit 中 (doCommit がボタンを押す瞬間) はネイティブのキーに触らない
       return;
     }
-    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); e.stopImmediatePropagation(); if (boundary) boundary.post("focus", {}); }
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); e.stopImmediatePropagation(); focusComposer(); }
   }
 
   function teardownOverlay() {
@@ -458,13 +524,15 @@
 
   // SPA の作り直し・表示変化に追従。ネイティブが差し替わったら貼り直す。
   function sync() {
+    if (!orphaned && !contextAlive()) goStale();
     const el = findNative();
     if (el && el !== native) { if (native) { restoreNativeHeight(); native.removeEventListener("focusin", redirectFocus); native.removeEventListener("mousedown", onNativeDown, true); native.removeEventListener("keydown", onNativeKey, true); } active = true; attach(el); }
     else if (el && !active) { active = true; host && (host.style.display = "block"); }
     else if (!el) { restoreNativeHeight(); native = null; if (host) host.style.display = "none"; reportLive(false); } // 入力欄が消えたら素通ししない
     if (active) schedulePlace();
     // 入力欄があり iframe も ready なら live を再確認 (SPA の作り直しからの復帰)。
-    reportLive(active && scReady && !!native);
+    // 連絡が切れたあとは知らせない (content.js も拡張機能の機能を使えず、設定を配り直せない)
+    if (!orphaned) reportLive(active && scReady && !!native);
   }
 
   let enabled = true; // secureComposerEnabled

@@ -90,6 +90,14 @@
   const DEBOUNCE_MS = 400;
   const MAX_CHARS = 20000;
   const TICK_MS = 1000;
+  // 拡張機能との連絡が切れたか (読み込み直し・更新・オフのあと、開いたままのタブに残った古い部品)。
+  // 切れたらオン/オフを切り替えたふりをせず、読み込み直すよう知らせる (docs/release-1.7.1.md の D-SC-22)
+  let stale = false;
+  const STALE_LABEL = "PII Guard が更新か停止されました。このタブを読み込み直してください";
+  const STALE_NOTICE = "PII Guard が更新か停止されたので、切り替えられないよ。このタブを読み込み直してね。";
+  function contextAlive() {
+    try { return !!(chrome.runtime && chrome.runtime.id); } catch (_) { return false; }
+  }
   const REVIEW_TIMEOUT_MS = 10 * 60 * 1000;
   // 動作ログ (docs/diagnostic-log.md)。コンソールには何も書かない
   const DL = window.PiiGuardDiagLog;
@@ -473,6 +481,7 @@
     };
     // 黄色 (オフで個人情報の可能性あり) のときは内訳を開く。それ以外はオン/オフの切り替え (D-29)
     ui.toggle.addEventListener("click", safe(ui.toggle, () => {
+      if (stale) { notice(STALE_NOTICE, "stale"); return; } // 保存できないので切り替えない
       if (warning()) {
         if (ui.popover.hidden) renderItems();
         ui.popover.hidden = !ui.popover.hidden;
@@ -580,7 +589,17 @@
   function render() {
     if (!ui) return;
     const t = ui.toggle;
-    if (attachWarning() && !offWarning()) {
+    if (stale) {
+      // 連絡が切れた: 黄色にして、押すと読み込み直すよう知らせる (D-SC-22)
+      t.setAttribute("data-state", "warning");
+      t.setAttribute("role", "button");
+      t.removeAttribute("aria-checked");
+      t.removeAttribute("aria-haspopup");
+      t.removeAttribute("aria-expanded");
+      t.setAttribute("aria-label", STALE_LABEL);
+      t.title = STALE_LABEL;
+      ui.popover.hidden = true;
+    } else if (attachWarning() && !offWarning()) {
       // 添付の通知。止めた / マスクせずに通した / 確認 OFF でマスクした。
       const msg = attachMsg(state.attachNotice);
       t.setAttribute("data-state", "warning");
@@ -1229,6 +1248,7 @@
     if (!state.enabled) scheduleScan(0);
   }
   function tick() {
+    if (!stale && !contextAlive()) { stale = true; render(); }
     if (!state.el || !state.el.isConnected || !isVisible(state.el)) {
       const el = findComposer();
       if (el !== state.el) attachTo(el);
