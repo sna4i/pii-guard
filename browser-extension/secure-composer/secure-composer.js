@@ -377,14 +377,51 @@
     e.preventDefault(); e.stopPropagation();
     flashStatus("ファイルはもう一度ドロップしてね。添付するときにマスクするよ。");
   }, true);
-  // ファイル/画像の貼り付けは iframe では添付できない。文字も一緒なら文字だけ貼る (Excel のセル等)。
+  // ファイルや画像だけの貼り付け (スクリーンショット、ファイラでコピーしたファイル) は、＋ ボタンやドラッグと同じく
+  // 添付の見張り (attachment-guard) を通して添付する (F-SC-31、D-SC-23)。中身は拡張機能の中の連絡路でアダプタに
+  // 渡す。window.postMessage はページのスクリプトも受け取れるので使わない (F-SC-32)。
+  // 文字も一緒なら文字だけ貼る (Excel のセル等)。
+  const PASTE_MAX_FILES = 10;
+  const PASTE_MAX_BYTES = 20 * 1024 * 1024;
+  const PASTE_FALLBACK = "添付できなかったよ。＋ ボタンかドラッグ&ドロップで添付してね。";
   editor.addEventListener("paste", (e) => {
     const cd = e.clipboardData;
     if (!cd || !cd.files || cd.files.length === 0) return;
     if (Array.prototype.includes.call(cd.types || [], "text/plain")) return;
     e.preventDefault();
-    flashStatus("ファイルや画像は ＋ ボタンかドラッグ&ドロップで添付してね。");
+    attachPasted(Array.from(cd.files));
   });
+  function toBase64(file) {
+    return new Promise((resolve, reject) => {
+      const r = new FileReader();
+      r.onload = () => resolve(String(r.result).replace(/^data:[^,]*,/, ""));
+      r.onerror = () => reject(r.error || new Error("read failed"));
+      r.readAsDataURL(file);
+    });
+  }
+  let pasting = false;
+  async function attachPasted(files) {
+    if (pasting) return;
+    const total = files.reduce((n, f) => n + (f.size || 0), 0);
+    if (files.length > PASTE_MAX_FILES || total > PASTE_MAX_BYTES) {
+      flashStatus("貼り付けたファイルが大きすぎるよ。＋ ボタンかドラッグ&ドロップで添付してね。");
+      return;
+    }
+    pasting = true;
+    try {
+      const payload = [];
+      for (const f of files) payload.push({ name: f.name || "image.png", type: f.type || "", lastModified: f.lastModified || Date.now(), data: await toBase64(f) });
+      const resp = await withBusyNotice(() => boundary.request("paste-files", { files: payload }, 30000), "添付中…");
+      const r = resp && resp.ok && resp.result ? resp.result : null;
+      if (!r || r.reason === "no-target" || !(r.attached > 0 || r.blocked > 0)) flashStatus(PASTE_FALLBACK);
+      else if (r.blocked > 0) flashStatus("伏せられないファイル (画像など) は、マスキングがオンの間は添付しないよ。");
+    } catch (e) {
+      dl("error", errorFields(e));
+      flashStatus(PASTE_FALLBACK);
+    } finally {
+      pasting = false;
+    }
+  }
 
   // ---- content script からの要求 ------------------------------------------------
   boundary.on("theme", (t) => { applyTheme(t); return true; });

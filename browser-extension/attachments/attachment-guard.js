@@ -270,6 +270,28 @@
     if (r.maskedCount || r.blocked.length) notifyPill(r, "", "paste");
   }
 
+  // ---- ChatGPT の保護入力欄に貼られたファイル (docs/release-1.7.1.md の D-SC-23) ----------------
+  // 保護入力欄 (iframe) が拡張機能の中の連絡路でアダプタに渡し、アダプタがここを呼ぶ (同じ ISOLATED world)。
+  // drop と同じく、伏せて (オン) からページのファイルの入力に載せる。渡し先が無ければ送らない (fail-closed)
+  async function attachFiles(files, how) {
+    const r = await processFiles(files);
+    let reason = "";
+    if (r.masked.length) {
+      const input = findUploadInput(r.masked);
+      if (input) {
+        reentrant.add(input);
+        setInputFiles(input, r.masked);
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      } else {
+        r.blocked.push(...r.masked.map((f) => f.name));
+        r.masked = [];
+        reason = "no-target";
+      }
+    }
+    notifyPill(r, reason, how);
+    return { attached: r.masked.length, blocked: r.blocked.length, reason };
+  }
+
   // document_start で、ページのスクリプトより先に window の capture に付ける。
   window.addEventListener("change", onChange, true);
   window.addEventListener("drop", onDrop, true);
@@ -278,5 +300,5 @@
 
   // テスト用の最小公開
   if (typeof module === "object" && module.exports) module.exports = { isText, processFiles, decodeText, _internal: { settings } };
-  NS.attachmentGuard = { isText };
+  NS.attachmentGuard = { isText, attachFiles };
 })();

@@ -444,6 +444,26 @@
     boundary.on("blocked", () => { /* iframe が保護を保証できない: 重ねを外して従来経路に委ねる */ teardownOverlay(); return true; });
     // iframe の上にファイルのドラッグが来た (iframe はファイルを受けない)。透過にしてページ側へ通す。
     boundary.on("dragfiles", () => { dragPassthrough(); return true; });
+    // 保護入力欄に貼られたファイル (D-SC-23)。添付の見張り (同じ ISOLATED world) に渡し、＋ ボタンや
+    // ドラッグと同じく、伏せて (オン) から ChatGPT のファイルの入力に載せる。中身はページを通らない
+    boundary.on("paste-files", async (p) => {
+      const guard = window.__localMaskMCP && window.__localMaskMCP.attachmentGuard;
+      if (!guard || typeof guard.attachFiles !== "function") return { attached: 0, blocked: 0, reason: "no-guard" };
+      const files = (p && Array.isArray(p.files) ? p.files : []).slice(0, 10).map(fileFromPayload).filter(Boolean);
+      if (!files.length) return { attached: 0, blocked: 0, reason: "empty" };
+      return guard.attachFiles(files, "paste");
+    });
+  }
+  // 連絡路で届いたファイル ({ name, type, lastModified, data: Base64 }) を File に戻す
+  function fileFromPayload(f) {
+    if (!f || typeof f.data !== "string") return null;
+    try {
+      const bin = atob(f.data);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      const name = typeof f.name === "string" && f.name ? f.name : "pasted";
+      return new File([bytes], name, { type: typeof f.type === "string" ? f.type : "", lastModified: Number(f.lastModified) || Date.now() });
+    } catch (_) { return null; }
   }
 
   // ---- ファイルのドラッグ (F-SC-13) ----------------------------------------------
