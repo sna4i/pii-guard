@@ -22,7 +22,9 @@
 //   - ファイルの貼り付け: 同じく止めて、マスク済みの File (と一緒に貼られた文字) で投げ直す。
 //   - ダイアログ (プロジェクトのファイル追加など) への drop は、行き先を取り違えないよう止めて知らせる。
 //   - マスキング ON: テキストは中身とファイル名をマスクする。バイナリ/巨大/マスク失敗/文字コード不明は
-//     fail-closed で止め、ピルに警告。マスキング OFF: 利用者の選択どおり通し、「未マスク」を知らせる。
+//     伏せられないので、ブラウザの確認で聞き、選んだときだけ元のまま通して「未マスク」を知らせる。選ばなければ
+//     fail-closed で止め、ピルに警告 (1.7.1 の D-SC-24。1.7.0 は聞かずに止めていた)。
+//     マスキング OFF: 利用者の選択どおり通し、「未マスク」を知らせる。
 //   - エンジンも除外リスト等の機密も ISOLATED world 側を使う (MAIN world に出さない, V-02)。
 "use strict";
 
@@ -104,11 +106,25 @@
     return { file: out, count };
   }
 
+  // 伏せられないファイルを、マスキングがオンでも添付するかを利用者に聞く (docs/release-1.7.1.md の D-SC-24)。
+  // ブラウザの確認 (window.confirm) はページの外の表示で、ページのスクリプトからは答えられず偽れない。
+  // ファイル名は確認の中に出すだけで、どこにも送らない。出せない・例外・キャンセルは止める (fail-closed)
+  const CONFIRM_NAMES = 5;
+  function confirmUnmaskable(files) {
+    if (typeof window.confirm !== "function") return false;
+    const names = files.slice(0, CONFIRM_NAMES).map((f) => "・" + String(f.name || "(名前なし)").slice(0, 60));
+    if (files.length > CONFIRM_NAMES) names.push(`ほか ${files.length - CONFIRM_NAMES} 件`);
+    const msg = `PII Guard: 次のファイルは中身を伏せられません (画像・PDF など)。\n${names.join("\n")}\n\n` +
+      "マスキングはオンですが、伏せずにこのまま添付しますか?";
+    try { return window.confirm(msg) === true; } catch (_) { return false; }
+  }
+
   // 元ファイル群 → { masked: File[] (渡すもの), blocked: string[], unmasked: string[], maskedCount }。
   async function processFiles(fileList) {
     const masked = [];
     const blocked = [];
     const unmasked = [];
+    const unmaskable = [];
     let maskedCount = 0;
     for (const f of Array.from(fileList || [])) {
       if (!settings.enabled) {
@@ -116,10 +132,15 @@
         masked.push(f); unmasked.push(f.name);
       } else if (isText(f) && f.size <= MAX_TEXT_BYTES && engineReady()) {
         try { const m = await maskOneFile(f); masked.push(m.file); maskedCount += m.count; }
-        catch (_) { blocked.push(f.name); }
+        catch (_) { unmaskable.push(f); } // 読めない文字コード/マスクの失敗
       } else {
-        blocked.push(f.name); // バイナリ/巨大/エンジン不在 → マスク不能なのでブロック
+        unmaskable.push(f); // バイナリ/巨大/エンジン不在
       }
+    }
+    // 伏せられないファイルは、1 回の添付につき 1 回だけ聞く。選んだら元のまま渡し、「未マスク」として知らせる
+    if (unmaskable.length) {
+      if (confirmUnmaskable(unmaskable)) for (const f of unmaskable) { masked.push(f); unmasked.push(f.name); }
+      else for (const f of unmaskable) blocked.push(f.name);
     }
     return { masked, blocked, unmasked, maskedCount };
   }

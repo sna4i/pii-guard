@@ -63,20 +63,52 @@ test("T-SC-24 マスキングがオフなら、保護入力欄に貼った画像
   assert.doesNotMatch(sc.status, /＋ ボタンかドラッグ/, "添付できたのに案内が出ている");
 });
 
-test("T-SC-24b マスキングがオンなら、貼った画像は添付せず、入力欄の下とアイコンで知らせる", async () => {
+// 確認 (window.confirm、ページに出る) を待って、答える。出た文を返す (出なければ null)
+function answerConfirm(page, accept) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(null), 5000);
+    page.once("dialog", async (d) => {
+      clearTimeout(timer);
+      const msg = d.message();
+      if (accept) await d.accept(); else await d.dismiss();
+      resolve(msg);
+    });
+  });
+}
+
+test("T-SC-24b マスキングがオンなら、貼った画像は確認が出て、キャンセルすると添付せず知らせる", async () => {
   await h.setStorage({ enabled: true });
   h.server.clear();
   const { page, frame } = await openReady();
+  const asked = answerConfirm(page, false);
   await pasteFile(frame, "shot.png", "image/png", PNG);
+  const msg = await asked;
   await sleep(2000);
   const up = await uploads(page, "attach-upload");
   const sc = await scSnap(frame);
   const tone = await page.evaluate((sel) => { const el = document.querySelector(sel); return el ? el.dataset.tone : null; }, PILL_HOST);
   await page.close();
-  assert.deepEqual(up, [], "伏せられない画像が添付された");
-  assert.equal(h.server.byKind("files-content").length, 0, "伏せられない画像がアップロードされた");
-  assert.match(sc.status, /伏せられないファイル/, `入力欄の下で知らせていない: ${JSON.stringify(sc)}`);
+  assert.ok(msg && msg.includes("shot.png"), `確認が出ない: ${JSON.stringify(msg)}`);
+  assert.deepEqual(up, [], "キャンセルしたのに画像が添付された");
+  assert.equal(h.server.byKind("files-content").length, 0, "キャンセルしたのに画像がアップロードされた");
+  assert.match(sc.status, /伏せられないファイルは添付しなかった/, `入力欄の下で知らせていない: ${JSON.stringify(sc)}`);
   assert.equal(tone, "warning", "アイコンが黄色になっていない");
+});
+
+test("T-SC-24d マスキングがオンでも、貼った画像は確認で OK を選ぶと添付する", async () => {
+  await h.setStorage({ enabled: true });
+  h.server.clear();
+  const { page, frame } = await openReady();
+  const asked = answerConfirm(page, true);
+  await pasteFile(frame, "shot.png", "image/png", PNG);
+  const msg = await asked;
+  await sleep(2500);
+  const up = await uploads(page, "attach-upload");
+  const sc = await scSnap(frame);
+  await page.close();
+  assert.ok(msg && msg.includes("shot.png"), `確認が出ない: ${JSON.stringify(msg)}`);
+  assert.deepEqual(up, ["shot.png"], `OK を選んだのに添付されない (${JSON.stringify(sc)})`);
+  assert.doesNotMatch(sc.status, /添付できなかった|添付しなかった/, "添付できたのに失敗の案内が出ている");
 });
 
 test("T-SC-24c マスキングがオンなら、貼ったテキストのファイルは伏せて添付し、中身はページに見えない", async () => {

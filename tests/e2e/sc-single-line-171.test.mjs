@@ -62,7 +62,7 @@ test("T-SC-22 1 行の並びで案内が出ても、案内が全部見え、文�
   const m = await sc(frame);
   const pg = await layout(page);
   await page.close();
-  assert.match(m.statusText, /画像/, `前提: 案内が出ている (${JSON.stringify(m.statusText)})`); // マスキングがオンなので「伏せられないファイル (画像など)…」
+  assert.match(m.statusText, /添付/, `前提: 案内が出ている (${JSON.stringify(m.statusText)})`); // オンなので確認が出て、テストでは自動でキャンセルされ「伏せられないファイルは添付しなかったよ。」
   assert.ok(m.status.top >= -1 && m.status.bottom <= m.vh + 1, `案内が切れている: ${JSON.stringify({ status: m.status, vh: m.vh })}`);
   assert.ok(m.edScroll <= m.edClient + 1, `文の欄がスクロールする: ${m.edScroll} > ${m.edClient}`);
   assert.ok(Math.abs(pg.host.top + m.ed.bottom - pg.inputBottom) <= 2, `文の欄の下の端が入力欄の行に揃っていない: ${JSON.stringify({ host: pg.host, ed: m.ed, inputBottom: pg.inputBottom })}`);

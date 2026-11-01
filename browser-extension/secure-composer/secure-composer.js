@@ -411,10 +411,11 @@
     try {
       const payload = [];
       for (const f of files) payload.push({ name: f.name || "image.png", type: f.type || "", lastModified: f.lastModified || Date.now(), data: await toBase64(f) });
-      const resp = await withBusyNotice(() => boundary.request("paste-files", { files: payload }, 30000), "添付中…");
+      // 伏せられないファイルがあると、ページに確認が出て利用者の答えを待つので、待つ上限は長くとる (D-SC-24)
+      const resp = await withBusyNotice(() => boundary.request("paste-files", { files: payload }, 600000), "添付中…");
       const r = resp && resp.ok && resp.result ? resp.result : null;
       if (!r || r.reason === "no-target" || !(r.attached > 0 || r.blocked > 0)) flashStatus(PASTE_FALLBACK);
-      else if (r.blocked > 0) flashStatus("伏せられないファイル (画像など) は、マスキングがオンの間は添付しないよ。");
+      else if (r.blocked > 0) flashStatus("伏せられないファイルは添付しなかったよ。");
     } catch (e) {
       dl("error", errorFields(e));
       flashStatus(PASTE_FALLBACK);
