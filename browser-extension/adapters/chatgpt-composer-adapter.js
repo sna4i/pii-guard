@@ -426,7 +426,12 @@
 
   function connectBoundary() {
     boundary = SC.boundary.connect("sc-content");
-    boundary.on("commit", (payload) => doCommit(payload));
+    boundary.on("commit", async (payload) => {
+      const r = await doCommit(payload);
+      // 送れたら、アイコンの添付の警告を消してもらう (添付は送った文と一緒に出ていった、D-SC-25)
+      if (r && r.committed) notePillSent();
+      return r;
+    });
     boundary.on("resize", (p) => {
       if (p && typeof p.height === "number") { iframeHeight = p.height; draftEmpty = p.empty === true; schedulePlace(); }
       return true;
@@ -497,6 +502,12 @@
     // iframe の要素の color-scheme も中と同じにする (違うと、ブラウザが iframe の下に不透明な地を敷く)
     if (iframe && iframe.style.colorScheme !== t.scheme) iframe.style.colorScheme = t.scheme;
     boundary.post("theme", t);
+  }
+  function notePillSent() {
+    try {
+      const ct = window.__localMaskMCP && window.__localMaskMCP.composerToggle;
+      if (ct && typeof ct.noteSent === "function") ct.noteSent();
+    } catch (_) { /* 何もしない */ }
   }
   function setPillDraftInfo(p) {
     try {
