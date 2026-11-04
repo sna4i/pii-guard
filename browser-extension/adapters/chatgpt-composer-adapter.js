@@ -6,6 +6,8 @@
 //   - 見た目 (フォント・色・入力面の色・余白・プレースホルダ) を測って iframe に渡す
 //   - iframe からの commit (送信操作) で、マスク済み(ON)/原文(OFF) をネイティブに書いて正規送信する
 //   - ページの SPA 作り直し・スクロール・リサイズに追従。原文はネイティブにも MAIN world にも置かない
+//   - ChatGPT の入力欄を下書きの高さまで伸ばす。1 行の並びでは、合成の Shift+Enter で空の段落を足してもらい、ChatGPT
+//     自身に 2 段の並びに替えてもらう (文字は入れない。docs/release-1.7.1.md の D-SC-27〜D-SC-31)
 //
 // secureComposerEnabled (既定 true) が false のときは何もしない (従来の injected.js 経路に任せる)。
 "use strict";
@@ -39,8 +41,16 @@
   let draftEmpty = true;      // iframe の下書きが空か (空なら ChatGPT の入力欄の高さを元に戻す)
   let appliedMinH = 0;        // ChatGPT の入力欄に付けた高さ (px、枠と余白を含む)。0 なら付けていない
   let appliedW = 0;           // そのときの入力欄の幅 (px)
+  let nativeStyled = false;   // ChatGPT の入力欄に高さの style を付けたか (外すときに、ChatGPT 自身の style には触れない)
   let nativeCap = 0;          // ChatGPT の入力欄が伸びきらなかったときの見えている高さ (iframe の上限にする)
   let raisedUp = false;       // 保護入力欄を入力欄の行から上に伸ばしているか (ChatGPT の入力欄が伸びない並び、D-SC-17)
+  // 1 行の並びでは、ChatGPT の入力欄に空の段落を足してもらい、ChatGPT 自身に 2 段の並びに替えてもらう (D-SC-27)
+  const EXPAND_WAIT_MS = 800; // Shift+Enter を送ってから、並びが替わるのを待つ時間
+  let expandAt = 0;           // Shift+Enter を送った時刻。0 なら待っていない
+  let expandFailed = false;   // 送っても替わらなかった (D-SC-31)。下書きが空になるか入力欄が替わるまで送り直さない
+  let expandTimer = 0;
+  let lastLayout = "";        // ChatGPT の入力欄の並び。替わったら余白などを測り直す (D-SC-30)
+  let sizeObserver = null;    // 入力欄と form の大きさの変化 (並びが替わる間の動き) を見る (D-SC-30)
   // 上に伸ばしている間の見た目。会話の上に重なった板に見えるように、角丸と薄い縁と影を付ける
   const RAISED_SHADOW = "0 0 0 1px rgba(127,127,127,0.28), 0 -6px 18px rgba(0,0,0,0.22)";
   const E2E_FLAG = "__pii_guard_e2e";
@@ -202,34 +212,118 @@
     host.dataset.staleButton = JSON.stringify([b.left - h.left, b.top - h.top, b.width, b.height].map(Math.round));
   }
 
-  // ChatGPT の入力欄の高さを、iframe の下書きの高さに合わせる (D-SC-03, F-SC-15)。入力欄に min-height を
-  // 付けると、ChatGPT の入力欄の箱ごと伸びる (2026-10-28 に利用者の画面で確認)。文字は入れない。
+  // ---- ChatGPT の入力欄の並び (D-SC-27〜D-SC-31) ------------------------------------
+  // ChatGPT は、入力欄の中身 (段落が 2 つ以上・改行・1 行からあふれた文) で 1 行の並びと 2 段の並びを決め、空なら
+  // 1 行の並びに戻す。1 行の並びの入力欄は高さが固定で、min-height を付けても伸びない (2026-11-04 に実物の CSS と
+  // JavaScript で確認)。保護入力欄を使う間は ChatGPT の入力欄が空なので、空の段落を 1 つ足してもらって替える
+
+  // 並び: いちばん近い data-composer-input-layout、無ければ data-composer-layout ("single-line" / "multiline")
+  function composerLayout(el) {
+    const box = el.closest("[data-composer-input-layout]");
+    if (box) return box.getAttribute("data-composer-input-layout") || "";
+    const lay = el.closest("[data-composer-layout]");
+    return lay ? lay.getAttribute("data-composer-layout") || "" : "";
+  }
+  // 段落を足して並びを替えてもらえるのは ProseMirror の編集欄だけ (ログインなしの textarea は替えられない)
+  const canExpand = (el) => !!el && el.isContentEditable && el.classList.contains("ProseMirror");
+  const paragraphCount = (el) => el.querySelectorAll(":scope > p").length;
+  // 入力欄が空の段落だけでできているか (足した段落を戻してよいか。文字のある入力欄には触れない)
+  function onlyEmptyParagraphs(el) {
+    const kids = Array.from(el.children);
+    return kids.length > 0 && kids.every((c) => c.tagName === "P" && !(c.textContent || "").trim());
+  }
+  // 合成のキー (泡立たない keydown) を ChatGPT の入力欄に送る。受けるのは編集欄の ProseMirror の keymap だけで、
+  // フォーカスは動かない (保護入力欄の変換も切れない)。DOM に段落を直接足すと、ProseMirror は Enter のキー (送信) と
+  // 読み替えるので使わない (D-SC-27)
+  function sendKey(el, key, shift) {
+    const keyCode = key === "Enter" ? 13 : key === "Backspace" ? 8 : 46;
+    el.dispatchEvent(new KeyboardEvent("keydown", { key, code: key, keyCode, which: keyCode, shiftKey: !!shift, bubbles: false, cancelable: true }));
+  }
+  // 2 段の並びに替えてもらう (D-SC-27)。替わるのを待っている間は true。替えられない、または 800ms たっても替わらない
+  // ときは false (保護入力欄を上に伸ばす、D-SC-31)
+  function requestExpand() {
+    if (committing) return true; // 送っている途中は、入力欄に何も送らず、今の重ね方のまま
+    if (expandFailed || !canExpand(native)) return false;
+    const now = Date.now();
+    if (!expandAt) {
+      expandAt = now;
+      sendKey(native, "Enter", true);
+      clearTimeout(expandTimer);
+      expandTimer = setTimeout(schedulePlace, EXPAND_WAIT_MS + 20);
+      return true;
+    }
+    if (now - expandAt < EXPAND_WAIT_MS) return true;
+    expandAt = 0;
+    expandFailed = true;
+    if (window.PiiGuardDiagLog) window.PiiGuardDiagLog.log("composer.not_expanded", {});
+    return false;
+  }
+  // 足した空の段落を戻す (D-SC-29)。ChatGPT は 1 行の並びに戻る。空の段落だけで 2 つ以上あるときだけ送る
+  function collapseNative(el) {
+    expandAt = 0;
+    if (!canExpand(el) || !el.isConnected || committing) return;
+    for (let i = 0; i < 4 && paragraphCount(el) > 1 && onlyEmptyParagraphs(el); i++) {
+      const n = paragraphCount(el);
+      sendKey(el, "Backspace");
+      if (paragraphCount(el) >= n) sendKey(el, "Delete");
+      if (paragraphCount(el) >= n) break; // 効かない (作りが変わった)。何度も送らない
+    }
+  }
+
+  // ChatGPT の入力欄の高さを、iframe の下書きの高さに合わせる (D-SC-03, F-SC-15)。2 段の並びでは、入力欄に
+  // min-height を付けると ChatGPT の入力欄の箱ごと伸びる (2026-10-28 に利用者の画面で確認)。文字は入れない。
   // 幅が付けたときのままなら、下書きの高さにそのまま合わせる。幅が変わったとき (ChatGPT が並びを切り替えた
-  // とき) は、1 行分を超えて低くなるまで縮めない。高さと並びが互いを変えて、行ったり来たりしないようにする
+  // とき) は、1 行分を超えて低くなるまで縮めない。高さと並びが互いを変えて、行ったり来たりしないようにする。
+  // 足した空の段落があるうちは height も付け、空の段落 (2 行分) のぶんで高くならないようにする (D-SC-28)
   function fitNativeHeight() {
     if (!native) return;
     if (draftEmpty || !iframeHeight) {
-      if (appliedMinH) { native.style.minHeight = ""; appliedMinH = 0; appliedW = 0; }
+      clearNativeStyle();
       if (nativeCap) { nativeCap = 0; pushTheme(); }
+      collapseNative(native);
+      expandFailed = false;
       return;
     }
     const cs = getComputedStyle(native);
     const w = Math.round(native.getBoundingClientRect().width);
     const slack = w === appliedW ? 0 : (parseFloat(cs.lineHeight) || 24);
     const lost = appliedMinH > 0 && !native.style.minHeight; // ページが style を書き換えて、付けた高さが消えた
-    if (lost || iframeHeight > appliedMinH || iframeHeight < appliedMinH - slack) {
+    const padded = paragraphCount(native) > 1 && onlyEmptyParagraphs(native);
+    const heightOff = padded !== !!native.style.height; // 足した段落が増えたか消えたのに、height が合っていない
+    if (lost || heightOff || iframeHeight > appliedMinH || iframeHeight < appliedMinH - slack) {
       const extra = cs.boxSizing === "border-box" ? 0
         : (parseFloat(cs.paddingTop) || 0) + (parseFloat(cs.paddingBottom) || 0) + (parseFloat(cs.borderTopWidth) || 0) + (parseFloat(cs.borderBottomWidth) || 0);
+      // ChatGPT の入力欄のもとの min-height (2 段の並びで 40px など) を、付けたものを外して測る。下書きが低くても
+      // それより低くしない (ChatGPT に直接打ったときと同じ高さ)
+      native.style.minHeight = "";
+      native.style.height = "";
+      const base = parseFloat(getComputedStyle(native).minHeight) || 0;
+      const target = Math.max(0, iframeHeight - extra, base);
       appliedMinH = iframeHeight;
       appliedW = w;
-      native.style.minHeight = Math.max(0, iframeHeight - extra) + "px";
+      nativeStyled = true;
+      native.style.minHeight = target + "px";
+      native.style.height = padded ? target + "px" : "";
+      native.style.overflow = padded ? "hidden" : "";
     }
   }
-  function restoreNativeHeight() {
-    if (native && appliedMinH) native.style.minHeight = "";
+  function clearNativeStyle() {
+    if (native && nativeStyled) {
+      native.style.minHeight = "";
+      native.style.height = "";
+      native.style.overflow = "";
+    }
+    nativeStyled = false;
     appliedMinH = 0;
     appliedW = 0;
+  }
+  function restoreNativeHeight() {
+    clearNativeStyle();
     nativeCap = 0;
+    if (native) collapseNative(native);
+    expandFailed = false;
+    lastLayout = "";
+    clearTimeout(expandTimer);
   }
   // 入力欄の見えている範囲。ChatGPT は入力欄の親 (max-height と overflow:auto) で入力欄を切り取るので、
   // 親の上限より高くすると、入力欄の矩形は親の外 (下の段のボタンの上) にはみ出す。切り取る祖先と重ねる
@@ -257,28 +351,37 @@
 
   function place() {
     if (!active || !native || !native.isConnected) return;
+    // 並びが替わったら、ChatGPT の入力欄の余白・もとの高さ・上限を測り直す (D-SC-30)
+    const layout = composerLayout(native);
+    if (layout !== lastLayout) {
+      const changed = lastLayout !== "";
+      lastLayout = layout;
+      if (layout !== "single-line") { expandAt = 0; clearTimeout(expandTimer); }
+      if (changed) { appliedMinH = 0; appliedW = 0; nativeCap = 0; pushTheme(); }
+    }
     fitNativeHeight();
     const r = visibleRect(native);
     if (r.width < 40 || r.height < 8) { host && (host.style.display = "none"); return; }
     // 保護入力欄は ChatGPT の入力欄の見えている範囲にぴったり重ねる。要る高さに足りないとき:
+    //  - 1 行の並び: ChatGPT の入力欄に空の段落を足してもらい、2 段の並びに替えてもらう (D-SC-27)。替わるまで
+    //    (0.8 秒まで) は今の行に重ねたまま
     //  - 2 行分以上見えている (2 段の並びで ChatGPT の上限に達した): その高さを iframe の上限として渡し、
     //    iframe の中でスクロールさせる (D-SC-03)
-    //  - 2 行分も見えない、または 1 行の並び (data-composer-layout="single-line") で、ChatGPT の入力欄が伸びない:
-    //    下の端を入力欄の行に置いたまま、保護入力欄を上に伸ばす。高さは画面の 40% まで (D-SC-17)
+    //  - 1 行の並びが替わらない (入力欄が ProseMirror でない、または替わらなかった)、2 行分も見えない並び:
+    //    下の端を入力欄の行に置いたまま、保護入力欄を上に伸ばす。高さは画面の 40% まで (D-SC-17, D-SC-31)
     let top = r.top; // ネイティブの入力面の上端に合わせる
     let h = r.height;
     let up = false;
     if (iframeHeight > r.height + 2 && !draftEmpty) {
-      const layoutEl = native.closest("[data-composer-layout]");
-      const singleLine = !!layoutEl && layoutEl.getAttribute("data-composer-layout") === "single-line";
-      if (r.height >= twoLines(native) && !singleLine) {
-        const cap = Math.round(r.height);
-        if (cap !== nativeCap) { nativeCap = cap; pushTheme(); }
-      } else {
+      const single = layout === "single-line";
+      if (single ? !requestExpand() : r.height < twoLines(native)) {
         up = true;
         const bottom = r.top + r.height;
         top = Math.max(8, bottom - Math.min(iframeHeight, Math.round(window.innerHeight * 0.4)));
         h = bottom - top;
+      } else if (!single) {
+        const cap = Math.round(r.height);
+        if (cap !== nativeCap) { nativeCap = cap; pushTheme(); }
       }
     }
     if (up !== raisedUp) {
@@ -516,9 +619,19 @@
     } catch (_) { /* 何もしない */ }
   }
 
+  // 並びが替わる間 (ChatGPT は高さを 0.22 秒かけて動かす) も重ね直す (D-SC-30)。入力欄、入力欄の箱、form の
+  // 大きさが変わったら、次の描画で重ね直す
+  function observeSizes(el) {
+    if (typeof ResizeObserver !== "function") return;
+    if (!sizeObserver) sizeObserver = new ResizeObserver(() => schedulePlace());
+    sizeObserver.disconnect();
+    for (const t of [el, el.closest("[data-composer-input-layout]"), el.closest("form")]) if (t) sizeObserver.observe(t);
+  }
+
   function attach(el) {
     native = el;
     ensureHost();
+    observeSizes(el);
     if (!boundary && !orphaned) connectBoundary();
     // ネイティブ入力欄にフォーカスが来たら iframe に移す (原文をネイティブに打たせない)
     native.addEventListener("focusin", redirectFocus);

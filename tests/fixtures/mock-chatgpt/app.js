@@ -21,8 +21,12 @@
   // 角丸の箱 (背景色) は入力欄の 7 段上、<html class="chatgpt-theme" data-theme="dark"> で color-scheme: dark。
   // 入力欄に min-height を付けると、箱ごと上に伸びる (下に寄せた縦の並び)。?pill=translucent で箱を半透明にする
   // single2026: 2026-10-30 の利用者のスクショの「1 行の並び」(＋、文、「高」、マイク、音声のボタンが 1 行)。
-  // 入力欄の親が 1 行分で切り取り、入力欄に min-height を付けても見えている範囲は増えない (症状からの仮定。
-  // 実物の切り取り方は未確認)
+  // 作りと並びの決め方は、2026-11-04 に読んだ実物の CSS と JavaScript (ログインなしの /images が読み込む、ログイン後と
+  // 同じ入力欄の部品) を写す (docs/release-1.7.1.md の「1 行の並びで、ChatGPT の入力欄が伸びない」):
+  //   - 1 行の並びでは入力欄の箱の高さが 36px に固定で、入力欄に min-height を付けても伸びない (server.mjs の CSS)
+  //   - 段落が 2 つ以上か改行があると 2 段の並び、文が 1 行からあふれても 2 段の並び。空になると 1 行の並びに戻る
+  //   - Shift+Enter で段落を分け、空の段落は Backspace / Delete でつなぐ (合成のキーも受け付ける。?noSplit=1 なら
+  //     合成の Shift+Enter を受け付けない)
   const VARIANT = ["loggedout", "thread2026", "single2026"].includes(q.get("variant")) ? q.get("variant") : "loggedin";
   const FLAGS = {
     telemetry: q.get("telemetry") === "1",
@@ -38,6 +42,8 @@
     stopSharesId: q.get("stopSharesId") === "1",
     // 送信ボタンは文字が入ってから 0.3 秒後に出る (React の描き直しを真似る)。合成した Enter のキーは受け付けない (T-SC-21d)
     lateSendButton: q.get("lateSendButton") === "1",
+    // single2026: 合成した Shift+Enter で段落を分けない (ChatGPT の作りが変わったときを真似る、T-SC-25e)
+    noSplit: q.get("noSplit") === "1",
   };
   const PREPARE_DEBOUNCE_MS = 350;
   const MODEL = "gpt-6-thinking";
@@ -84,7 +90,49 @@
     if (editor.tagName === "TEXTAREA") editor.value = "";
     else editor.innerHTML = "<p><br></p>";
     refreshButtons();
+    updateLayout();
   }
+
+  // ---- single2026 の並び (実物の決め方を写す) ---------------------------------------
+  // 実物 (2026-11-04): 段落が 2 つ以上か文に改行があれば multiline、文が 1 行からあふれたら multiline。
+  // 文が無ければ single-line に戻る。一度 multiline になったら、空になるまで戻らない
+  let fitsSingleLine = true;
+  let curLayout = "single-line";
+  const paragraphs = () => (editor ? Array.from(editor.querySelectorAll(":scope > p")) : []);
+  function updateLayout() {
+    if (VARIANT !== "single2026" || !editor) return;
+    const ps = paragraphs();
+    const text = ps.map((p) => p.textContent).join("\n");
+    const kind = ps.length > 1 || text.includes("\n") ? "multiline" : text.trim() ? "single-line" : "empty";
+    if (kind === "empty") fitsSingleLine = true;
+    if (kind === "multiline") fitsSingleLine = false;
+    // 1 行の並びで文があふれた (入力欄の中の文の高さが行の高さを超えた)
+    if (kind === "single-line" && curLayout === "single-line" && ps[0] && ps[0].scrollHeight > 24 * 1.5) fitsSingleLine = false;
+    setLayout(kind !== "multiline" && fitsSingleLine ? "single-line" : "multiline");
+  }
+  function setLayout(layout) {
+    if (layout === curLayout) return;
+    curLayout = layout;
+    for (const el of root.querySelectorAll("[data-composer-layout]")) el.setAttribute("data-composer-layout", layout);
+    const rows = root.querySelector("[data-composer-rows]");
+    if (rows) rows.setAttribute("data-composer-rows", layout === "multiline" ? "stacked" : "inline");
+    const box = root.querySelector("[data-composer-input-layout]");
+    if (box) box.setAttribute("data-composer-input-layout", layout);
+    log("layout", { layout });
+  }
+  // ProseMirror の Shift+Enter (段落を分ける)。入力欄にフォーカスが無ければ最後の段落のあとに足す
+  function splitParagraph() {
+    const p = document.createElement("p");
+    p.appendChild(document.createElement("br"));
+    const sel = window.getSelection();
+    const ps = paragraphs();
+    const inEditor = sel && sel.anchorNode && editor.contains(sel.anchorNode);
+    const at = (inEditor && ps.find((x) => x.contains(sel.anchorNode))) || ps[ps.length - 1];
+    if (at) at.after(p); else editor.appendChild(p);
+    log("split", { paragraphs: paragraphs().length });
+    updateLayout();
+  }
+  const onlyEmptyParagraphs = () => Array.from(editor.children).every((c) => c.tagName === "P" && !c.textContent.trim());
   let lateTimer = 0;
   function refreshButtons() {
     const has = editorText().trim().length > 0;
@@ -186,7 +234,9 @@
     html.className = "chatgpt-theme";
     html.setAttribute("data-theme", "dark");
     html.style.colorScheme = "dark";
-    document.body.classList.add("v2026");
+    document.body.classList.add("v2026", "single2026");
+    fitsSingleLine = true;
+    curLayout = "single-line";
     root.innerHTML = `<form data-composer-placement="home" class="relative flex flex-col gap-2" data-type="unified-composer"><div class="ComposerModeSurface-lVLm7j">
 <div class="pill2026"><div data-composer-layout="single-line" data-composer-body="" class="ComposerLayoutBody-uBBf1A">
 <div data-composer-footer-responsive="" data-composer-layout="single-line" data-composer-rows="inline" data-composer-spacing="default">
@@ -224,6 +274,20 @@
     }, true);
     editor.addEventListener("input", onInput);
     editor.addEventListener("keydown", (e) => {
+      if (VARIANT === "single2026" && e.key === "Enter" && e.shiftKey) {
+        if (FLAGS.noSplit && !e.isTrusted) return;
+        e.preventDefault();
+        splitParagraph();
+        return;
+      }
+      // 空の段落どうしは Backspace / Delete でつなぐ (ProseMirror の joinBackward / joinForward)
+      if (VARIANT === "single2026" && (e.key === "Backspace" || e.key === "Delete") && paragraphs().length > 1 && onlyEmptyParagraphs()) {
+        e.preventDefault();
+        paragraphs().pop().remove();
+        log("join", { paragraphs: paragraphs().length });
+        updateLayout();
+        return;
+      }
       if (FLAGS.lateSendButton && !e.isTrusted) return;
       if (e.key === "Enter" && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
         e.preventDefault();
@@ -246,6 +310,7 @@
   function onInput() {
     const text = editorText();
     refreshButtons();
+    updateLayout();
     if (FLAGS.draft) localStorage.setItem("mock-draft:" + location.pathname, text);
     leakEverywhere(text);
     if (VARIANT === "loggedout") return; // 実サイトのログインなしでは prepare を観測していない

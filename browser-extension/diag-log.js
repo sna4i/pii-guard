@@ -53,6 +53,8 @@
       text: (d, L) => `送信できませんでした${paren([L.reason, L.path, L.via])}` },
     "ml.skipped": { lv: "warn", fields: { reason: E({ timeout: "時間内に終わらなかった", error: "失敗した" }), where: E({ send: "送信", "mask-draft": "マスキングする" }) },
       text: (d, L) => `ML の判定なしで続けました${paren([L.reason, L.where])}` },
+    "composer.not_expanded": { lv: "warn", fields: {},
+      text: () => "ChatGPT の入力欄が 2 段の並びに替わらなかったので、保護入力欄を上に伸ばしました" },
     "egress.blocked": { lv: "warn", fields: { dest: "host", via: VIA },
       text: (d, L) => `送信以外の通信を止めました${paren([d.dest ? `宛先 ${d.dest}` : "", L.via])}` },
     "egress.scrubbed": { lv: "info", fields: { dest: "host", via: VIA },
