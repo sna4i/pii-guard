@@ -44,6 +44,9 @@
     lateSendButton: q.get("lateSendButton") === "1",
     // single2026: 合成した Shift+Enter で段落を分けない (ChatGPT の作りが変わったときを真似る、T-SC-25e)
     noSplit: q.get("noSplit") === "1",
+    // 新しい会話の 1 回目を送り終えたら、会話の画面 (/c/…) に移って入力欄を作り直し、すぐフォーカスする
+    // (実物: 新しい会話を送ると入力欄を作り直す。作り直した入力欄は表示されるとフォーカスを取る、T-SC-29)
+    navOnSend: q.get("navOnSend") === "1",
   };
   const PREPARE_DEBOUNCE_MS = 350;
   const MODEL = "gpt-6-thinking";
@@ -476,6 +479,13 @@
       state.streaming = false;
       state.abort = null;
       refreshButtons();
+      if (FLAGS.navOnSend && !state.navigatedOnSend) {
+        state.navigatedOnSend = true;
+        history.pushState({}, "", "/c/new-conversation");
+        mountComposer();
+        editor.focus();
+        log("navigated-on-send", { path: location.pathname });
+      }
     }
   }
 
@@ -490,6 +500,64 @@
     log("navigated", { path: location.pathname });
   });
   W.__mock.remountComposer = mountComposer;
+
+  // ---- チャットの検索の画面 (実物を模す、T-SC-27) -------------------------------------
+  // 2026-11-05 の利用者のスクショ: 検索の画面 (ダイアログ) が入力欄の行に重なって出る。ページの末尾に足す普通の
+  // 表示 (トップレイヤーではない、z-index 50)。開くと検索の欄にフォーカスし、画面の外にフォーカスが移ったら検索の欄に
+  // 戻す (Radix のフォーカスの閉じ込めをまねる)。Escape で閉じ、開いたボタンにフォーカスを戻す
+  (function setupSearch() {
+    const btn = document.querySelector('[data-testid="search-button"]');
+    if (!btn) return;
+    let dlg = null;
+    const onFocusIn = (e) => {
+      if (!dlg || dlg.contains(e.target)) return;
+      const input = dlg.querySelector("input");
+      if (input) input.focus();
+      log("search-focus-trapped");
+    };
+    function close() {
+      if (!dlg) return;
+      dlg.remove();
+      dlg = null;
+      document.removeEventListener("focusin", onFocusIn, true);
+      log("search-closed");
+      btn.focus();
+    }
+    function open() {
+      if (dlg) return;
+      const er = editor.getBoundingClientRect();
+      dlg = document.createElement("div");
+      dlg.setAttribute("role", "dialog");
+      dlg.setAttribute("aria-modal", "true");
+      dlg.setAttribute("data-testid", "search-dialog");
+      // 入力欄の行 (文の欄の上下の中ほど) が、候補の一覧の途中に来るように置く
+      const top = Math.max(8, Math.round(er.top + Math.min(er.height / 2, 18) - 200));
+      dlg.style.cssText = `position:fixed;z-index:50;left:${Math.max(8, Math.round(er.left - 40))}px;top:${top}px;` +
+        `width:${Math.round(er.width * 0.9)}px;height:400px;box-sizing:border-box;padding:8px;overflow:auto;` +
+        "background:#202020;color:#eee;border-radius:16px;box-shadow:0 8px 32px rgba(0,0,0,.5)";
+      const input = document.createElement("input");
+      input.placeholder = "検索...";
+      input.setAttribute("data-testid", "search-input");
+      input.style.cssText = "display:block;width:100%;box-sizing:border-box;font:inherit;padding:8px;margin:0 0 8px;background:#303030;color:inherit;border:0";
+      dlg.appendChild(input);
+      for (let i = 0; i < 12; i++) {
+        const it = document.createElement("button");
+        it.type = "button";
+        it.className = "search-item";
+        it.dataset.index = String(i);
+        it.textContent = `会話 ${i + 1}`;
+        it.style.cssText = "display:block;width:100%;height:32px;text-align:left;background:transparent;color:inherit;border:0";
+        it.addEventListener("click", () => { log("search-item", { index: i }); close(); });
+        dlg.appendChild(it);
+      }
+      dlg.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.preventDefault(); close(); } });
+      document.body.appendChild(dlg);
+      document.addEventListener("focusin", onFocusIn, true);
+      input.focus();
+      log("search-opened");
+    }
+    btn.addEventListener("click", open);
+  })();
 
   mountComposer();
   // 本物の ChatGPT と同じく、読み込み直後に入力欄へフォーカスする

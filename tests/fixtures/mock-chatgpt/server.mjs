@@ -70,7 +70,7 @@ body.single2026 [data-composer-input-layout=multiline]{height:auto;max-height:25
 body.single2026 [data-composer-input-layout=multiline]>*{min-height:40px;padding-top:0;padding-bottom:0}
 body.single2026 .AdaptiveFooterInput-zji599[data-composer-layout=multiline]{interpolate-size:allow-keywords;transition:height .22s cubic-bezier(.2,0,0,1)}
 </style></head>
-<body><nav><a href="/" data-nav="new">新しいチャット</a><a href="/c/abc123" data-nav="c">会話A</a></nav>
+<body><nav><a href="/" data-nav="new">新しいチャット</a><a href="/c/abc123" data-nav="c">会話A</a><button type="button" data-testid="search-button" aria-label="チャットを検索">検索</button></nav>
 <!-- 実物 (2026-10-18 ログイン後) と同じく、スレッド側の入れ物のクラス名にも "composer" を含む -->
 <main><div class="relative flex group-has-[[data-expanded-composer]]/home-composer-layout:hidden" style="display:contents"><div id="thread"></div></div><div id="composer-root"></div></main>
 <script src="/mock/app.js"></script></body></html>`;

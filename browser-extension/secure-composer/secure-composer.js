@@ -324,7 +324,12 @@
       if (settings.enabled && maskedCount > 0) dl("send.masked", { via: "secure-composer" });
       // F-SC-10: 確認機能 OFF でも「マスクした件数」をピルに知らせ、黄色+メッセージを出させる。
       if (settings.enabled && maskedCount > 0) boundary.post("maskinfo", { maskedCount });
-      editor.value = "";
+      // 送った文 (送るときの下書き) だけを除く。送っている間に続けて打った文 (送った文のあと) は残す。送っている間に
+      // 送った部分を書き換えたときは、今までどおり全部消す (送った文を下書きに残さない、D-SC-40)
+      const now = editor.value;
+      const rest = now !== text && now.startsWith(text) ? now.slice(text.length).replace(/^\n+/, "") : "";
+      editor.value = rest;
+      if (rest) { try { editor.setSelectionRange(rest.length, rest.length); } catch (_) {} }
       autosize();
       scheduleDraftScan(0); // オフの警告を消す
       // オフのときは ML を警告の件数にしか使っていないので、知らせない (D-SC-10)
@@ -336,6 +341,12 @@
   }
 
   // ---- 入力イベント ----------------------------------------------------------
+  // 親のページが iframe にフォーカスを移したとき (アダプタの D-SC-38)、iframe の中でまだどこにもフォーカスが無ければ、
+  // 文の欄に移す。連絡路の知らせを待たない (つなぎ直している間も、打った文字が行き場を失わない)
+  window.addEventListener("focus", () => {
+    const a = document.activeElement;
+    if (!a || a === document.body || a === document.documentElement) { try { editor.focus(); } catch (_) {} }
+  });
   editor.addEventListener("compositionstart", () => { composing = true; });
   editor.addEventListener("compositionend", () => { composing = false; });
   editor.addEventListener("input", () => {

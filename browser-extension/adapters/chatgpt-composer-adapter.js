@@ -51,6 +51,10 @@
   let expandTimer = 0;
   let lastLayout = "";        // ChatGPT の入力欄の並び。替わったら余白などを測り直す (D-SC-30)
   let sizeObserver = null;    // 入力欄と form の大きさの変化 (並びが替わる間の動き) を見る (D-SC-30)
+  // ChatGPT の入力欄が、ページのほかの表示 (ダイアログ、メニュー) に覆われているか (D-SC-36)。覆われている間は
+  // 保護入力欄を見せない。覆われている間に来たフォーカスは外し、覆いが消えたら保護入力欄に移す (D-SC-37)
+  let covered = false;
+  let refocusWhenUncovered = false;
   // 上に伸ばしている間の見た目。会話の上に重なった板に見えるように、角丸と薄い縁と影を付ける
   const RAISED_SHADOW = "0 0 0 1px rgba(127,127,127,0.28), 0 -6px 18px rgba(0,0,0,0.22)";
   const E2E_FLAG = "__pii_guard_e2e";
@@ -342,6 +346,43 @@
     return { left, top, width: Math.max(0, right - left), height: Math.max(0, bottom - top) };
   }
 
+  // ChatGPT の入力欄が、ページのほかの表示に覆われているか (D-SC-36)。見えている範囲の 1 行目の高さの中ほどで、
+  // 幅の 25%・50%・75% の 3 点を調べる。自分の部品と、点が要素自身の箱の外にある要素 (トップレイヤーの透明な
+  // ::backdrop。ChatGPT のファイルのパネルのつまみなど。:modal は除く) を飛ばした、いちばん上の要素が、
+  // <html>・<body> か ChatGPT の入力欄の form の中なら覆われていない。1 点でも覆われていたら覆われている
+  function coveredByPage(r) {
+    const root = native.closest("form") || native.parentElement;
+    const y = r.top + Math.min(r.height / 2, 18);
+    for (const fx of [0.25, 0.5, 0.75]) {
+      const x = r.left + r.width * fx;
+      if (x < 0 || y < 0 || x >= window.innerWidth || y >= window.innerHeight) continue;
+      for (const el of document.elementsFromPoint(x, y)) {
+        if (el.closest("[data-pii-guard], [data-pii-guard-secure]")) continue;
+        const b = el.getBoundingClientRect();
+        const inBox = x >= b.left && x <= b.right && y >= b.top && y <= b.bottom;
+        if (!inBox && !el.matches(":modal")) continue;
+        if (el === document.documentElement || el === document.body) break;
+        if (root && root.contains(el)) break;
+        return true;
+      }
+    }
+    return false;
+  }
+  // 覆われたら保護入力欄を見せない (visibility:hidden はクリックも受けない)。覆いが消えたとき、覆われている間に
+  // ChatGPT の入力欄にフォーカスが来ていて、今フォーカスがどこにも無い (<body>) か ChatGPT の入力欄にあれば、
+  // 保護入力欄に移す (D-SC-37)
+  function setCovered(v) {
+    covered = v;
+    if (!host) return;
+    host.style.visibility = v ? "hidden" : "visible";
+    if (exposeForTests) host.toggleAttribute("data-sc-covered", v);
+    if (!v && refocusWhenUncovered) {
+      refocusWhenUncovered = false;
+      const a = document.activeElement;
+      if (!a || a === document.body || a === native) focusComposer();
+    }
+  }
+
   // 入力欄の 2 行分の高さ (行の高さ × 2 + 上下の余白)。見えている範囲がこれより低ければ、伸びない並びとみなす
   function twoLines(el) {
     const cs = getComputedStyle(el);
@@ -384,6 +425,9 @@
         if (cap !== nativeCap) { nativeCap = cap; pushTheme(); }
       }
     }
+    // ページのほかの表示に覆われているか (D-SC-36)。覆われている間は見せない (D-SC-37)
+    const cov = coveredByPage(r);
+    if (cov !== covered) setCovered(cov);
     if (up !== raisedUp) {
       raisedUp = up;
       if (up) nativeCap = 0; // 上に伸ばす間は、見えている範囲を上限にしない
@@ -514,6 +558,12 @@
       return { committed: false, error: String((e && e.message) || e) };
     } finally {
       committing = false;
+      // 書くために ChatGPT の入力欄に移したフォーカスが残っていたら、保護入力欄に戻す。続けて打った文字が
+      // ChatGPT の入力欄に入らないように (送っている間は redirectFocus が戻さない、D-SC-38)
+      const a = document.activeElement;
+      if (active && native && a && (a === native || native.contains(a))) redirectFocus();
+      // 書いたときにページの選択範囲が ChatGPT の入力欄に残る。残すと、あとでフォーカスがそこへ戻る (D-SC-39)
+      dropNativeSelection();
     }
   }
 
@@ -542,7 +592,14 @@
     // F-SC-16: オフのときの下書きの検出結果 (件数と種類の名前だけ)。同じ isolated world の composer-toggle の
     // 関数を直接呼ぶ。window のイベントはページも送れるので使わない (警告を消させない)
     boundary.on("draftinfo", (p) => { setPillDraftInfo(p); return true; });
-    boundary.on("ready", () => { scReady = true; pushTheme(); schedulePlace(); reportLive(active && !!native); return true; });
+    boundary.on("ready", () => {
+      scReady = true; pushTheme(); schedulePlace(); reportLive(active && !!native);
+      // 読み込み直後に ChatGPT が自分の入力欄にフォーカスしたとき、準備の前は保護入力欄に移せない。準備ができたら、
+      // フォーカスが ChatGPT の入力欄か iframe にあれば、iframe の中から文の欄にフォーカスしてもらう (D-SC-38)
+      const a = document.activeElement;
+      if (iframe && a && (a === iframe || (native && (a === native || native.contains(a))))) { dropNativeSelection(); boundary.post("focus", {}); }
+      return true;
+    });
     boundary.on("state", () => true);
     // F-SC-10: SC がマスクした件数を同じ ISOLATED world の composer-toggle (ピル) へ渡す。
     boundary.on("maskinfo", (p) => {
@@ -641,14 +698,59 @@
     native.addEventListener("keydown", onNativeKey, true);
     pushTheme();
     schedulePlace();
+    // 作り直された入力欄に、見つける前から ChatGPT がフォーカスしていた (新しい会話への移動など)。保護入力欄に戻す
+    const a = document.activeElement;
+    if (a && (a === native || native.contains(a))) redirectFocus();
   }
-  // 連絡が切れたあとは iframe に頼めないので、フォーカスは知らせのボタンへ (D-SC-21)
+  // 保護入力欄にフォーカスを移す (D-SC-38)。iframe の要素の focus() を同じ処理の中で呼ぶ (連絡路の状態に頼らず、
+  // ChatGPT の入力欄に文字が入る隙を作らない)。続けて、文の欄へのフォーカスを連絡路で頼む (iframe の中で最後に
+  // フォーカスがあった所が文の欄でないときのため)。連絡が切れたあとは、知らせのボタンへ (D-SC-21)
   function focusComposer() {
+    dropNativeSelection();
     if (orphaned) { if (staleButton) try { staleButton.focus(); } catch (_) {} return; }
+    // ページの側から iframe にフォーカスを渡すのは、保護入力欄の準備ができてから。読み込み中の iframe (別のプロセス) に
+    // 渡すと、Chrome の中でキー入力の行き先がずれ、打った文字がどこにも入らないことがある (負荷をかけた繰り返しで確認)。
+    // 準備の前は、準備ができたときに iframe の中から文の欄にフォーカスしてもらう (ready の受け口)
+    if (iframe && scReady) { try { iframe.focus(); } catch (_) {} }
     if (boundary) boundary.post("focus", {});
   }
-  function redirectFocus() { focusComposer(); }
-  function onNativeDown(e) { if (active) { e.preventDefault(); focusComposer(); } }
+  // ページの選択範囲が ChatGPT の入力欄の中に残っていたら消す (D-SC-39)。残っていると、ページがフォーカスを取り戻すとき
+  // (保護入力欄をクリックした瞬間など) に、Chrome が選択範囲のある ChatGPT の入力欄にフォーカスを戻し、打った文字が
+  // そこに入る。ProseMirror は、フォーカスの無いときの選択範囲の変化を読まない (中身の選択は変わらない)
+  function dropNativeSelection() {
+    try {
+      const sel = document.getSelection();
+      if (sel && sel.rangeCount && native && sel.anchorNode && native.contains(sel.anchorNode)) sel.removeAllRanges();
+    } catch (_) { /* 何もしない */ }
+  }
+  // ChatGPT の入力欄にフォーカスが来たら、その場で保護入力欄に移す (F-SC-44)。送っている途中 (doCommit が ChatGPT の
+  // 入力欄に書く間) は移さない。覆われている間は外すだけにし、覆いが消えたら移す (D-SC-37)
+  function redirectFocus() {
+    if (!active || committing) return;
+    if (covered) { refocusWhenUncovered = true; try { native.blur(); } catch (_) {} dropNativeSelection(); return; }
+    focusComposer();
+  }
+  // ChatGPT が入力欄を作り直して、新しい入力欄にすぐフォーカスしたとき (新しい会話への移動など)、見張りを付け直す前に
+  // 打った文字がそこに入らないように、ページ全体のフォーカスを見て、その場で付け直して戻す (D-SC-39)。
+  // 対象は送信の入力欄の id だけにする (会話の中の「編集」の入力欄などには触れない)
+  const COMPOSER_IDS = new Set(["prompt-textarea", "mobile-composer-prompt"]);
+  function onDocFocusIn(e) {
+    if (!active) return;
+    const t = e.target;
+    if (!t || t === native || !t.id || !COMPOSER_IDS.has(t.id) || !isEditable(t) || !visible(t)) return;
+    adopt(t); // attach() が、フォーカスのある新しい入力欄から保護入力欄に戻す
+    // 送っている途中に作り直された入力欄は、書き込みの相手 (doCommit が持つ前の入力欄) ではないので、その場で戻す。
+    // attach() の redirectFocus は、送っている途中は戻さない
+    if (committing && document.activeElement === t) {
+      if (covered) { refocusWhenUncovered = true; try { t.blur(); } catch (_) {} dropNativeSelection(); }
+      else focusComposer();
+    }
+  }
+  function onNativeDown(e) {
+    if (!active || committing) return;
+    e.preventDefault();
+    if (!covered) focusComposer();
+  }
   function onNativeKey(e) {
     if (!active || committing) {
       // commit 中 (doCommit がボタンを押す瞬間) はネイティブのキーに触らない
@@ -667,10 +769,16 @@
   }
 
   // SPA の作り直し・表示変化に追従。ネイティブが差し替わったら貼り直す。
+  // 新しい ChatGPT の入力欄に付け替える (前の入力欄の見張りは外す)
+  function adopt(el) {
+    if (native) { restoreNativeHeight(); native.removeEventListener("focusin", redirectFocus); native.removeEventListener("mousedown", onNativeDown, true); native.removeEventListener("keydown", onNativeKey, true); }
+    active = true;
+    attach(el);
+  }
   function sync() {
     if (!orphaned && !contextAlive()) goStale();
     const el = findNative();
-    if (el && el !== native) { if (native) { restoreNativeHeight(); native.removeEventListener("focusin", redirectFocus); native.removeEventListener("mousedown", onNativeDown, true); native.removeEventListener("keydown", onNativeKey, true); } active = true; attach(el); }
+    if (el && el !== native) adopt(el);
     else if (el && !active) { active = true; host && (host.style.display = "block"); }
     else if (!el) { restoreNativeHeight(); native = null; if (host) host.style.display = "none"; reportLive(false); } // 入力欄が消えたら素通ししない
     if (active) schedulePlace();
@@ -695,8 +803,11 @@
     active = true;
     const el = findNative();
     if (el) attach(el);
-    const mo = new MutationObserver(() => scheduleSync());
+    // ページの要素が増えたり減ったりしたら、すぐ重ね直す (ダイアログやメニューに覆われたかを調べる、D-SC-36)
+    const mo = new MutationObserver(() => { scheduleSync(); schedulePlace(); });
     mo.observe(document.documentElement, { childList: true, subtree: true });
+    // 作り直された入力欄にフォーカスが来たら、その場で付け直して保護入力欄に戻す (D-SC-39)
+    document.addEventListener("focusin", onDocFocusIn, true);
     window.addEventListener("scroll", schedulePlace, true);
     // 窓の大きさが変わると ChatGPT の入力欄の上限も変わるので、伸びきらなかった高さは測り直す
     window.addEventListener("resize", () => { nativeCap = 0; pushTheme(); schedulePlace(); }, true);
