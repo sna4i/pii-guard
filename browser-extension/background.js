@@ -159,8 +159,12 @@ chrome.runtime.onConnect.addListener((port) => {
   const slot = role === "sc-iframe" ? "iframe" : "content";
   let pair = scPairs.get(tabId);
   if (!pair) { pair = {}; scPairs.set(tabId, pair); }
-  // 同じ役割の古いポートがあれば捨てる (タブ内の作り直し)。
-  if (pair[slot]) { try { pair[slot].disconnect(); } catch (_) {} }
+  // 同じ役割の古いポートがあれば捨てる (タブ内の作り直し)。古いほうには「置き換えた」と知らせてから切る。
+  // 知らされた側はつなぎ直さない (privacy-boundary.js の D-SC-35。同じ役割の 2 つが互いを追い出し合わない)
+  if (pair[slot]) {
+    try { pair[slot].postMessage({ __sc: "retired" }); } catch (_) {}
+    try { pair[slot].disconnect(); } catch (_) {}
+  }
   pair[slot] = port;
 
   port.onMessage.addListener((msg) => {

@@ -441,6 +441,13 @@
     autosize();
     if (!settings.enabled && editor.value.trim()) scheduleDraftScan(0); // エンジンを待つ間に書かれた下書き
     boundary.post("ready", {});
-    boundary.onReady(() => boundary.post("ready", {}));
+    // 相手がそろうたびに (つなぎ直したあとも)、準備できたことと、今の高さとオフの警告を送り直す。切れている間の
+    // 知らせは届いていないため (D-SC-34)
+    boundary.onReady(() => {
+      boundary.post("ready", {});
+      lastReportedHeight = -1;
+      autosize();
+      scheduleDraftScan(0);
+    });
   })();
 })();
