@@ -593,11 +593,16 @@
     // 関数を直接呼ぶ。window のイベントはページも送れるので使わない (警告を消させない)
     boundary.on("draftinfo", (p) => { setPillDraftInfo(p); return true; });
     boundary.on("ready", () => {
-      scReady = true; pushTheme(); schedulePlace(); reportLive(active && !!native);
+      // 初めての ready は iframe が読み込まれたとき。それ以外はつなぎ直したとき (iframe は前の見た目を持っている)
+      const first = !scReady;
+      scReady = true;
+      if (first) deliveredTheme = "";
+      pushTheme(); schedulePlace(); reportLive(active && !!native);
       // 読み込み直後に ChatGPT が自分の入力欄にフォーカスしたとき、準備の前は保護入力欄に移せない。準備ができたら、
-      // フォーカスが ChatGPT の入力欄か iframe にあれば、iframe の中から文の欄にフォーカスしてもらう (D-SC-38)
+      // フォーカスが ChatGPT の入力欄にあれば、iframe の中から文の欄にフォーカスしてもらう (D-SC-38)。iframe に既に
+      // あるときは頼まない (つなぎ直すたびに頼むと、打っている最中に文の欄のフォーカスを呼び直すことになる、D-SC-41)
       const a = document.activeElement;
-      if (iframe && a && (a === iframe || (native && (a === native || native.contains(a))))) { dropNativeSelection(); boundary.post("focus", {}); }
+      if (iframe && native && a && (a === native || native.contains(a))) { dropNativeSelection(); boundary.post("focus", {}); }
       return true;
     });
     boundary.on("state", () => true);
@@ -656,12 +661,19 @@
   window.addEventListener("dragenter", (e) => { if (isFileDrag(e)) dragPassthrough(); }, true);
   window.addEventListener("dragover", (e) => { if (isFileDrag(e)) dragPassthrough(); }, true);
   window.addEventListener("drop", () => { dragPassUntil = 0; }, true); // 落とし終えたらすぐ戻す
+  // 見た目を iframe に送る。前に届けたものと同じなら送らない (つなぎ直すたびに送ると、iframe が文の欄の属性を
+  // 付け直し、Windows の IME が状態を戻すことがある、D-SC-41)。届けたかどうかは、送ったときに相手がそろっていたかで
+  // 見る (そろっていなければ、次の機会にもう一度送る)
+  let deliveredTheme = "";
   function pushTheme() {
     if (!boundary || !native || orphaned) return;
     const t = readTheme(native);
     // iframe の要素の color-scheme も中と同じにする (違うと、ブラウザが iframe の下に不透明な地を敷く)
     if (iframe && iframe.style.colorScheme !== t.scheme) iframe.style.colorScheme = t.scheme;
+    const key = JSON.stringify(t);
+    if (key === deliveredTheme && boundary.isReady()) return;
     boundary.post("theme", t);
+    deliveredTheme = boundary.isReady() ? key : "";
   }
   function notePillSent() {
     try {

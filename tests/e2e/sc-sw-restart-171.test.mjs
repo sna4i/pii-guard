@@ -57,6 +57,47 @@ test("T-SC-26 Service Worker が止まったあとも、保護入力欄から伏
   assert.equal(failed, 0, "動作ログに send.failed が残った");
 });
 
+test("T-SC-30 つなぎ直しても、保護入力欄の文の欄に触らない (属性・高さ・フォーカス)。変換も切れない", async () => {
+  h.server.clear();
+  const page = await h.openChat("/");
+  const frame = await h.waitSecureReady(page, 10000);
+  await sleep(500);
+  const ta = frame.locator("textarea");
+  await ta.click();
+  await ta.pressSequentially("あいう", { delay: 3 });
+  const cdp = await page.context().newCDPSession(page);
+  try {
+    await cdp.send("Input.imeSetComposition", { text: "かんじ", selectionStart: 3, selectionEnd: 3 });
+    await sleep(400);
+    // ここから、文の欄への手出しを数える (属性と style の書き換え、focus() の呼び出し、変換の終わり、フォーカスの外れ)
+    await frame.evaluate(() => {
+      const ed = document.getElementById("editor");
+      window.__touch = { attrs: [], focusCalls: 0, compositionEnd: 0, blur: 0 };
+      new MutationObserver((ms) => { for (const m of ms) window.__touch.attrs.push(m.attributeName); }).observe(ed, { attributes: true });
+      const f = ed.focus.bind(ed);
+      ed.focus = (...a) => { window.__touch.focusCalls++; return f(...a); };
+      ed.addEventListener("compositionend", () => { window.__touch.compositionEnd++; });
+      ed.addEventListener("blur", () => { window.__touch.blur++; });
+    });
+    await stopServiceWorker();
+    await sleep(2000); // 50ms ほどでつなぎ直し、相手がそろう
+    const touch = await frame.evaluate(() => window.__touch);
+    await cdp.send("Input.insertText", { text: "漢字" });
+    await sleep(300);
+    const value = await frame.evaluate(() => document.getElementById("editor").value);
+    await ta.press("Enter");
+    await sleep(2500);
+    const sent = h.server.byKind("conversation").length;
+    await page.close();
+    assert.equal(sent, 1, "つなぎ直したあとに送れない (つなぎ直しが確かめられない)");
+    assert.deepEqual(touch.attrs, [], `つなぎ直しで文の欄の属性を書き換えた: ${JSON.stringify(touch)}`);
+    assert.equal(touch.focusCalls, 0, `つなぎ直しで文の欄に focus() を呼んだ: ${JSON.stringify(touch)}`);
+    assert.equal(touch.compositionEnd, 0, "つなぎ直しで変換が切れた");
+    assert.equal(touch.blur, 0, "つなぎ直しで文の欄からフォーカスが外れた");
+    assert.equal(value, "あいう漢字", `確定した文が入っていない: ${JSON.stringify(value)}`);
+  } finally { await cdp.detach().catch(() => {}); }
+});
+
 test("T-SC-26b Service Worker が止まったあとも、高さの知らせとオフの警告が届く", async () => {
   await h.setStorage({ enabled: false });
   try {

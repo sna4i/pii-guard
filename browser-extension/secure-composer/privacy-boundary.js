@@ -123,6 +123,8 @@
 
     return {
       connected() { return !!port; },
+      // 相手がそろっていて、知らせが届く状態か (届けたものを覚えておく側が使う、D-SC-41)
+      isReady() { return !!port && peerReady; },
       onReady(fn) { if (peerReady) { try { fn(); } catch (_) {} } readyFns.add(fn); return () => readyFns.delete(fn); },
       on(type, fn) { handlers.set(type, fn); return () => handlers.delete(type); },
       // 応答を待つ要求。相手がそろっていなければ (つなぎ直している途中)、そろうまで待ってから送る (D-SC-33)

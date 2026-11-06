@@ -80,24 +80,33 @@
   }
 
   // ---- 見た目 (content script がネイティブ入力欄から測って渡す) -------------------
+  // 値が違うときだけ付け直し、何か変わったときだけ高さを測り直す。同じ値の付け直しでも、変換中の文の欄に触ると
+  // Windows の IME が状態を戻すことがあるため (D-SC-41)
   function applyTheme(t) {
     if (!t || typeof t !== "object") return;
-    const set = (k, v) => { if (typeof v === "string" && v) rootEl.style.setProperty(k, v); };
+    let changed = false;
+    const set = (k, v) => {
+      if (typeof v === "string" && v && rootEl.style.getPropertyValue(k) !== v) { rootEl.style.setProperty(k, v); changed = true; }
+    };
     set("--sc-font", t.fontFamily); set("--sc-size", t.fontSize); set("--sc-line", t.lineHeight);
     set("--sc-color", t.color); set("--sc-caret", t.caretColor || t.color); set("--sc-surface", t.surface);
     set("--sc-pad-y", t.padY); set("--sc-pad-x", t.padX); set("--sc-placeholder", t.placeholderColor);
-    if (typeof t.placeholder === "string") editor.setAttribute("placeholder", t.placeholder);
-    if (typeof t.dir === "string") editor.setAttribute("dir", t.dir);
+    const attr = (name, v) => { if (typeof v === "string" && editor.getAttribute(name) !== v) { editor.setAttribute(name, v); changed = true; } };
+    attr("placeholder", t.placeholder);
+    attr("dir", t.dir);
     // ページの明るい/暗い (F-SC-14)。iframe の要素にも同じ値をアダプタが付ける
-    if (t.scheme === "dark" || t.scheme === "light") { rootEl.style.colorScheme = t.scheme; rootEl.dataset.scheme = t.scheme; }
+    if ((t.scheme === "dark" || t.scheme === "light") && rootEl.dataset.scheme !== t.scheme) {
+      rootEl.style.colorScheme = t.scheme; rootEl.dataset.scheme = t.scheme; changed = true;
+    }
     // ChatGPT の入力欄が伸びない並びでは、アダプタが保護入力欄を上に伸ばす。そのときは文の欄を下 (入力欄の行) に
     // 置き、案内と確認をその上に出す (D-SC-18)
-    if (t.anchor === "bottom" || t.anchor === "top") rootEl.dataset.anchor = t.anchor;
-    if (Number.isFinite(t.maxHeight) && t.maxHeight >= 24) {
+    if ((t.anchor === "bottom" || t.anchor === "top") && rootEl.dataset.anchor !== t.anchor) { rootEl.dataset.anchor = t.anchor; changed = true; }
+    if (Number.isFinite(t.maxHeight) && t.maxHeight >= 24 && Math.round(t.maxHeight) !== maxHeight) {
       maxHeight = Math.round(t.maxHeight);
       rootEl.style.setProperty("--sc-max-h", maxHeight + "px");
+      changed = true;
     }
-    autosize();
+    if (changed) autosize();
   }
 
   // 下書きの高さをアダプタに知らせる。アダプタは ChatGPT の入力欄をこの高さに伸ばし、保護入力欄を重ね直す
@@ -437,7 +446,12 @@
 
   // ---- content script からの要求 ------------------------------------------------
   boundary.on("theme", (t) => { applyTheme(t); return true; });
-  boundary.on("focus", () => { try { editor.focus(); } catch (_) {} return true; });
+  // 文の欄に既にフォーカスがあれば何もしない (呼び直すと、Windows の IME が状態を戻すことがある、D-SC-41)
+  boundary.on("focus", () => {
+    if (document.activeElement === editor && document.hasFocus()) return true;
+    try { editor.focus(); } catch (_) {}
+    return true;
+  });
   boundary.on("submit", () => { submit(); return true; });          // ネイティブの送信ボタン押下の中継
   boundary.on("mask-draft", () => { maskDraft(); return true; });   // 黄色の内訳の「マスキングする」
   boundary.on("ping", () => ({ state: machine.get(), height: lastReportedHeight }));
@@ -456,8 +470,8 @@
     // 知らせは届いていないため (D-SC-34)
     boundary.onReady(() => {
       boundary.post("ready", {});
-      lastReportedHeight = -1;
-      autosize();
+      // 前に測った高さを送り直すだけにし、文の欄には触らない (測り直すと文の欄の style を書き換える、D-SC-41)
+      if (lastReportedHeight > 0) boundary.post("resize", { height: lastReportedHeight, empty: lastReportedEmpty });
       scheduleDraftScan(0);
     });
   })();
