@@ -47,6 +47,14 @@
     // 新しい会話の 1 回目を送り終えたら、会話の画面 (/c/…) に移って入力欄を作り直し、すぐフォーカスする
     // (実物: 新しい会話を送ると入力欄を作り直す。作り直した入力欄は表示されるとフォーカスを取る、T-SC-29)
     navOnSend: q.get("navOnSend") === "1",
+    // 回答の中に、その場で直せる文章の欄 (writing block) を出す (T-SC-31)。実物 (2026-11-06 に読んだ JS): 回答の中の
+    // 文章の欄は、入力欄と同じ ProseMirror の編集欄 (div.ProseMirror[contenteditable=true]) で、会話は入力欄より前にある
+    // ?writingBlock=sameId: 文章の欄が送信の入力欄と同じ id (prompt-textarea) を持つ (部品を使い回したときを真似る、T-SC-31e)
+    writingBlock: ["1", "sameId"].includes(q.get("writingBlock")),
+    writingBlockSameId: q.get("writingBlock") === "sameId",
+    // 入力欄の form に送信ボタンを出さない (ChatGPT が送信ボタンの作りを変えたときを真似る。拡張機能は文書全体を探し、
+    // 無ければ Enter で送る、D-SC-14 / T-SC-31d)
+    noSendButton: q.get("noSendButton") === "1",
   };
   const PREPARE_DEBOUNCE_MS = 350;
   const MODEL = "gpt-6-thinking";
@@ -142,7 +150,8 @@
     const showSend = has && !state.streaming;
     if (sendBtn) {
       clearTimeout(lateTimer);
-      if (FLAGS.lateSendButton && showSend && sendBtn.hidden) {
+      if (FLAGS.noSendButton) { sendBtn.hidden = true; sendBtn.disabled = true; }
+      else if (FLAGS.lateSendButton && showSend && sendBtn.hidden) {
         lateTimer = setTimeout(() => { if (editorText().trim() && !state.streaming) { sendBtn.hidden = false; sendBtn.disabled = false; } }, 300);
       } else { sendBtn.hidden = !showSend; sendBtn.disabled = !showSend; }
     }
@@ -419,6 +428,22 @@
     return div;
   }
 
+  // 回答の中の文章の欄 (writing block)。ChatGPT が書いた文を、その場で直せる編集欄に入れて出す。文章の欄の
+  // ボタンの名前は実物で確かめていない (集めた JS に無かった)。「Send」を名前に含むボタンを置き、拡張機能が
+  // 送信ボタンと取り違えて押さないかを試す (T-SC-31d)
+  function addWritingBlock(reply) {
+    const wb = document.createElement("div");
+    wb.className = "writing-block";
+    wb.setAttribute("data-testid", "writing-block");
+    const id = FLAGS.writingBlockSameId ? ' id="prompt-textarea"' : "";
+    wb.innerHTML = '<div class="wb-header">メール <button type="button" aria-label="Send email" data-testid="writing-block-send">送信</button></div>' +
+      `<div contenteditable="true" translate="no" class="ProseMirror"${id} data-testid="writing-block-editor">` +
+      "<p>件名: 打ち合わせの日程</p><p>来週の打ち合わせの候補日をお送りします。</p><p>ご都合の良い日をお知らせください。</p></div>";
+    wb.querySelector('[data-testid="writing-block-send"]').addEventListener("click", () => log("writing-block-send"));
+    reply.appendChild(wb);
+    log("writing-block");
+  }
+
   async function submit(via) {
     const text = editorText();
     if (FLAGS.ignoreSend) { log("submit-ignored", { via }); return; }
@@ -466,6 +491,7 @@
         }
       }
       state.conduitToken = null; // 次の送信では新しい prepare が要る
+      if (FLAGS.writingBlock) addWritingBlock(reply);
       log("conversation-ok");
     } catch (e) {
       if (state.abort && state.abort.signal.aborted) { log("conversation-stopped"); return; }

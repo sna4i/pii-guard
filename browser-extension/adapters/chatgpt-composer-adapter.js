@@ -1,7 +1,8 @@
 // adapters/chatgpt-composer-adapter.js — ChatGPT のネイティブ入力欄に Secure Composer (iframe) を重ねる。
 //
 // content script (ISOLATED world)。manifest で content.js の後に読む。
-//   - ネイティブ入力欄 (div#prompt-textarea.ProseMirror / textarea#mobile-composer-prompt) を探す
+//   - ネイティブ入力欄 (div#prompt-textarea.ProseMirror / textarea#mobile-composer-prompt) を id で探す
+//     (回答の中の文章の欄など、会話の中の編集欄は取らない。docs/release-1.7.1.md の D-SC-42)
 //   - その「文字を打つ領域」にぴったり拡張オリジンの iframe を重ねる (ページは contentDocument に触れない)
 //   - 見た目 (フォント・色・入力面の色・余白・プレースホルダ) を測って iframe に渡す
 //   - iframe からの commit (送信操作) で、マスク済み(ON)/原文(OFF) をネイティブに書いて正規送信する
@@ -21,7 +22,12 @@
 
   const EXT = chrome.runtime.getURL("secure-composer/secure-composer.html");
   const Z = "2147483646";
-  const EDITOR_SEL = '#prompt-textarea, div.ProseMirror[contenteditable="true"], textarea#mobile-composer-prompt';
+  // ChatGPT の送信の入力欄は id で見分ける (D-SC-42)。class (div.ProseMirror[contenteditable="true"]) では探さない。
+  // 回答の中の文章の欄 (writing block) も同じ class の編集欄で、会話は入力欄より前にあるので、class で探すとそちらを取る
+  const COMPOSER_SEL = "#prompt-textarea, textarea#mobile-composer-prompt";
+  const COMPOSER_IDS = new Set(["prompt-textarea", "mobile-composer-prompt"]);
+  // 会話の中 (回答・メッセージ)。ここにある編集欄は、id が同じでも送信の入力欄ではない (部品を使い回したときのため)
+  const IN_THREAD_SEL = '[data-message-author-role], [data-message-id], [data-testid^="conversation-turn"]';
   const SEND_SEL = '#composer-submit-button, [data-testid="send-button"], button[data-composer-submit], button[type="submit"][aria-label*="送信"], button[aria-label*="Send"]';
   // 送信ボタンの場所。ChatGPT は回答を作っている間 (考え中を含む)、ここに停止のボタンを出す (isStopButton)
   const SLOT_SEL = '#composer-submit-button, [data-testid="send-button"], button[data-composer-submit], button[type="submit"]';
@@ -75,8 +81,10 @@
     const cs = getComputedStyle(el);
     return cs.visibility !== "hidden" && cs.display !== "none";
   }
+  // 送信の入力欄か (D-SC-42)。見回り (findNative) とページ全体のフォーカスの見張り (onDocFocusIn) で同じ判定を使う
+  const isSendComposer = (el) => !!el && COMPOSER_IDS.has(el.id) && isEditable(el) && visible(el) && !el.closest(IN_THREAD_SEL);
   function findNative() {
-    for (const el of document.querySelectorAll(EDITOR_SEL)) if (isEditable(el) && visible(el)) return el;
+    for (const el of document.querySelectorAll(COMPOSER_SEL)) if (isSendComposer(el)) return el;
     return null;
   }
 
@@ -501,8 +509,9 @@
     for (const b of scopeOf(el).querySelectorAll("button")) if (shown(b) && isStopButton(b)) return true;
     return false;
   }
+  // 送信ボタン (D-SC-14)。文書全体で探すときも、会話の中のボタン (回答の文章の欄の「Send」など) は押さない (D-SC-43)
   function findSendButton(scope) {
-    for (const b of scope.querySelectorAll(SEND_SEL)) if (shown(b) && !b.disabled && !isStopButton(b)) return b;
+    for (const b of scope.querySelectorAll(SEND_SEL)) if (shown(b) && !b.disabled && !isStopButton(b) && !b.closest(IN_THREAD_SEL)) return b;
     return null;
   }
   // ChatGPT の入力欄が空か (空白と記号を除いて何も残っていない)
@@ -744,12 +753,11 @@
   }
   // ChatGPT が入力欄を作り直して、新しい入力欄にすぐフォーカスしたとき (新しい会話への移動など)、見張りを付け直す前に
   // 打った文字がそこに入らないように、ページ全体のフォーカスを見て、その場で付け直して戻す (D-SC-39)。
-  // 対象は送信の入力欄の id だけにする (会話の中の「編集」の入力欄などには触れない)
-  const COMPOSER_IDS = new Set(["prompt-textarea", "mobile-composer-prompt"]);
+  // 対象は送信の入力欄だけにする (回答の中の文章の欄や、会話の中の「編集」の入力欄などには触れない、D-SC-42)
   function onDocFocusIn(e) {
     if (!active) return;
     const t = e.target;
-    if (!t || t === native || !t.id || !COMPOSER_IDS.has(t.id) || !isEditable(t) || !visible(t)) return;
+    if (!t || t === native || !isSendComposer(t)) return;
     adopt(t); // attach() が、フォーカスのある新しい入力欄から保護入力欄に戻す
     // 送っている途中に作り直された入力欄は、書き込みの相手 (doCommit が持つ前の入力欄) ではないので、その場で戻す。
     // attach() の redirectFocus は、送っている途中は戻さない
