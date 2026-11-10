@@ -490,6 +490,17 @@
   // 本文 (確認画面で利用者が決めたもの) 以外のフィールドに残る検出済みの値を伏せる
   const rwOf = (sens) => ({ mayContain: (v) => sens.mayContainBytes(v), rewrite: (t) => sens.scrubText(t) });
   const skipOf = (fields) => { const set = new Set(fields.map((f) => f.path.join("."))); return (p) => set.has(p.join(".")); };
+  // 伏せたあと、本文の欄を空にした写しに検出済みの値が残っているか (D-EG-09)。道筋は番号だけで、繰り返しの
+  // 何番目かを区別しないので、本文と同じ番号の別の出現も rewriteProto() で飛ばされる。長さ付きでない欄の値も
+  // 伏せられない。どちらも残っていたら止める。本文の欄が見つからなければ、調べられないので止める
+  function leftOutside(u8, fields, sens) {
+    let rest = u8;
+    for (const f of fields) {
+      rest = setAtPath(rest, f.path, new Uint8Array(0));
+      if (!rest) return true;
+    }
+    return sens.mayContainBytes(rest);
+  }
 
   const adapters = {
     // Claude: Connect の unary (application/proto)。2026-10-18 実測で本文は root.2.3
@@ -526,7 +537,8 @@
       scrubOthers(m, sens) {
         if (!sens || !sens.size || !sens.mayContainBytes(m.bytes)) return { model: m, stuck: false };
         const r = rewriteProto(m.bytes, rwOf(sens), skipOf(m.fields));
-        return { model: r && r.changed ? { ...m, bytes: r.bytes } : m, stuck: !r || r.stuck };
+        const model = r && r.changed ? { ...m, bytes: r.bytes } : m;
+        return { model, stuck: !r || r.stuck || leftOutside(model.bytes, m.fields, sens) };
       },
     },
     // Gemini: WebChannel のフォーム。各 reqN___data__ が Base64 の protobuf。2026-10-18 実測で本文は root.2.9.1
@@ -556,9 +568,10 @@
         if (!sens || !sens.size) return { model: m, stuck };
         m.wc.items.forEach((it, k) => {
           if (!sens.mayContainBytes(it.bytes)) return;
-          const r = rewriteProto(it.bytes, rwOf(sens), skipOf(m.fields.filter((f) => f.item === k)));
+          const decided = m.fields.filter((f) => f.item === k);
+          const r = rewriteProto(it.bytes, rwOf(sens), skipOf(decided));
           if (r && r.changed) it.bytes = r.bytes;
-          if (!r || r.stuck) stuck = true;
+          if (!r || r.stuck || leftOutside(it.bytes, decided, sens)) stuck = true;
         });
         return { model: m, stuck };
       },

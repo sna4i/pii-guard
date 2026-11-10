@@ -278,3 +278,33 @@ test("T-EG-09c 本文と同じ親の別の欄に残った値は伏せ、本文�
   assert.equal(td.decode(EG.getAtPath(out, [2, 3])), KEPT);
   assert.match(td.decode(EG.getAtPath(out, [2, 20])), /<PHONE_NUMBER_\d+>/);
 });
+
+// 道筋は番号だけで、繰り返しの何番目かを区別しない (差し替えは最初の出現に書き、飛ばす判定は番号で比べる)。
+// 本文の欄と同じ番号の別の出現も飛ばされるので、伏せたあと本文の欄の外に値が残っていたら止める (D-EG-09)
+const MASKED = "連絡先は <PHONE_NUMBER_1> と <EMAIL_ADDRESS_1> です"; // ふつうに全部伏せた本文
+
+test("T-EG-09d 本文の道筋が繰り返され、本文でない方の出現に検出済みの値が残っていたら、送信を止める (Claude、Gemini)", () => {
+  const other = `電話 ${PHONE}`;
+  const sess = msg(1, str(1, "sess_x"));
+  for (const body of [cat(sess, msg(2, str(3, MASKED), str(3, other))), cat(sess, msg(2, str(3, MASKED)), msg(2, str(3, other)))]) {
+    const m = EG.adapters.claudeRpc.decode(body, []);
+    assert.deepEqual(EG.adapters.claudeRpc.extractInputs(m), [MASKED], "前提: 本文は最初の出現");
+    assert.equal(EG.adapters.claudeRpc.scrubOthers(m, S()).stuck, true);
+  }
+  for (const proto of [msg(2, vint(1, 1), msg(9, str(1, MASKED), str(1, other))), msg(2, vint(1, 1), msg(9, str(1, MASKED)), msg(9, str(1, other)))]) {
+    const m = EG.adapters.geminiSession.decode(`count=1&ofs=1&req0___data__=${encodeURIComponent(Buffer.from(proto).toString("base64"))}`, []);
+    assert.deepEqual(EG.adapters.geminiSession.extractInputs(m), [MASKED], "前提: 本文は最初の出現");
+    assert.equal(EG.adapters.geminiSession.scrubOthers(m, S()).stuck, true);
+  }
+});
+
+test("T-EG-09e Claude: 形が変わり、下書きと同じ中身で見つけた本文の欄が繰り返しの 2 つ目にあっても、原文のまま送らない (伏せるか止める)", () => {
+  const a = EG.adapters.claudeRpc;
+  const raw = `連絡先は ${PHONE} と ${EMAIL} です`;
+  const body = cat(msg(1, str(1, "sess_x")), msg(5, str(1, "前の話題")), msg(5, str(1, raw)));
+  const m0 = a.decode(body, [raw]);
+  assert.deepEqual(m0.fields.map((f) => f.path.join(".")), ["5.1"], "前提: 決まった道筋 (2.3) が無く、下書きと同じ中身の欄を見つける");
+  const r = a.scrubOthers(a.replaceInputs(m0, [MASKED]), S());
+  const out = a.encode(r.model);
+  assert.ok(r.stuck || (!has(out, PHONE) && !has(out, EMAIL)), `原文のまま送らない (stuck=${r.stuck})`);
+});
