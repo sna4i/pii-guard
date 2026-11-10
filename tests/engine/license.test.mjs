@@ -13,12 +13,20 @@ const DAY = 24 * HOUR;
 const T0 = Date.UTC(2026, 10, 10, 0, 0, 0); // 2026-11-10 00:00 UTC
 
 // ---- 偽物 -----------------------------------------------------------------------------
+// hold() のあとの set は、release() まで終わらない (呼ばれた順に書く)。書いている途中を作るため
 function fakeStorage(initial = {}) {
   const data = { ...initial };
+  let held = null;
   return {
     data,
     async get(key) { return key in data ? { [key]: structuredClone(data[key]) } : {}; },
-    async set(obj) { Object.assign(data, structuredClone(obj)); },
+    async set(obj) {
+      const copy = structuredClone(obj);
+      if (!held) { Object.assign(data, copy); return; }
+      await new Promise((resolve) => held.push(() => { Object.assign(data, copy); resolve(); }));
+    },
+    hold() { held = []; },
+    release() { const list = held || []; held = null; for (const f of list) f(); },
   };
 }
 function fakeAlarms(existing = []) {
@@ -393,6 +401,37 @@ test("T-PRO-14g 見捨てた問い合わせの遅れた答えでも、それよ�
   await tick();
   const stored = (await deps.storage.get(LICENSE_CACHE_KEY))[LICENSE_CACHE_KEY];
   assert.equal(stored && stored.paid, true, "ほかに答えが無いので、遅れた答えを残す");
+});
+
+test("T-PRO-14h 新しい答えを書いている途中に古い答えが届いても、古い答えで上書きしない (書く番号は、書き込みを待つ前に決める)", async () => {
+  const { lm, extpay, clock, deps } = setup({ deferUser: true, networkTimeoutMs: 1000 });
+  const first = lm.getLicenseState({ refresh: true });
+  await tick();
+  clock.mono += 6 * 1000 + 1;
+  const second = lm.getLicenseState({ refresh: true });
+  await tick();
+  deps.storage.hold();
+  extpay.pendingUsers[1].resolve(paidUser()); // 新しい答え。書き込みは止まったまま
+  await tick();
+  extpay.pendingUsers[0].resolve(unpaidUser()); // その途中に、古い答えが届く
+  await tick();
+  deps.storage.release();
+  await Promise.all([first, second]);
+  await tick();
+  assert.equal(deps.storage.data[LICENSE_CACHE_KEY].paid, true, "古い答えで上書きしない");
+});
+
+test("T-PRO-14i 見捨てた問い合わせを待っていた呼び手には、もっと新しい答えがあればそちらを返す", async () => {
+  const { lm, extpay, clock } = setup({ deferUser: true, networkTimeoutMs: 1000 });
+  const a = lm.getLicenseState({ refresh: true }); // 1 本目を待つ
+  await tick();
+  clock.mono += 6 * 1000 + 1;
+  const b = lm.getLicenseState({ refresh: true }); // 見捨てて 2 本目
+  await tick();
+  extpay.pendingUsers[1].resolve(paidUser()); // 新しい答え (購入済み) が先に届く
+  assert.equal((await b).paid, true);
+  extpay.pendingUsers[0].resolve(unpaidUser()); // 1 本目の古い答え
+  assert.equal((await a).paid, true, "古い答えを返さない");
 });
 
 test("T-PRO-15 content script には、7 日以内のキャッシュをすぐ返し、古ければ裏で確かめ直す", async () => {

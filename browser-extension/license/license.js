@@ -51,6 +51,8 @@ export function createLicenseManager({ extpayId, makeExtPay, storage, alarms, ru
   // 書くのは、すでに書いた答えより新しく始めた問い合わせの答えだけ (古い答えで上書きしない)
   let generation = 0;
   let writtenGen = 0;
+  // writtenGen の答え (書いている途中を含む)。それより古い問い合わせを待っていた呼び手に返す
+  let latest = null;
   // 返らない問い合わせ・依頼を見捨てて、新しく始めるまでの時間 (時間切れの 6 倍。D-PRO-04、D-PRO-11)。
   // 年齢はメモリの中だけで使うので、壁の時計ではなく単調な時計で測る (時計を戻しても見捨てない)
   const giveUpMs = 6 * networkTimeoutMs;
@@ -89,12 +91,15 @@ export function createLicenseManager({ extpayId, makeExtPay, storage, alarms, ru
       trialEndsAt: installedAt === null ? null : installedAt + TRIAL_PERIOD_MS,
     };
     // あとから始めた問い合わせの答えがもう書かれていれば、古い答えで上書きしない。まだ書かれていなければ
-    // (あとの問い合わせが失敗した・返らない)、遅れて届いた答えでも残す
+    // (あとの問い合わせが失敗した・返らない)、遅れて届いた答えでも残す。番号と答えは、書き込みを待つ前に決める
     if (gen > writtenGen) {
       writtenGen = gen;
+      latest = state;
       await storage.set({ [LICENSE_CACHE_KEY]: state });
+      return withDerived(state, "network");
     }
-    return withDerived(state, "network");
+    // もっと新しく始めた問い合わせの答えがある。この問い合わせを待っていた呼び手には、古い答えを見せない
+    return withDerived(latest, "network");
   }
 
   // 待つのは networkTimeoutMs まで。p そのものは止めない (ExtPay の fetch には中断が無い)
@@ -109,7 +114,7 @@ export function createLicenseManager({ extpayId, makeExtPay, storage, alarms, ru
   // ExtPay への問い合わせは、ふつうは同時に 1 本だけ。時間切れは通信の失敗として扱うが、問い合わせは返るまで
   // 残り、そのあいだの確かめ直しも同じ問い合わせを待つ (新しく始めない)。時間切れのあとで答えが届けば、
   // キャッシュが書き換わり、storage の変化で画面と content script に伝わる。giveUpMs たっても返らない
-  // 問い合わせだけは見捨てて、次の確かめ直しで新しく始める (このときだけ 2 本になる。D-PRO-11)
+  // 問い合わせだけは見捨てて、次の確かめ直しで新しく始める (見捨てるたびに 1 本増えうる。D-PRO-11)
   function revalidateOnce() {
     if (inflight && tooOld(inflight.startedAt)) inflight = null;
     if (!inflight) {

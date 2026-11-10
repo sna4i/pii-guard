@@ -54,7 +54,7 @@
   function describeOpenFailure(reason) {
     if (reason === "timeout") return "決済サービスから返事がありません。しばらく待っても開かないときは、もう一度押してください";
     // 購入とログインのページは同時に 1 つだけ頼む (license/license.js の openPage。D-PRO-04)
-    if (reason === "busy") return "別のページを開いているところです。開いてから、もう一度押してください";
+    if (reason === "busy") return "別のページを開いているところです。開いたら (開かないときは 1 分ほど待ってから)、もう一度押してください";
     return "ページを開けませんでした";
   }
 
