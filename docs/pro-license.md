@@ -55,13 +55,16 @@ ExtensionPay (npm の `extpay` 3.1.2 の中身を読んだ):
 | D-PRO-01 | `vendor/extpay/ExtPay.esm.js` は、`dist/ExtPay.js` の末尾に `export default ExtPay;` を 1 行足したもの。それ以外は 1 バイトも変えない。出どころ、元のファイルの sha256、足した行、ライセンスは `vendor/extpay/README.md` に書き、`LICENSE` を写す | F-PRO-01 |
 | D-PRO-02 | `license/license.js` は、ExtPay を作る関数・`chrome.storage.local`・`chrome.alarms`・`chrome.runtime`・時計を引数で受ける (`createLicenseManager(deps)`)。Service Worker は本物を渡し、テストは偽物を渡す | F-PRO-02〜05 |
 | D-PRO-03 | アラーム `license-revalidate` は、無いときだけ作る。Service Worker は 30 秒ほどで止まり、起動のたびに `create` すると 60 分の時計が戻されて鳴らなくなる | F-PRO-03 |
-| D-PRO-04 | 購入とログインのページを開く依頼は、拡張機能のページ (ポップアップ、設定画面) からだけ受ける。状態の問い合わせは、content script と保護入力欄からも受ける (エンジンの門に使う) | F-PRO-05 |
+| D-PRO-04 | 購入とログインのページを開く依頼と、確かめ直し (`refresh`) は、ポップアップと設定画面 (`popup.html`、`options.html`) からだけ受ける。保護入力欄の iframe も拡張機能のページだが、AI のサイトの中にあるので受けない。状態の問い合わせは、content script と保護入力欄からも受ける (エンジンの門に使う)。ページを開けなかったとき (ExtPay は API キーを作る通信のあとでページを開く) は `{ ok: false, reason: "network" }` を返し、画面に「ページを開けませんでした」と出す | F-PRO-05 |
 | D-PRO-05 | extensionpay.com の content script は付けない。付けると「extensionpay.com のデータの読み取りと変更」の警告が増え、更新したとき、利用者が許可するまで拡張機能が止まる。代わりに、`{type:"license:get", refresh:true}` でキャッシュを飛ばして確かめ直せるようにし、画面に「購入状態を更新」を置く。支払いのあとは、これか 60 分ごとの確かめ直しで反映する | NF-PRO-01、F-PRO-05 |
 | D-PRO-06 | Pro かどうかは Service Worker だけで決める (`isPro()` = 購入済み、またはお試しの期間中)。content script と保護入力欄は `license:get` で問い合わせ、`licenseState` が変わったら問い合わせ直す。ページの世界には、今の設定の配り方 (`broadcastSettings()`) に `pro` を足して伝える。どの場所でも、エンジンの `setProEnabled()` を呼ぶ | F-PRO-06 |
 | D-PRO-07 | エンジンは `setProEnabled(on)` で受けた値を覚え、`collectDetections()` で Pro のときだけ `proRules.getProPatterns(disabled)` を足す。オフのときは今と同じ配列をそのまま使う | F-PRO-06、NF-PRO-02 |
-| D-PRO-08 | お試しは ExtPay の `installedAt` から 7 日 (`trialEndsAt`)。ExtPay のお試し (`openTrialPage`) はメールの確認が要り、インストール直後には始まらないので使わない。`installedAt` は端末側の値なので、入れ直すと数え直しになる | F-PRO-08 |
+| D-PRO-08 | お試しは ExtPay の `installedAt` から 7 日 (`trialEndsAt`)。ExtPay のお試し (`openTrialPage`) はメールの確認が要り、インストール直後には始まらないので使わない。`installedAt` は端末側の値 (`chrome.storage.sync`) なので、消すと数え直しになる。**ExtPay が `installedAt` を書くのは、初めて作られたとき (ID が決まった版を初めて動かしたとき)。** 今の利用者の 7 日は、本物の ID を入れた版に更新した日から始まる。なので、本物の ID は、最初の Pro の機能と同じ版で入れる (Pro の中身が空のまま、お試しの 7 日だけが過ぎないように) | F-PRO-08 |
 | D-PRO-09 | `EXTPAY_ID` が仮の文字列 (`{{` で始まる) なら、ExtPay を作らない。状態は無料版 (`source: "unconfigured"`)、購入とログインのボタンは押せない | F-PRO-09 |
 | D-PRO-10 | 画面の文言は日本語の直書き (今の画面と同じ)。状態は「無料版」「Pro (プラン名)」「Pro (お試し中、あと N 日)」。確かめられなかったときは「購入状態を確認できませんでした」と最後に確かめた日時を添える | F-PRO-07 |
+| D-PRO-11 | ExtPay の通信には時間切れが無いので、10 秒で切り、通信の失敗として扱う (7 日の猶予が効く)。確かめ直しは同時に 1 本だけ。content script と保護入力欄には、7 日以内のキャッシュがあれば通信を待たずに返し、60 分を過ぎていれば裏で確かめ直す (`source: "stale"`)。答えが届けば `licenseState` が書き換わり、storage の変化で伝わる。最後に確かめた日時が未来 (時計が戻った) なら、古いものとして扱う。アラームは、無いときと、間隔が今と違うときに作る | F-PRO-02〜04 |
+| D-PRO-12 | ID が仮のあいだ (と、Service Worker から答えが無いとき) は、ポップアップと設定画面に Pro の表示そのものを出さない。「準備中」の表示や、まだ通信しない ExtensionPay の説明を、今の利用者に見せないため | F-PRO-07、F-PRO-09 |
+| D-PRO-13 | 画面以外 (content script、保護入力欄) への答えは `{ pro, trial, configured, source }` だけ。購入者のメールやプランを、AI のサイトの近くに出さない | F-PRO-05 |
 
 ## 確かめ方
 
@@ -72,13 +75,26 @@ ExtensionPay (npm の `extpay` 3.1.2 の中身を読んだ):
 | T-PRO-03 | 未購入なら無料版で、結果をキャッシュに残す | 同上 |
 | T-PRO-04 | インストールから 7 日は Pro (お試し)、過ぎたら無料版 | 同上 |
 | T-PRO-05 | ID が仮なら、ExtPay を作らず、無料版を返す | 同上 |
-| T-PRO-06 | アラームは無いときだけ作る | 同上 |
-| T-PRO-07 | 購入とログインのページを開く依頼は、拡張機能のページからだけ受ける | 同上 |
+| T-PRO-06 | アラームは無いとき (と、間隔が今と違うとき) だけ作る | 同上 |
+| T-PRO-07 | 画面以外への答えは Pro かどうかだけ。購入とログインのページは、ポップアップと設定画面からの依頼でだけ開く (保護入力欄の iframe や content script からは開かない)。開けなかったら失敗を返す。content script からの `refresh` は聞かない | 同上 |
+| T-PRO-13 | キャッシュが古いとき、同時の問い合わせでも ExtPay への確認は 1 回だけ | 同上 |
+| T-PRO-14 | ExtPay が返らないときは、時間切れを通信の失敗として扱う (7 日以内なら猶予) | 同上 |
+| T-PRO-15 | content script には、7 日以内のキャッシュを通信を待たずに返し、古ければ裏で確かめ直す | 同上 |
+| T-PRO-16 | 最後に確かめた日時が未来なら、古いものとして確かめ直し、猶予の根拠にしない | 同上 |
 | T-PRO-08 | Pro でないとき、エンジンの検出結果は今と同じ。Pro のときだけ Pro のルールパックが効き、送る文の伏せ字にも効く。止めた分類には従う | `tests/engine/pro-gate.test.mjs` |
 | T-PRO-09 | 今までの単体・E2E・統合テストがすべて通る (ExtPay を読み込んでも、無料版の動きが変わらない) | 既存のテスト |
-| T-PRO-10 | 画面に出す文: 無料版、Pro (プラン名)、お試しの残り日数 (切り上げ)、確かめられなかったときの注記、ID が仮のとき、答えが無いとき | `tests/engine/license-view.test.mjs` |
-| T-PRO-11 | ID が仮のまま読み込むと、無料版 (unconfigured) で、アラームも ExtPay の保存も無い。ポップアップと設定画面に「無料版」「Pro 版は準備中です」が出て、購入のボタンは出ない。ページの世界には Pro はオフとして配られる | `tests/e2e/pro-license.test.mjs` |
-| T-PRO-12 | 同梱した本物の ExtPay を、extensionpay.com を名乗る模擬のサーバにつなぐ。入れた直後はお試しの Pro で、購入のページを開くまで通信しない。「Pro にアップグレード」で API キーを作って購入のページを開く。購入のあと「購入状態を更新」で「Pro (プラン名)」になり、ページの世界のエンジンにも Pro が届く。通信の失敗は 7 日の猶予。お試しは 7 日で終わる | `tests/e2e/pro-license-extpay.test.mjs` |
+| T-PRO-10 | 画面に出す文: 無料版、Pro (プラン名)、お試しの残り日数 (切り上げ)、確かめられなかったときの注記。ID が仮のときと答えが無いときは出さない | `tests/engine/license-view.test.mjs` |
+| T-PRO-11 | ID が仮のまま読み込むと、無料版 (unconfigured) で、アラームも ExtPay の保存も無い。ポップアップと設定画面に Pro の表示は出ない。ページの世界には Pro はオフとして配られる | `tests/e2e/pro-license.test.mjs` |
+| T-PRO-12 | 同梱した本物の ExtPay を、extensionpay.com を名乗る模擬のサーバにつなぐ。入れた直後はお試しの Pro で、購入のページを開くまで通信しない。「Pro にアップグレード」で API キーを作って購入のページを開く。購入のあと「購入状態を更新」で「Pro (プラン名)」になり、ページの世界のエンジンにも Pro が届く。Pro のときは、保護入力欄から送る文と、content script (ISOLATED world) のエンジンで伏せる文の両方に、Pro のルールが効く (写しの Pro のルールパックにテスト用のルールを 1 つ入れて確かめる。どちらかの配線を外すと、その経路のテストだけが落ちることも確かめた)。通信の失敗は 7 日の猶予。お試しは 7 日で終わる | `tests/e2e/pro-license-extpay.test.mjs` |
+
+## 出す前に決めること・直すこと
+
+| 項目 | 内容 |
+|---|---|
+| ExtPay のライセンス | 表記が AGPL-3.0-or-later (package.json、コードのコメント) と LGPL-3.0 (LICENSE、識別子だけで本文は無い) に分かれている。Service Worker が ExtPay を読み込むので、ID が仮の版でも同梱して配ることになる。AGPL なら、拡張機能全体を AGPL で出すことになりうる。LGPL なら、別のファイルのまま同梱してよいが、GPL-3.0 と LGPL-3.0 の本文と告知を一緒に配る必要がある。作者に確かめるか、AGPL とみなして決める。決まるまでは、この版をストアに出さない |
+| プライバシーポリシーとストアの開示 | 本物の ID を入れる版で書き足す。購入・ログインのページを開いたあと extensionpay.com と通信すること (送るのは拡張機能の ID と API キー)、購入者のメールを `licenseState` (`chrome.storage.local`) に置くこと、ExtPay が `chrome.storage.sync` に API キー・購入者の情報 (メールを含む)・`installedAt` を置き、Chrome の同期で別の端末にも届くこと。ストアのプライバシーの申告 (メールを扱う) も直す |
+| お試しの始まり | D-PRO-08 のとおり、本物の ID は最初の Pro の機能と同じ版で入れる |
+| ページの世界に配る `pro` | AI のサイトは、利用者が Pro かどうかを読める (送ることもできる)。ページが偽の設定で `pro` を変えても、変わるのはページの世界の予備のエンジンだけで、検出が増えるだけ。今の脅かしの見立て (ページの世界はページが握る) の中なので、見立てに書き足す |
 
 ## 手で確かめること (ExtensionPay に登録したあと)
 
