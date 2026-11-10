@@ -45,7 +45,7 @@ function fakeRuntime() {
 }
 // user: getUser() が返すもの。fail: true なら通信の失敗として投げる。hang: true なら返らない (時間切れを試す)。
 // openFails: true なら購入とログインのページを開く操作が失敗する (API キーを作る通信の失敗)
-function fakeExtPay({ user = { paid: false, installedAt: new Date(T0) }, fail = false, hang = false, openFails = false } = {}) {
+function fakeExtPay({ user = { paid: false, installedAt: new Date(T0) }, fail = false, hang = false, openFails = false, openHang = false } = {}) {
   const calls = { getUser: 0, startBackground: 0, openPaymentPage: 0, openLoginPage: 0 };
   const api = {
     calls,
@@ -59,14 +59,14 @@ function fakeExtPay({ user = { paid: false, installedAt: new Date(T0) }, fail = 
       return user;
     },
     startBackground() { calls.startBackground++; },
-    async openPaymentPage() { calls.openPaymentPage++; if (openFails) throw new TypeError("Failed to fetch"); },
+    async openPaymentPage() { calls.openPaymentPage++; if (openHang) return new Promise(() => {}); if (openFails) throw new TypeError("Failed to fetch"); },
     async openLoginPage() { calls.openLoginPage++; if (openFails) throw new TypeError("Failed to fetch"); },
   };
   return api;
 }
-function setup({ id = "pii-guard-test", now = T0, user, fail, hang, openFails, storage = {}, alarms = [], networkTimeoutMs } = {}) {
+function setup({ id = "pii-guard-test", now = T0, user, fail, hang, openFails, openHang, storage = {}, alarms = [], networkTimeoutMs } = {}) {
   const clock = { now };
-  const extpay = fakeExtPay({ user, fail, hang, openFails });
+  const extpay = fakeExtPay({ user, fail, hang, openFails, openHang });
   let made = 0;
   const deps = {
     extpayId: id,
@@ -310,16 +310,42 @@ test("T-PRO-14 ExtPay が返らないときは、時間切れを通信の失敗�
   assert.equal(s.error, true);
 });
 
+test("T-PRO-14b 時間切れのあとも、問い合わせが返るまでは新しく始めない (同時に 1 本だけ)", async () => {
+  const cached = { paid: true, plan: PLAN, email: "buyer@example.test", checkedAt: T0 - 2 * HOUR, trialEndsAt: null };
+  const { lm, extpay } = setup({ storage: { [LICENSE_CACHE_KEY]: cached }, hang: true, networkTimeoutMs: 20 });
+  assert.equal((await lm.getLicenseState()).source, "grace");
+  assert.equal((await lm.getLicenseState({ refresh: true })).source, "grace", "2 回目も時間切れで答える");
+  assert.equal(extpay.calls.getUser, 1, "返らない問い合わせがあるあいだは、次を始めない");
+});
+
 test("T-PRO-15 content script には、7 日以内のキャッシュをすぐ返し、古ければ裏で確かめ直す", async () => {
   const cached = { paid: true, plan: PLAN, email: "buyer@example.test", checkedAt: T0 - 2 * HOUR, trialEndsAt: null };
+  // ExtPay は返らない。通信を待っていたら、時間切れのあとの答え (source "grace"、error) になる。時計では測らない
   const { lm, deps, extpay } = setup({ storage: { [LICENSE_CACHE_KEY]: cached }, hang: true, networkTimeoutMs: 300 });
   lm.initLicense();
-  const t0 = Date.now();
   const b = await send(deps, { type: "license:get" }, CONTENT);
-  assert.ok(Date.now() - t0 < 150, `通信の時間切れ (300ms) を待たずに答える (${Date.now() - t0}ms)`);
-  assert.equal(b.pro, true);
-  assert.equal(b.source, "stale");
+  assert.deepEqual(b, { pro: true, trial: false, configured: true, source: "stale" }, "通信を待たずに、キャッシュから答える");
   assert.equal(extpay.calls.getUser, 1, "裏で確かめ直しを始める");
+});
+
+test("T-PRO-15b 画面にも、refresh でなければ 7 日以内のキャッシュをすぐ返す。refresh なら確かめ直しを待つ", async () => {
+  const cached = { paid: true, plan: PLAN, email: "buyer@example.test", checkedAt: T0 - 2 * HOUR, trialEndsAt: null };
+  const { lm, deps, extpay } = setup({ storage: { [LICENSE_CACHE_KEY]: cached }, user: unpaidUser() });
+  lm.initLicense();
+  const a = await send(deps, { type: "license:get" }, POPUP);
+  assert.equal(a.source, "stale");
+  assert.equal(a.paid, true);
+  assert.equal(extpay.calls.getUser, 1, "裏で確かめ直しを始める");
+  await new Promise((r) => setTimeout(r, 0));
+  const b = await send(deps, { type: "license:get", refresh: true }, POPUP);
+  assert.equal(b.source, "network");
+  assert.equal(b.paid, false);
+});
+
+test("T-PRO-07g ページを開く待ちにも時間切れがある (ExtPay が返らないとき)", async () => {
+  const { lm, deps } = setup({ openHang: true, networkTimeoutMs: 20 });
+  lm.initLicense();
+  assert.deepEqual(await send(deps, { type: "license:openPayment" }, POPUP), { ok: false, reason: "timeout" });
 });
 
 test("T-PRO-16 最後に確かめた日時が未来 (時計が戻った) なら、古いものとして確かめ直す", async () => {

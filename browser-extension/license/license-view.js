@@ -44,7 +44,18 @@
     return { visible: true, status, note, tone, canUpgrade: !state.paid, canLogin: !state.paid, canRefresh: true };
   }
 
-  const api = { describeLicense };
+  /**
+   * 購入・ログインのページを開く依頼が失敗したときの注記 (license:openPayment / license:openLogin の reason)。
+   * 時間切れ ("timeout") のときは、ExtPay の通信がそのあとで返って、ページが開くこともある
+   * @param {string|undefined} reason
+   * @returns {string}
+   */
+  function describeOpenFailure(reason) {
+    if (reason === "timeout") return "決済サービスから返事がありません。しばらく待っても開かないときは、もう一度押してください";
+    return "ページを開けませんでした";
+  }
+
+  const api = { describeLicense, describeOpenFailure };
   if (typeof module === "object" && module.exports) module.exports = api;
   if (root && typeof root === "object") root.PiiGuardLicenseView = api;
 })(typeof window !== "undefined" ? window : typeof self !== "undefined" ? self : globalThis);

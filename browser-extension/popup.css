@@ -206,6 +206,10 @@ footer a:hover {
 }
 
 /* Pro 版 (docs/pro-license.md の F-PRO-07) */
+/* #license-box の中では .license-row がただ 1 つの section なので、.row:last-of-type の線消しが当たってしまう。線を戻す */
+#license-box > .row {
+  border-bottom: 1px solid var(--border);
+}
 .license-note {
   margin: 0 0 6px;
   color: var(--warn);

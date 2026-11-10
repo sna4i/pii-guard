@@ -82,15 +82,21 @@ export function createLicenseManager({ extpayId, makeExtPay, storage, alarms, ru
     return withDerived(state, "network");
   }
 
-  // 確かめ直しは同時に 1 本だけ。時間切れは通信の失敗として扱う。時間切れのあとで答えが届けば、
+  // 待つのは networkTimeoutMs まで。p そのものは止めない (ExtPay の fetch には中断が無い)
+  function withTimeout(p) {
+    let timer = null;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(Object.assign(new Error("license: timeout"), { code: "timeout" })), networkTimeoutMs);
+    });
+    return Promise.race([p, timeout]).finally(() => clearTimeout(timer));
+  }
+
+  // ExtPay への問い合わせは同時に 1 本だけ。時間切れは通信の失敗として扱うが、問い合わせは返るまで残り、
+  // そのあいだの確かめ直しも同じ問い合わせを待つ (新しく始めない)。時間切れのあとで答えが届けば、
   // キャッシュが書き換わり、storage の変化で画面と content script に伝わる (D-PRO-11)
   function revalidateOnce() {
-    if (!inflight) {
-      let timer = null;
-      const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("license: timeout")), networkTimeoutMs); });
-      inflight = Promise.race([revalidate(), timeout]).finally(() => { clearTimeout(timer); inflight = null; });
-    }
-    return inflight;
+    if (!inflight) inflight = revalidate().finally(() => { inflight = null; });
+    return withTimeout(inflight);
   }
 
   // 最後に確かめてからの時間。未来の日時 (時計が戻った) は、古いものとして扱う
@@ -100,8 +106,8 @@ export function createLicenseManager({ extpayId, makeExtPay, storage, alarms, ru
     return age >= 0 ? age : Infinity;
   };
 
-  // preferCache: content script と保護入力欄から。7 日以内のキャッシュがあれば通信を待たずに返し、
-  // 60 分を過ぎていれば裏で確かめ直す (ページを開くたびに通信を待たせない。D-PRO-11)
+  // preferCache: 7 日以内のキャッシュがあれば通信を待たずに返し、60 分を過ぎていれば裏で確かめ直す
+  // (ページやポップアップを開くたびに通信を待たせない。D-PRO-11)。refresh なら必ず確かめ直しを待つ
   async function getLicenseState({ refresh = false, preferCache = false } = {}) {
     if (!configured) return unconfiguredState();
     const cached = await readCache();
@@ -140,8 +146,8 @@ export function createLicenseManager({ extpayId, makeExtPay, storage, alarms, ru
     if (!sender || sender.id !== runtime.id) return false;
     const fromUi = isUiPage(sender);
     if (msg.type === "license:get") {
-      // 確かめ直し (refresh) は画面のボタンから。content script はページを開くたびに聞くので、キャッシュを使わせる
-      getLicenseState({ refresh: msg.refresh === true && fromUi, preferCache: !fromUi })
+      // 確かめ直し (refresh) は画面のボタンからだけ。それ以外は、画面にも content script にもキャッシュを先に返す
+      getLicenseState({ refresh: msg.refresh === true && fromUi, preferCache: true })
         .then((s) => sendResponse(fromUi ? s : forEngine(s)),
           () => { const s = { ...withDerived(FREE, "none"), error: true }; sendResponse(fromUi ? s : forEngine(s)); });
       return true;
@@ -151,10 +157,11 @@ export function createLicenseManager({ extpayId, makeExtPay, storage, alarms, ru
       if (!fromUi) { sendResponse({ ok: false }); return false; }
       const ep = getExtPay();
       if (!ep) { sendResponse({ ok: false, reason: "unconfigured" }); return false; }
-      // ExtPay は API キーを作る通信のあとでページを開く。失敗したら画面に伝える
-      Promise.resolve()
-        .then(() => (msg.type === "license:openPayment" ? ep.openPaymentPage() : ep.openLoginPage()))
-        .then(() => sendResponse({ ok: true }), () => sendResponse({ ok: false, reason: "network" }));
+      // ExtPay は API キーを作る通信のあとでページを開く。失敗したら画面に伝える。通信が返らないときも
+      // networkTimeoutMs で答える (ページは、そのあとで開くこともある)
+      withTimeout(Promise.resolve().then(() => (msg.type === "license:openPayment" ? ep.openPaymentPage() : ep.openLoginPage())))
+        .then(() => sendResponse({ ok: true }),
+          (e) => sendResponse({ ok: false, reason: e && e.code === "timeout" ? "timeout" : "network" }));
       return true;
     }
     return false;

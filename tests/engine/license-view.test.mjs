@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 
 const require = createRequire(import.meta.url);
-const { describeLicense } = require("../../browser-extension/license/license-view.js");
+const { describeLicense, describeOpenFailure } = require("../../browser-extension/license/license-view.js");
 
 const DAY = 24 * 60 * 60 * 1000;
 const NOW = Date.UTC(2026, 10, 10, 3, 0, 0);
@@ -54,4 +54,12 @@ test("T-PRO-10f 答えが無い (Service Worker に届かない) ときも出さ
   const v = describeLicense(undefined, NOW);
   assert.equal(v.visible, false);
   assert.deepEqual([v.canUpgrade, v.canLogin, v.canRefresh], [false, false, false]);
+});
+
+test("T-PRO-10g ページを開けなかったときの文。時間切れは、あとで開くこともあるので「開けなかった」と言い切らない", () => {
+  assert.equal(describeOpenFailure("network"), "ページを開けませんでした");
+  assert.equal(describeOpenFailure(undefined), "ページを開けませんでした");
+  const t = describeOpenFailure("timeout");
+  assert.match(t, /返事がありません/);
+  assert.doesNotMatch(t, /開けませんでした/);
 });

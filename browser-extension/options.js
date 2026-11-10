@@ -802,17 +802,18 @@ function renderProLicense(state) {
   $("pro-refresh").hidden = !v.canRefresh;
 }
 async function loadProLicense(refresh) {
-  try {
-    renderProLicense(await chrome.runtime.sendMessage({ type: "license:get", refresh: refresh === true }));
-  } catch (_) {
-    renderProLicense(null);
-  }
+  let state = null;
+  try { state = await chrome.runtime.sendMessage({ type: "license:get", refresh: refresh === true }); } catch (_) {}
+  renderProLicense(state);
+  // キャッシュで先に出したとき (60 分を過ぎている) は、裏の確かめ直しの答えを待って出し直す。
+  // Service Worker の問い合わせは 1 本にまとまるので、通信は増えない。確かめられなければ注記が出る (D-PRO-11)
+  if (state && state.source === "stale") loadProLicense(true);
 }
 async function openProPage(type) {
-  let ok = false;
-  try { ok = !!(await chrome.runtime.sendMessage({ type }))?.ok; } catch (_) {}
-  if (!ok) {
-    $("pro-note").textContent = "ページを開けませんでした";
+  let r = null;
+  try { r = await chrome.runtime.sendMessage({ type }); } catch (_) {}
+  if (!(r && r.ok)) {
+    $("pro-note").textContent = window.PiiGuardLicenseView.describeOpenFailure(r && r.reason);
     $("pro-note").hidden = false;
   }
 }

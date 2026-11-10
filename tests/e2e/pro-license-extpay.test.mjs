@@ -34,7 +34,7 @@ const proSrc = fs.readFileSync(proRules, "utf8");
 if (!proSrc.includes("const PRO_RULE_PACK = [];")) throw new Error("pro-rules.js の形が変わった");
 fs.writeFileSync(proRules, proSrc.replace("const PRO_RULE_PACK = [];", 'const PRO_RULE_PACK = [{ category: "PRO_TEST", entity_type: "PRO_TEST", pattern: /QA-PRO-\\d{4}/g }];'));
 process.env.PII_GUARD_EXT = EXT;
-const { launch, sleep } = await import("../fixtures/harness.mjs");
+const { launch } = await import("../fixtures/harness.mjs");
 
 // ---- extensionpay.com を名乗る模擬のサーバ ------------------------------------------------
 function startMockExtensionPay() {
@@ -42,16 +42,18 @@ function startMockExtensionPay() {
   const key = path.join(work, "pay.key");
   execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-keyout", key, "-out", crt, "-days", "1", "-nodes",
     "-subj", "/CN=extensionpay.com", "-addext", "subjectAltName=DNS:extensionpay.com"], { stdio: "ignore" });
-  const state = { mode: "unpaid", requests: [] };
+  // gate: Promise を入れると、購入状態の問い合わせへの答えを、それが解けるまで止める (裏の確かめ直しの途中を見るため)
+  const state = { mode: "unpaid", requests: [], gate: null };
   const base = `/extension/${TEST_ID}`;
   const cors = { "access-control-allow-origin": "*", "access-control-allow-headers": "content-type, accept", "access-control-allow-methods": "GET, POST, OPTIONS" };
-  const server = https.createServer({ key: fs.readFileSync(key), cert: fs.readFileSync(crt) }, (req, res) => {
+  const server = https.createServer({ key: fs.readFileSync(key), cert: fs.readFileSync(crt) }, async (req, res) => {
     const url = new URL(req.url, "https://extensionpay.com");
     if (req.method !== "OPTIONS") state.requests.push({ method: req.method, path: url.pathname, apiKey: url.searchParams.get("api_key") });
     const json = (status, body) => { res.writeHead(status, { ...cors, "content-type": "application/json" }); res.end(JSON.stringify(body)); };
     if (req.method === "OPTIONS") { res.writeHead(204, cors); res.end(); return; }
     if (req.method === "POST" && url.pathname === `${base}/api/new-key`) return json(200, API_KEY);
     if (req.method === "GET" && url.pathname === `${base}/api/v2/user`) {
+      if (state.gate) await state.gate;
       if (state.mode === "error") { res.writeHead(500, cors); res.end("mock error"); return; }
       const paid = state.mode === "paid";
       return json(200, {
@@ -120,6 +122,8 @@ test("T-PRO-12b 「Pro にアップグレード」で、ExtPay が API キーを
   try {
     await p.waitForSelector("#license-upgrade:not([hidden])", { timeout: 5000 });
     assert.match(await p.textContent("#license-status"), /^Pro \(お試し中、あと 7 日\)$/);
+    assert.equal(await p.evaluate(() => getComputedStyle(document.querySelector("#license-box > .row")).borderBottomStyle), "solid",
+      "プランの行の下の線が、.row:last-of-type に消されない");
     const [tab] = await Promise.all([h.ctx.waitForEvent("page", { timeout: 8000 }), p.click("#license-upgrade")]);
     await tab.waitForLoadState("domcontentloaded");
     assert.equal(new URL(tab.url()).pathname, `/extension/${TEST_ID}/choose-plan`);
@@ -163,7 +167,11 @@ test("T-PRO-12f Pro のとき、保護入力欄 (ChatGPT) から送る文に Pro
   try {
     const frame = await h.waitSecureReady(page, 10000);
     assert.ok(frame, "保護入力欄が立ち上がる");
-    await sleep(500);
+    // 保護入力欄が Service Worker から Pro を受け取り、エンジンに渡し終えるまで待つ
+    await frame.waitForFunction(() => {
+      const e = window.__localMaskMCP && window.__localMaskMCP.engine;
+      return !!(e && typeof e.isProEnabled === "function" && e.isProEnabled());
+    }, null, { timeout: 8000 });
     await h.type(page, frame, PRO_TEXT);
     await h.enter(page, frame);
     await page.waitForFunction(() => window.__mock.events.some((e) => e.type === "conversation-ok"), null, { timeout: 10000 });
@@ -212,4 +220,52 @@ test("T-PRO-12e お試しはインストールから 7 日で終わり、未購�
     await p.waitForSelector("#license-box:not([hidden])", { timeout: 5000 });
     assert.equal(await p.textContent("#license-status"), "無料版");
   } finally { await p.close(); }
+});
+
+test("T-PRO-12h ポップアップは開いたらすぐキャッシュで出し、裏の確かめ直しが終わったら出し直す", async () => {
+  // 12e のあと: キャッシュは無料版。最後に確かめたのを 2 時間前にして (60 分を過ぎ、7 日以内)、購入済みに替える
+  pay.state.mode = "paid";
+  let release = () => {};
+  pay.state.gate = new Promise((r) => { release = r; });
+  await h.ext.evaluate(async () => {
+    const { licenseState } = await chrome.storage.local.get("licenseState");
+    await chrome.storage.local.set({ licenseState: { ...licenseState, checkedAt: Date.now() - 2 * 3600 * 1000 } });
+  });
+  const p = await openPage("popup.html");
+  try {
+    await p.waitForSelector("#license-box:not([hidden])", { timeout: 5000 });
+    assert.equal(await p.textContent("#license-status"), "無料版", "確かめ直しの答えを待たずに、キャッシュで出す");
+    release();
+    await p.waitForFunction(() => document.querySelector("#license-status").textContent === "Pro (Pro 月額)", null, { timeout: 15000 });
+  } finally {
+    pay.state.gate = null;
+    release();
+    await p.close();
+  }
+});
+
+test("T-PRO-12i キャッシュで先に出したあと、裏の確かめ直しが失敗したら、注記を出す", async () => {
+  // 12h のあと: キャッシュは購入済み。最後に確かめたのを 2 時間前にして、問い合わせを失敗させる
+  pay.state.mode = "error";
+  let release = () => {};
+  pay.state.gate = new Promise((r) => { release = r; });
+  await h.ext.evaluate(async () => {
+    const { licenseState } = await chrome.storage.local.get("licenseState");
+    await chrome.storage.local.set({ licenseState: { ...licenseState, checkedAt: Date.now() - 2 * 3600 * 1000 } });
+  });
+  const p = await openPage("popup.html");
+  try {
+    await p.waitForSelector("#license-box:not([hidden])", { timeout: 5000 });
+    assert.equal(await p.textContent("#license-status"), "Pro (Pro 月額)");
+    assert.equal(await p.isVisible("#license-note"), false, "答えが届くまでは注記を出さない");
+    release();
+    await p.waitForSelector("#license-note:not([hidden])", { timeout: 15000 });
+    assert.match(await p.textContent("#license-note"), /^購入状態を確認できませんでした \(最後に確認: .+\)$/);
+    assert.equal(await p.textContent("#license-status"), "Pro (Pro 月額)", "7 日以内なので Pro のまま");
+  } finally {
+    pay.state.gate = null;
+    release();
+    await p.close();
+    pay.state.mode = "paid";
+  }
 });
