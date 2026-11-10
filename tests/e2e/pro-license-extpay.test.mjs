@@ -271,3 +271,21 @@ test("T-PRO-12i キャッシュで先に出したあと、裏の確かめ直し�
     pay.state.mode = "paid";
   }
 });
+
+test("T-PRO-12j ポップアップを開いているあいだに購入状態が書き換わったら、出し直す (60 分ごとの確かめ直しなど)", async () => {
+  let p = null;
+  try {
+    // 12i のあと: 模擬のサーバは購入済み。確かめ直して、新しいキャッシュ (Pro) にしておく
+    await ask({ type: "license:get", refresh: true });
+    p = await openPage("popup.html");
+    await p.waitForFunction(() => document.querySelector("#license-status").textContent === "Pro (Pro 月額)", null, { timeout: 5000 });
+    // 裏の確かめ直しが書き換えたのと同じ形で、購入を取り消した状態を書く (ポップアップ自身は何も問い合わせない)
+    await h.ext.evaluate(async () => {
+      const { licenseState } = await chrome.storage.local.get("licenseState");
+      await chrome.storage.local.set({ licenseState: { ...licenseState, paid: false, plan: null, checkedAt: Date.now() } });
+    });
+    await p.waitForFunction(() => document.querySelector("#license-status").textContent !== "Pro (Pro 月額)", null, { timeout: 5000 });
+  } finally {
+    if (p) await p.close();
+  }
+});

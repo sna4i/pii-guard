@@ -46,12 +46,15 @@
 
   /**
    * 購入・ログインのページを開く依頼が失敗したときの注記 (license:openPayment / license:openLogin の reason)。
-   * 時間切れ ("timeout") のときは、ExtPay の通信がそのあとで返って、ページが開くこともある
+   * 時間切れ ("timeout") のときは、ExtPay の通信がそのあとで返って、ページが開くこともある。
+   * 別のページを開いている途中 ("busy") のときは、ExtPay を呼んでいない
    * @param {string|undefined} reason
    * @returns {string}
    */
   function describeOpenFailure(reason) {
     if (reason === "timeout") return "決済サービスから返事がありません。しばらく待っても開かないときは、もう一度押してください";
+    // 購入とログインのページは同時に 1 つだけ頼む (license/license.js の openPage。D-PRO-04)
+    if (reason === "busy") return "別のページを開いているところです。開いてから、もう一度押してください";
     return "ページを開けませんでした";
   }
 

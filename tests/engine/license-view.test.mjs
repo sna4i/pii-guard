@@ -62,4 +62,8 @@ test("T-PRO-10g ページを開けなかったときの文。時間切れは、�
   const t = describeOpenFailure("timeout");
   assert.match(t, /返事がありません/);
   assert.doesNotMatch(t, /開けませんでした/);
+  // 別のページを開いている途中 (D-PRO-04): 待ってから押し直せばよいことを伝える
+  const b = describeOpenFailure("busy");
+  assert.match(b, /別のページを開いているところです/);
+  assert.doesNotMatch(b, /開けませんでした/);
 });

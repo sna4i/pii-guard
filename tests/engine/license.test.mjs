@@ -70,7 +70,7 @@ function fakeExtPay({ user = { paid: false, installedAt: new Date(T0) }, fail = 
   return api;
 }
 function setup({ id = "pii-guard-test", now = T0, user, fail, hang, openFails, openHang, deferUser, deferOpen, storage = {}, alarms = [], networkTimeoutMs } = {}) {
-  const clock = { now };
+  const clock = { now, mono: 0 };
   const extpay = fakeExtPay({ user, fail, hang, openFails, openHang, deferUser, deferOpen });
   let made = 0;
   const deps = {
@@ -80,6 +80,7 @@ function setup({ id = "pii-guard-test", now = T0, user, fail, hang, openFails, o
     alarms: fakeAlarms(alarms),
     runtime: fakeRuntime(),
     now: () => clock.now,
+    monoNow: () => clock.mono,
     ...(networkTimeoutMs ? { networkTimeoutMs } : {}),
   };
   const lm = createLicenseManager(deps);
@@ -337,7 +338,7 @@ test("T-PRO-14d 返らない問い合わせは、時間切れの 6 倍たった�
   assert.equal((await lm.getLicenseState({ refresh: true })).error, true, "1 本目は時間切れ");
   assert.equal((await lm.getLicenseState({ refresh: true })).error, true, "まだ 1 本目を待つ");
   assert.equal(extpay.calls.getUser, 1);
-  clock.now += 6 * 20 + 1;
+  clock.mono += 6 * 20 + 1;
   const third = lm.getLicenseState({ refresh: true });
   await tick();
   assert.equal(extpay.calls.getUser, 2, "見捨てて 2 本目を始める");
@@ -347,6 +348,51 @@ test("T-PRO-14d 返らない問い合わせは、時間切れの 6 倍たった�
   await tick();
   const stored = (await deps.storage.get(LICENSE_CACHE_KEY))[LICENSE_CACHE_KEY];
   assert.equal(stored.paid, true, "見捨てた答えで書き換えない");
+});
+
+test("T-PRO-14e 見捨てた問い合わせがあとで返っても、走っている問い合わせを手放さない (次の呼び手はそれに合流する)", async () => {
+  const { lm, extpay, clock } = setup({ deferUser: true, networkTimeoutMs: 1000 });
+  const first = lm.getLicenseState({ refresh: true });
+  await tick();
+  clock.mono += 6 * 1000 + 1;
+  const second = lm.getLicenseState({ refresh: true });
+  await tick();
+  assert.equal(extpay.calls.getUser, 2, "見捨てて 2 本目");
+  extpay.pendingUsers[0].resolve(unpaidUser()); // 見捨てた 1 本目が返る
+  await first;
+  const third = lm.getLicenseState({ refresh: true });
+  await tick();
+  assert.equal(extpay.calls.getUser, 2, "3 回目の呼び手は、走っている 2 本目に合流する");
+  extpay.pendingUsers[1].resolve(paidUser());
+  assert.equal((await second).paid, true);
+  assert.equal((await third).paid, true);
+});
+
+test("T-PRO-14f 壁の時計が戻っても、走っている問い合わせを見捨てない (年齢は単調な時計で測る)", async () => {
+  const { lm, extpay, clock } = setup({ deferUser: true, networkTimeoutMs: 1000 });
+  lm.getLicenseState({ refresh: true });
+  await tick();
+  clock.now -= 60 * 1000;
+  lm.getLicenseState({ refresh: true });
+  await tick();
+  assert.equal(extpay.calls.getUser, 1);
+  extpay.pendingUsers[0].resolve(paidUser());
+});
+
+test("T-PRO-14g 見捨てた問い合わせの遅れた答えでも、それより新しい答えが書かれていなければ残す", async () => {
+  const { lm, extpay, clock, deps } = setup({ deferUser: true, networkTimeoutMs: 1000 });
+  const first = lm.getLicenseState({ refresh: true });
+  await tick();
+  clock.mono += 6 * 1000 + 1;
+  const second = lm.getLicenseState({ refresh: true });
+  await tick();
+  extpay.pendingUsers[1].reject(new TypeError("Failed to fetch")); // 2 本目は失敗
+  assert.equal((await second).error, true);
+  extpay.pendingUsers[0].resolve(paidUser()); // 1 本目の答えが遅れて届く
+  await first;
+  await tick();
+  const stored = (await deps.storage.get(LICENSE_CACHE_KEY))[LICENSE_CACHE_KEY];
+  assert.equal(stored && stored.paid, true, "ほかに答えが無いので、遅れた答えを残す");
 });
 
 test("T-PRO-15 content script には、7 日以内のキャッシュをすぐ返し、古ければ裏で確かめ直す", async () => {
@@ -379,32 +425,61 @@ test("T-PRO-07g ページを開く待ちにも時間切れがある (ExtPay が�
   assert.deepEqual(await send(deps, { type: "license:openPayment" }, POPUP), { ok: false, reason: "timeout" });
 });
 
-test("T-PRO-07h ページを開く依頼は 1 本ずつ。返らないあいだの押し直しは ExtPay を呼ばない (API キーを 2 つ作らない)。時間切れの 6 倍で見捨てる", async () => {
+test("T-PRO-07h ページを開く依頼は同時に 1 本だけ。返らないあいだの押し直しは ExtPay を呼ばない (API キーを 2 つ作らない)。60 秒で見捨てる", async () => {
   const { lm, deps, extpay, clock } = setup({ openHang: true, networkTimeoutMs: 20 });
   lm.initLicense();
-  const timeout = { ok: false, reason: "timeout" };
-  assert.deepEqual(await send(deps, { type: "license:openPayment" }, POPUP), timeout);
-  assert.deepEqual(await send(deps, { type: "license:openPayment" }, POPUP), timeout);
-  assert.deepEqual(await send(deps, { type: "license:openLogin" }, POPUP), timeout);
+  assert.deepEqual(await send(deps, { type: "license:openPayment" }, POPUP), { ok: false, reason: "timeout" });
+  assert.deepEqual(await send(deps, { type: "license:openPayment" }, POPUP), { ok: false, reason: "timeout" }, "同じ種類は同じ依頼を待つ");
+  assert.deepEqual(await send(deps, { type: "license:openLogin" }, POPUP), { ok: false, reason: "busy" }, "別の種類は断る (並べない)");
   assert.deepEqual([extpay.calls.openPaymentPage, extpay.calls.openLoginPage], [1, 0], "返らない依頼があるあいだは、ExtPay を呼ばない");
-  clock.now += 6 * 20 + 1;
-  assert.deepEqual(await send(deps, { type: "license:openPayment" }, POPUP), timeout);
-  assert.equal(extpay.calls.openPaymentPage, 2, "見捨てて新しく頼む");
+  clock.mono += 6 * 20 + 1;
+  assert.deepEqual(await send(deps, { type: "license:openLogin" }, POPUP), { ok: false, reason: "timeout" });
+  assert.equal(extpay.calls.openLoginPage, 1, "見捨てたあとは新しく頼む");
 });
 
-test("T-PRO-07i 購入のページを開いている途中でログインを押すと、購入が終わってからログインを開く", async () => {
+test("T-PRO-07i 購入のページを開いている途中のログインは断り、終わってから押せばログインを開く", async () => {
   const { lm, deps, extpay } = setup({ deferOpen: true });
   lm.initLicense();
   const pay = send(deps, { type: "license:openPayment" }, POPUP);
-  const login = send(deps, { type: "license:openLogin" }, POPUP);
   await tick();
-  assert.deepEqual([extpay.calls.openPaymentPage, extpay.calls.openLoginPage], [1, 0], "購入が終わるまで、ログインは待つ");
+  assert.deepEqual(await send(deps, { type: "license:openLogin" }, POPUP), { ok: false, reason: "busy" });
+  assert.equal(extpay.calls.openLoginPage, 0);
   extpay.pendingOpens[0].resolve();
   assert.deepEqual(await pay, { ok: true });
+  const login = send(deps, { type: "license:openLogin" }, POPUP);
   await tick();
   assert.equal(extpay.calls.openLoginPage, 1);
   extpay.pendingOpens[1].resolve();
   assert.deepEqual(await login, { ok: true });
+});
+
+test("T-PRO-07j 同じ種類を 2 回押しても、ExtPay は 1 回だけ呼び、両方に結果を返す (ページを 2 つ開かない)", async () => {
+  const { lm, deps, extpay } = setup({ deferOpen: true });
+  lm.initLicense();
+  const a = send(deps, { type: "license:openPayment" }, POPUP);
+  const b = send(deps, { type: "license:openPayment" }, POPUP);
+  await tick();
+  extpay.pendingOpens[0].resolve();
+  assert.deepEqual([await a, await b], [{ ok: true }, { ok: true }]);
+  assert.equal(extpay.calls.openPaymentPage, 1);
+});
+
+test("T-PRO-07k 見捨てた依頼があとで返っても、走っている依頼を手放さない", async () => {
+  const { lm, deps, extpay, clock } = setup({ deferOpen: true, networkTimeoutMs: 1000 });
+  lm.initLicense();
+  send(deps, { type: "license:openPayment" }, POPUP);
+  await tick();
+  clock.mono += 6 * 1000 + 1;
+  const second = send(deps, { type: "license:openPayment" }, POPUP);
+  await tick();
+  assert.equal(extpay.calls.openPaymentPage, 2, "見捨てて新しく頼む");
+  extpay.pendingOpens[0].resolve(); // 見捨てた 1 本目が返る
+  await tick();
+  const third = send(deps, { type: "license:openPayment" }, POPUP);
+  await tick();
+  assert.equal(extpay.calls.openPaymentPage, 2, "走っている 2 本目に合流する");
+  extpay.pendingOpens[1].resolve();
+  assert.deepEqual([await second, await third], [{ ok: true }, { ok: true }]);
 });
 
 test("T-PRO-16 最後に確かめた日時が未来 (時計が戻った) なら、古いものとして確かめ直す", async () => {
