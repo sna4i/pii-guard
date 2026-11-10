@@ -17,16 +17,17 @@
     </nav>
 
     <main id="tab-settings" role="tabpanel" aria-labelledby="tabbtn-settings">
-      <!-- Pro 版 (docs/pro-license.md の F-PRO-07)。出す文とボタンは license/license-view.js が決める -->
-      <section class="card" id="pro-card">
+      <!-- Pro 版 (docs/pro-license.md の F-PRO-07)。出す文とボタンは license/license-view.js が決める。
+           ExtensionPay に登録する前 (ID が仮) は、まるごと出さない (D-PRO-12) -->
+      <section class="card" id="pro-card" hidden>
         <h2>PII Guard Pro</h2>
         <p class="hint">
-          購入状態の確認のときだけ、決済サービス (ExtensionPay) と通信します。入力した文章や検出結果は送りません。
+          購入やログインのページを開いたあと、購入状態を確かめるときだけ、決済サービス (ExtensionPay) と通信します。入力した文章や検出結果は送りません。
           購入したあとは「購入状態を更新」を押してください。
         </p>
         <div class="form-row">
           <span class="form-label">今のプラン</span>
-          <span id="pro-status" class="pro-status" aria-live="polite">確認中…</span>
+          <span id="pro-status" class="pro-status" aria-live="polite"></span>
         </div>
         <p id="pro-note" class="pro-note" hidden></p>
         <div class="bulk-actions">

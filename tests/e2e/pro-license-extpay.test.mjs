@@ -28,6 +28,11 @@ const work = fs.mkdtempSync(path.join(os.tmpdir(), "pii-pro-e2e-"));
 const EXT = path.join(work, "ext");
 fs.cpSync(SRC, EXT, { recursive: true });
 fs.writeFileSync(path.join(EXT, "license", "config.js"), `export const EXTPAY_ID = "${TEST_ID}";\n`);
+// Pro のルールパックにテスト用のルールを 1 つ入れる (Pro のときだけ、送る文の QA-PRO-nnnn が伏せ字になる)
+const proRules = path.join(EXT, "engine", "pro-rules.js");
+const proSrc = fs.readFileSync(proRules, "utf8");
+if (!proSrc.includes("const PRO_RULE_PACK = [];")) throw new Error("pro-rules.js の形が変わった");
+fs.writeFileSync(proRules, proSrc.replace("const PRO_RULE_PACK = [];", 'const PRO_RULE_PACK = [{ category: "PRO_TEST", entity_type: "PRO_TEST", pattern: /QA-PRO-\\d{4}/g }];'));
 process.env.PII_GUARD_EXT = EXT;
 const { launch, sleep } = await import("../fixtures/harness.mjs");
 
@@ -89,11 +94,12 @@ async function openPage(file) {
   await p.goto(`chrome-extension://${h.extId}/${file}`);
   return p;
 }
+// 「購入状態を更新」を押し、描き直されるまで待つ (押す前に印の文字を入れておき、それが替わるのを待つ)
 async function statusAfterRefresh(p) {
-  const before = await p.textContent("#pro-status");
+  await p.waitForSelector("#pro-refresh:not([hidden])", { timeout: 5000 });
+  await p.evaluate(() => { document.querySelector("#pro-status").textContent = "__waiting__"; });
   await p.click("#pro-refresh");
-  await p.waitForFunction((b) => document.querySelector("#pro-status").dataset.tone && document.querySelector("#pro-status").textContent !== "確認中…", before, { timeout: 5000 });
-  await sleep(300);
+  await p.waitForFunction(() => document.querySelector("#pro-status").textContent !== "__waiting__", null, { timeout: 15000 });
   return { status: await p.textContent("#pro-status"), note: (await p.isVisible("#pro-note")) ? await p.textContent("#pro-note") : "" };
 }
 
@@ -145,6 +151,45 @@ test("T-PRO-12c 購入のあと「購入状態を更新」で「Pro (プラン�
   } finally { await chat.close(); }
 });
 
+const PRO_TEXT = "社内コード QA-PRO-7781 の件で相談です";
+function sentText() {
+  const conv = h.server.byKind("conversation");
+  return conv.length ? JSON.parse(conv[conv.length - 1].body).messages[0].content.parts.join("") : null;
+}
+
+test("T-PRO-12f Pro のとき、保護入力欄 (ChatGPT) から送る文に Pro のルールが効く", async () => {
+  h.server.clear();
+  const page = await h.openChat("/");
+  try {
+    const frame = await h.waitSecureReady(page, 10000);
+    assert.ok(frame, "保護入力欄が立ち上がる");
+    await sleep(500);
+    await h.type(page, frame, PRO_TEXT);
+    await h.enter(page, frame);
+    await page.waitForFunction(() => window.__mock.events.some((e) => e.type === "conversation-ok"), null, { timeout: 10000 });
+    const body = sentText();
+    assert.ok(body && !body.includes("QA-PRO-7781") && /<PRO_TEST_\d+>/.test(body), `届いた文 (${body})`);
+  } finally { await page.close(); }
+});
+
+test("T-PRO-12g Pro のとき、content script (ISOLATED world) のエンジンで伏せる経路にも Pro のルールが効く", async () => {
+  // 保護入力欄を切り、確認を出さず、除外リストを置く (リストがあると、ページの世界は ISOLATED world に伏せるのを頼む)
+  await h.setStorage({ secureComposerEnabled: false, interactive: false, maskAllowlist: ["dummy@example.test"] });
+  h.server.clear();
+  const page = await h.openChat("/");
+  try {
+    await page.waitForFunction(() => window.__localMaskMCP && window.__localMaskMCP.settings && window.__localMaskMCP.settings.pro === true && window.__localMaskMCP.settings.hasSecretLists === true, null, { timeout: 8000 });
+    await h.type(page, null, PRO_TEXT);
+    await h.enter(page, null);
+    await page.waitForFunction(() => window.__mock.events.some((e) => e.type === "conversation-ok"), null, { timeout: 10000 });
+    const body = sentText();
+    assert.ok(body && !body.includes("QA-PRO-7781") && /<PRO_TEST_\d+>/.test(body), `届いた文 (${body})`);
+  } finally {
+    await page.close();
+    await h.setStorage({ secureComposerEnabled: true, interactive: true, maskAllowlist: [] });
+  }
+});
+
 test("T-PRO-12d 通信に失敗しても、最後に確かめてから 7 日以内なら Pro のままで、注記が出る", async () => {
   pay.state.mode = "error";
   const p = await openPage("options.html");
@@ -164,7 +209,7 @@ test("T-PRO-12e お試しはインストールから 7 日で終わり、未購�
   assert.equal(s.pro, false);
   const p = await openPage("popup.html");
   try {
-    await p.waitForFunction(() => document.querySelector("#license-status").textContent !== "確認中…", null, { timeout: 5000 });
+    await p.waitForSelector("#license-box:not([hidden])", { timeout: 5000 });
     assert.equal(await p.textContent("#license-status"), "無料版");
   } finally { await p.close(); }
 });

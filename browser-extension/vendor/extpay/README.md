@@ -43,3 +43,4 @@ export default ExtPay;
 1. 新しい版の tarball を、空のフォルダに取ってきて中身を読む (通信先、保存先、外からの読み込みが無いこと)
 2. `dist/ExtPay.js` の末尾に上の 1 行を足して `ExtPay.esm.js` を作り直す
 3. この README の版・integrity・sha256・大きさを書き直す
+4. 全部の E2E を流す。`ExtPay.esm.js` は Service Worker が最初に読み込むので、読み込みで投げると、拡張機能の Service Worker がまるごと起動しない

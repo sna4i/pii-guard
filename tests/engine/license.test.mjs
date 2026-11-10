@@ -43,23 +43,30 @@ function fakeRuntime() {
     onInstalled: { addListener(fn) { installedListeners.push(fn); } },
   };
 }
-// user: getUser() が返すもの。fail: true なら通信の失敗として投げる
-function fakeExtPay({ user = { paid: false, installedAt: new Date(T0) }, fail = false } = {}) {
+// user: getUser() が返すもの。fail: true なら通信の失敗として投げる。hang: true なら返らない (時間切れを試す)。
+// openFails: true なら購入とログインのページを開く操作が失敗する (API キーを作る通信の失敗)
+function fakeExtPay({ user = { paid: false, installedAt: new Date(T0) }, fail = false, hang = false, openFails = false } = {}) {
   const calls = { getUser: 0, startBackground: 0, openPaymentPage: 0, openLoginPage: 0 };
   const api = {
     calls,
     set user(u) { user = u; },
     set fail(f) { fail = f; },
-    async getUser() { calls.getUser++; if (fail) throw new TypeError("Failed to fetch"); return user; },
+    async getUser() {
+      calls.getUser++;
+      if (hang) return new Promise(() => {});
+      await Promise.resolve();
+      if (fail) throw new TypeError("Failed to fetch");
+      return user;
+    },
     startBackground() { calls.startBackground++; },
-    async openPaymentPage() { calls.openPaymentPage++; },
-    async openLoginPage() { calls.openLoginPage++; },
+    async openPaymentPage() { calls.openPaymentPage++; if (openFails) throw new TypeError("Failed to fetch"); },
+    async openLoginPage() { calls.openLoginPage++; if (openFails) throw new TypeError("Failed to fetch"); },
   };
   return api;
 }
-function setup({ id = "pii-guard-test", now = T0, user, fail, storage = {}, alarms = [] } = {}) {
+function setup({ id = "pii-guard-test", now = T0, user, fail, hang, openFails, storage = {}, alarms = [], networkTimeoutMs } = {}) {
   const clock = { now };
-  const extpay = fakeExtPay({ user, fail });
+  const extpay = fakeExtPay({ user, fail, hang, openFails });
   let made = 0;
   const deps = {
     extpayId: id,
@@ -68,6 +75,7 @@ function setup({ id = "pii-guard-test", now = T0, user, fail, storage = {}, alar
     alarms: fakeAlarms(alarms),
     runtime: fakeRuntime(),
     now: () => clock.now,
+    ...(networkTimeoutMs ? { networkTimeoutMs } : {}),
   };
   const lm = createLicenseManager(deps);
   return { lm, deps, extpay, clock, made: () => made };
@@ -235,30 +243,99 @@ function send(deps, message, sender) {
   });
 }
 const POPUP = { id: EXT_ID, url: EXT_BASE + "popup.html" };
+const OPTIONS = { id: EXT_ID, url: EXT_BASE + "options.html#log", tab: { id: 3, url: EXT_BASE + "options.html#log" } };
+const SC_FRAME = { id: EXT_ID, url: EXT_BASE + "secure-composer/secure-composer.html", tab: { id: 7, url: "https://chatgpt.com/" } };
 const CONTENT = { id: EXT_ID, url: "https://claude.ai/new", tab: { id: 7, url: "https://claude.ai/new" } };
 const OTHER_EXT = { id: "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz", url: "chrome-extension://zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz/popup.html" };
 
-test("T-PRO-07 license:get は拡張機能のページと content script に答える", async () => {
+test("T-PRO-07 license:get は拡張機能のページと content script に答える。画面以外には Pro かどうかだけを返す", async () => {
   const { lm, deps } = setup({ user: paidUser() });
   lm.initLicense();
   const a = await send(deps, { type: "license:get" }, POPUP);
   assert.equal(a.pro, true);
-  const b = await send(deps, { type: "license:get" }, CONTENT);
-  assert.equal(b.pro, true);
+  assert.equal(a.email, "buyer@example.test", "画面には全部を返す");
+  for (const sender of [CONTENT, SC_FRAME]) {
+    const b = await send(deps, { type: "license:get" }, sender);
+    assert.deepEqual(Object.keys(b).sort(), ["configured", "pro", "source", "trial"], sender.url);
+    assert.equal(b.pro, true);
+  }
   const c = await send(deps, { type: "license:get" }, OTHER_EXT);
   assert.equal(c, undefined, "ほかの拡張機能には答えない");
 });
 
-test("T-PRO-07b 購入とログインのページは、拡張機能のページからの依頼でだけ開く", async () => {
+test("T-PRO-07b 購入とログインのページは、ポップアップと設定画面からの依頼でだけ開く", async () => {
   const { lm, deps, extpay } = setup();
   lm.initLicense();
-  assert.deepEqual(await send(deps, { type: "license:openPayment" }, CONTENT), { ok: false });
-  assert.deepEqual(await send(deps, { type: "license:openLogin" }, CONTENT), { ok: false });
+  for (const sender of [CONTENT, SC_FRAME]) {
+    assert.deepEqual(await send(deps, { type: "license:openPayment" }, sender), { ok: false }, sender.url);
+    assert.deepEqual(await send(deps, { type: "license:openLogin" }, sender), { ok: false }, sender.url);
+  }
   assert.equal(extpay.calls.openPaymentPage + extpay.calls.openLoginPage, 0);
   assert.deepEqual(await send(deps, { type: "license:openPayment" }, POPUP), { ok: true });
-  assert.deepEqual(await send(deps, { type: "license:openLogin" }, POPUP), { ok: true });
+  assert.deepEqual(await send(deps, { type: "license:openLogin" }, OPTIONS), { ok: true });
   assert.equal(extpay.calls.openPaymentPage, 1);
   assert.equal(extpay.calls.openLoginPage, 1);
+});
+
+test("T-PRO-07e ページを開けなかった (API キーを作る通信の失敗) ときは、画面に失敗を返す", async () => {
+  const { lm, deps } = setup({ openFails: true });
+  lm.initLicense();
+  assert.deepEqual(await send(deps, { type: "license:openPayment" }, POPUP), { ok: false, reason: "network" });
+  assert.deepEqual(await send(deps, { type: "license:openLogin" }, POPUP), { ok: false, reason: "network" });
+});
+
+test("T-PRO-07f content script からの refresh は聞かない (ページを開くたびに通信させない)", async () => {
+  const cached = { paid: false, plan: null, email: null, checkedAt: T0 - 60 * 1000, trialEndsAt: null };
+  const { lm, deps, extpay } = setup({ storage: { [LICENSE_CACHE_KEY]: cached } });
+  lm.initLicense();
+  await send(deps, { type: "license:get", refresh: true }, CONTENT);
+  assert.equal(extpay.calls.getUser, 0);
+});
+
+// ---- 通信の待ち方 ------------------------------------------------------------------------
+test("T-PRO-13 キャッシュが古いとき、同時の問い合わせでも ExtPay への確認は 1 回だけ", async () => {
+  const cached = { paid: true, plan: PLAN, email: "buyer@example.test", checkedAt: T0 - 2 * HOUR, trialEndsAt: null };
+  const { lm, extpay } = setup({ storage: { [LICENSE_CACHE_KEY]: cached }, user: paidUser() });
+  const [a, b, c] = await Promise.all([lm.getLicenseState(), lm.getLicenseState(), lm.getLicenseState({ refresh: true })]);
+  assert.equal(extpay.calls.getUser, 1);
+  assert.ok([a, b, c].every((s) => s.paid === true && s.source === "network"));
+});
+
+test("T-PRO-14 ExtPay が返らないときは、時間切れを通信の失敗として扱う (7 日以内なら猶予)", async () => {
+  const cached = { paid: true, plan: PLAN, email: "buyer@example.test", checkedAt: T0 - 2 * HOUR, trialEndsAt: null };
+  const { lm } = setup({ storage: { [LICENSE_CACHE_KEY]: cached }, hang: true, networkTimeoutMs: 20 });
+  const s = await lm.getLicenseState();
+  assert.equal(s.source, "grace");
+  assert.equal(s.pro, true);
+  assert.equal(s.error, true);
+});
+
+test("T-PRO-15 content script には、7 日以内のキャッシュをすぐ返し、古ければ裏で確かめ直す", async () => {
+  const cached = { paid: true, plan: PLAN, email: "buyer@example.test", checkedAt: T0 - 2 * HOUR, trialEndsAt: null };
+  const { lm, deps, extpay } = setup({ storage: { [LICENSE_CACHE_KEY]: cached }, hang: true, networkTimeoutMs: 300 });
+  lm.initLicense();
+  const t0 = Date.now();
+  const b = await send(deps, { type: "license:get" }, CONTENT);
+  assert.ok(Date.now() - t0 < 150, `通信の時間切れ (300ms) を待たずに答える (${Date.now() - t0}ms)`);
+  assert.equal(b.pro, true);
+  assert.equal(b.source, "stale");
+  assert.equal(extpay.calls.getUser, 1, "裏で確かめ直しを始める");
+});
+
+test("T-PRO-16 最後に確かめた日時が未来 (時計が戻った) なら、古いものとして確かめ直す", async () => {
+  const cached = { paid: true, plan: PLAN, email: "buyer@example.test", checkedAt: T0 + 3 * DAY, trialEndsAt: null };
+  const { lm, extpay } = setup({ storage: { [LICENSE_CACHE_KEY]: cached }, fail: true });
+  const s = await lm.getLicenseState();
+  assert.equal(extpay.calls.getUser, 1);
+  assert.equal(s.source, "none", "未来の日時は猶予の根拠にしない");
+  assert.equal(s.pro, false);
+});
+
+test("T-PRO-06c 間隔の違う古いアラームは、今の間隔で作り直す", async () => {
+  const { lm, deps } = setup({ alarms: [{ name: "license-revalidate", periodInMinutes: 30 }] });
+  lm.initLicense();
+  await new Promise((r) => setTimeout(r, 0));
+  assert.deepEqual(deps.alarms.created, [{ name: "license-revalidate", periodInMinutes: 60 }]);
 });
 
 test("T-PRO-07c ID が仮なら、購入とログインのページを開かずに断る", async () => {

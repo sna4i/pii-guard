@@ -12,6 +12,10 @@ export const REVALIDATE_INTERVAL_MIN = 60;
 export const REVALIDATE_INTERVAL_MS = REVALIDATE_INTERVAL_MIN * 60 * 1000;
 export const GRACE_PERIOD_MS = 7 * 24 * 60 * 60 * 1000;
 export const TRIAL_PERIOD_MS = 7 * 24 * 60 * 60 * 1000;
+// ExtPay の fetch には時間切れが無いので、ここで切る (D-PRO-11)
+export const NETWORK_TIMEOUT_MS = 10 * 1000;
+// 購入とログインのページを開く依頼と、確かめ直し (refresh) を受ける画面 (D-PRO-04)
+const UI_PAGES = ["popup.html", "options.html"];
 
 /** ExtensionPay に登録する前の仮の ID ("{{" で始まる) か */
 export function isPlaceholderId(id) {
@@ -34,10 +38,13 @@ function toMs(v) {
  *   now?: () => number,
  * }} deps
  */
-export function createLicenseManager({ extpayId, makeExtPay, storage, alarms, runtime, now = () => Date.now() }) {
+export function createLicenseManager({ extpayId, makeExtPay, storage, alarms, runtime, now = () => Date.now(), networkTimeoutMs = NETWORK_TIMEOUT_MS }) {
   const configured = !isPlaceholderId(extpayId);
-  const extBase = runtime.getURL("");
+  const uiPages = new Set(UI_PAGES.map((p) => runtime.getURL(p)));
+  // 送り手がポップアップか設定画面か (#log などは除いて比べる)。content script と保護入力欄の iframe は違う
+  const isUiPage = (sender) => typeof sender.url === "string" && uiPages.has(sender.url.split(/[?#]/)[0]);
   let extpay = null;
+  let inflight = null;
   // ExtPay は ID が決まっているときだけ、最初に要るときに作る (仮の ID のまま作ると、存在しない宛先に通信しうる)
   const getExtPay = () => {
     if (!configured) return null;
@@ -75,13 +82,37 @@ export function createLicenseManager({ extpayId, makeExtPay, storage, alarms, ru
     return withDerived(state, "network");
   }
 
-  async function getLicenseState({ refresh = false } = {}) {
+  // 確かめ直しは同時に 1 本だけ。時間切れは通信の失敗として扱う。時間切れのあとで答えが届けば、
+  // キャッシュが書き換わり、storage の変化で画面と content script に伝わる (D-PRO-11)
+  function revalidateOnce() {
+    if (!inflight) {
+      let timer = null;
+      const timeout = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error("license: timeout")), networkTimeoutMs); });
+      inflight = Promise.race([revalidate(), timeout]).finally(() => { clearTimeout(timer); inflight = null; });
+    }
+    return inflight;
+  }
+
+  // 最後に確かめてからの時間。未来の日時 (時計が戻った) は、古いものとして扱う
+  const ageOf = (cached) => {
+    if (!cached || typeof cached.checkedAt !== "number") return Infinity;
+    const age = now() - cached.checkedAt;
+    return age >= 0 ? age : Infinity;
+  };
+
+  // preferCache: content script と保護入力欄から。7 日以内のキャッシュがあれば通信を待たずに返し、
+  // 60 分を過ぎていれば裏で確かめ直す (ページを開くたびに通信を待たせない。D-PRO-11)
+  async function getLicenseState({ refresh = false, preferCache = false } = {}) {
     if (!configured) return unconfiguredState();
     const cached = await readCache();
-    const age = cached && typeof cached.checkedAt === "number" ? now() - cached.checkedAt : Infinity;
+    const age = ageOf(cached);
     if (!refresh && age < REVALIDATE_INTERVAL_MS) return withDerived(cached, "cache");
+    if (!refresh && preferCache && age < GRACE_PERIOD_MS) {
+      revalidateOnce().catch(() => {});
+      return withDerived(cached, "stale");
+    }
     try {
-      return await revalidate();
+      return await revalidateOnce();
     } catch (_) {
       // 通信の失敗。最後に確かめてから 7 日以内の購入済みは信じる (有料の人を締め出さない。F-PRO-04)
       if (cached && cached.paid && age < GRACE_PERIOD_MS) return withDerived(cached, "grace", { error: true });
@@ -94,32 +125,37 @@ export function createLicenseManager({ extpayId, makeExtPay, storage, alarms, ru
   }
 
   // Service Worker は 30 秒ほどで止まり、起動のたびにここを通る。create し直すと 60 分の時計が戻されて
-  // 鳴らなくなるので、無いときだけ作る (D-PRO-03)
+  // 鳴らなくなるので、無いとき (と、間隔が今と違うとき) だけ作る (D-PRO-03)
   function ensureAlarm() {
     Promise.resolve(alarms.get(ALARM_NAME))
-      .then((a) => { if (!a) alarms.create(ALARM_NAME, { periodInMinutes: REVALIDATE_INTERVAL_MIN }); })
+      .then((a) => { if (!a || a.periodInMinutes !== REVALIDATE_INTERVAL_MIN) alarms.create(ALARM_NAME, { periodInMinutes: REVALIDATE_INTERVAL_MIN }); })
       .catch(() => {});
   }
+
+  // 画面以外 (content script、保護入力欄) に返すのは、Pro かどうかだけ。メールやプランはサイトの近くに出さない
+  const forEngine = (s) => ({ pro: s.pro, trial: s.trial, configured: s.configured, source: s.source });
 
   function onMessage(msg, sender, sendResponse) {
     if (!msg || typeof msg.type !== "string" || !msg.type.startsWith("license:")) return false;
     if (!sender || sender.id !== runtime.id) return false;
-    // 拡張機能のページ (ポップアップ・設定画面・保護入力欄) か。content script の sender.url はサイトの URL
-    const fromExtensionPage = typeof sender.url === "string" && sender.url.startsWith(extBase);
+    const fromUi = isUiPage(sender);
     if (msg.type === "license:get") {
       // 確かめ直し (refresh) は画面のボタンから。content script はページを開くたびに聞くので、キャッシュを使わせる
-      getLicenseState({ refresh: msg.refresh === true && fromExtensionPage })
-        .then(sendResponse, () => sendResponse({ ...withDerived(FREE, "none"), error: true }));
+      getLicenseState({ refresh: msg.refresh === true && fromUi, preferCache: !fromUi })
+        .then((s) => sendResponse(fromUi ? s : forEngine(s)),
+          () => { const s = { ...withDerived(FREE, "none"), error: true }; sendResponse(fromUi ? s : forEngine(s)); });
       return true;
     }
     if (msg.type === "license:openPayment" || msg.type === "license:openLogin") {
-      // ページを開く依頼は、拡張機能のページからだけ受ける (D-PRO-04)
-      if (!fromExtensionPage) { sendResponse({ ok: false }); return false; }
+      // ページを開く依頼は、ポップアップと設定画面からだけ受ける (D-PRO-04)
+      if (!fromUi) { sendResponse({ ok: false }); return false; }
       const ep = getExtPay();
       if (!ep) { sendResponse({ ok: false, reason: "unconfigured" }); return false; }
-      Promise.resolve(msg.type === "license:openPayment" ? ep.openPaymentPage() : ep.openLoginPage()).catch(() => {});
-      sendResponse({ ok: true });
-      return false;
+      // ExtPay は API キーを作る通信のあとでページを開く。失敗したら画面に伝える
+      Promise.resolve()
+        .then(() => (msg.type === "license:openPayment" ? ep.openPaymentPage() : ep.openLoginPage()))
+        .then(() => sendResponse({ ok: true }), () => sendResponse({ ok: false, reason: "network" }));
+      return true;
     }
     return false;
   }
@@ -131,11 +167,11 @@ export function createLicenseManager({ extpayId, makeExtPay, storage, alarms, ru
     getExtPay().startBackground();
     ensureAlarm();
     alarms.onAlarm.addListener((a) => {
-      if (a && a.name === ALARM_NAME) return revalidate().catch(() => {});
+      if (a && a.name === ALARM_NAME) return revalidateOnce().catch(() => {});
       return undefined;
     });
-    runtime.onInstalled.addListener(() => { revalidate().catch(() => {}); });
+    runtime.onInstalled.addListener(() => { revalidateOnce().catch(() => {}); });
   }
 
-  return { initLicense, getLicenseState, isPro, revalidate };
+  return { initLicense, getLicenseState, isPro, revalidate: revalidateOnce };
 }

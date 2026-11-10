@@ -16,6 +16,7 @@ const PLAN = { nickname: "Pro 月額", interval: "month", intervalCount: 1, unit
 
 test("T-PRO-10 未購入は「無料版」で、アップグレードとログインを出す", () => {
   const v = describeLicense(base, NOW);
+  assert.equal(v.visible, true);
   assert.equal(v.status, "無料版");
   assert.equal(v.note, "");
   assert.deepEqual([v.canUpgrade, v.canLogin, v.canRefresh], [true, true, true]);
@@ -43,16 +44,14 @@ test("T-PRO-10d 確かめられなかったときは注記を出す。最後に�
   assert.equal(none.note, "購入状態を確認できませんでした");
 });
 
-test("T-PRO-10e ID が仮のあいだは「無料版」で、購入のボタンは出さない", () => {
+test("T-PRO-10e ID が仮のあいだは、Pro の表示そのものを出さない (D-PRO-12)", () => {
   const v = describeLicense({ ...base, configured: false, source: "unconfigured", checkedAt: null }, NOW);
-  assert.equal(v.status, "無料版");
-  assert.equal(v.note, "Pro 版は準備中です");
+  assert.equal(v.visible, false);
   assert.deepEqual([v.canUpgrade, v.canLogin, v.canRefresh], [false, false, false]);
 });
 
-test("T-PRO-10f 答えが無い (Service Worker に届かない) ときも、画面を壊さない", () => {
+test("T-PRO-10f 答えが無い (Service Worker に届かない) ときも出さない。画面を壊さない", () => {
   const v = describeLicense(undefined, NOW);
-  assert.equal(v.status, "確認できません");
-  assert.equal(v.note, "購入状態を確認できませんでした");
-  assert.deepEqual([v.canUpgrade, v.canLogin, v.canRefresh], [false, false, true]);
+  assert.equal(v.visible, false);
+  assert.deepEqual([v.canUpgrade, v.canLogin, v.canRefresh], [false, false, false]);
 });

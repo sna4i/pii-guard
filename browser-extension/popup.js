@@ -102,6 +102,8 @@ async function loadLlmIndicator() {
 // content script を置いていない)、「購入状態を更新」で確かめ直す
 function renderLicense(state) {
   const v = window.PiiGuardLicenseView.describeLicense(state);
+  $("license-box").hidden = !v.visible;
+  if (!v.visible) return;
   const st = $("license-status");
   st.textContent = v.status;
   st.className = "value " + (v.tone === "pro" ? "status-ok" : v.tone === "warn" ? "status-warn" : "");

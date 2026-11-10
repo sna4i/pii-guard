@@ -11,16 +11,19 @@
       <span id="version">v0.5.0-dev</span>
     </header>
 
-    <!-- Pro 版 (docs/pro-license.md の F-PRO-07)。出す文とボタンは license/license-view.js が決める -->
-    <section class="row license-row">
-      <span class="label">プラン</span>
-      <span id="license-status" class="value status-unknown" aria-live="polite">確認中…</span>
-    </section>
-    <p id="license-note" class="license-note" hidden></p>
-    <div class="license-actions">
-      <button id="license-upgrade" type="button" class="license-upgrade" hidden>Pro にアップグレード</button>
-      <button id="license-login" type="button" class="link-button" hidden>購入済みの方はこちら (ログイン)</button>
-      <button id="license-refresh" type="button" class="link-button" hidden>購入状態を更新</button>
+    <!-- Pro 版 (docs/pro-license.md の F-PRO-07)。出す文とボタンは license/license-view.js が決める。
+         ExtensionPay に登録する前 (ID が仮) は、まるごと出さない (D-PRO-12) -->
+    <div id="license-box" hidden>
+      <section class="row license-row">
+        <span class="label">プラン</span>
+        <span id="license-status" class="value" aria-live="polite"></span>
+      </section>
+      <p id="license-note" class="license-note" hidden></p>
+      <div class="license-actions">
+        <button id="license-upgrade" type="button" class="license-upgrade" hidden>Pro にアップグレード</button>
+        <button id="license-login" type="button" class="link-button" hidden>購入済みの方はこちら (ログイン)</button>
+        <button id="license-refresh" type="button" class="link-button" hidden>購入状態を更新</button>
+      </div>
     </div>
 
     <section class="row toggle-row">

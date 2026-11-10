@@ -15,16 +15,14 @@
     return new Date(ms).toLocaleString("ja-JP", { year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
   }
 
+  // Pro の表示を出さないとき。ExtensionPay に登録する前 (ID が仮) と、Service Worker から答えが無いとき (D-PRO-12)
+  const HIDDEN = { visible: false, status: "", note: "", tone: "free", canUpgrade: false, canLogin: false, canRefresh: false };
+
   /**
-   * @returns {{ status: string, note: string, tone: "pro"|"free"|"warn", canUpgrade: boolean, canLogin: boolean, canRefresh: boolean }}
+   * @returns {{ visible: boolean, status: string, note: string, tone: "pro"|"free"|"warn", canUpgrade: boolean, canLogin: boolean, canRefresh: boolean }}
    */
   function describeLicense(state, now = Date.now()) {
-    if (!state || typeof state !== "object") {
-      return { status: "確認できません", note: "購入状態を確認できませんでした", tone: "warn", canUpgrade: false, canLogin: false, canRefresh: true };
-    }
-    if (state.configured === false) {
-      return { status: "無料版", note: "Pro 版は準備中です", tone: "free", canUpgrade: false, canLogin: false, canRefresh: false };
-    }
+    if (!state || typeof state !== "object" || state.configured !== true) return { ...HIDDEN };
     let status = "無料版";
     let tone = "free";
     if (state.paid) {
@@ -43,7 +41,7 @@
         : "購入状態を確認できませんでした";
       if (tone === "free") tone = "warn";
     }
-    return { status, note, tone, canUpgrade: !state.paid, canLogin: !state.paid, canRefresh: true };
+    return { visible: true, status, note, tone, canUpgrade: !state.paid, canLogin: !state.paid, canRefresh: true };
   }
 
   const api = { describeLicense };

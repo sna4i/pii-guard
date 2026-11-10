@@ -44,9 +44,11 @@ import { createLicenseManager } from "./license/license.js";
 // ---- Pro 版のライセンス (docs/pro-license.md) --------------------------------------
 // 購入状態は license/license.js だけで決める。外との通信は ExtensionPay の購入状態の確認だけで、
 // 本文や検出結果は扱わない。ID が仮のあいだは ExtPay を作らず、無料版としてだけ動く (D-PRO-09)。
-// ExtPay の決まりに合わせ、Service Worker の最上位で 1 回だけ初期化する。ここで何かが投げても、
-// ほかの仕事 (バッジ、動作ログ、ML など、無料版の機能) を止めないよう、ここだけで受け止める
-// (そのときは license:get に答えが無く、画面は「確認できません」になる)
+// ExtPay の決まりに合わせ、Service Worker の最上位で 1 回だけ初期化する。作るときと初期化で何かが投げても、
+// ほかの仕事 (バッジ、動作ログ、ML など、無料版の機能) を止めないよう、ここで受け止める。
+// ただし、上の import (ExtPay.esm.js の読み込み) そのものが投げると、Service Worker ごと起動しない
+// (Service Worker では import() が使えないので避けられない)。ExtPay の版を上げたら全部の E2E を流す
+// (vendor/extpay/README.md)
 try {
   createLicenseManager({
     extpayId: EXTPAY_ID,

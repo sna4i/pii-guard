@@ -790,6 +790,8 @@ async function loadLlmSettings() {
 // content script を置いていない)、「購入状態を更新」で確かめ直す
 function renderProLicense(state) {
   const v = window.PiiGuardLicenseView.describeLicense(state);
+  $("pro-card").hidden = !v.visible;
+  if (!v.visible) return;
   const st = $("pro-status");
   st.textContent = v.status;
   st.dataset.tone = v.tone;
