@@ -279,22 +279,28 @@ test("T-EG-09c 本文と同じ親の別の欄に残った値は伏せ、本文�
   assert.match(td.decode(EG.getAtPath(out, [2, 20])), /<PHONE_NUMBER_\d+>/);
 });
 
-// 道筋は番号だけで、繰り返しの何番目かを区別しない (差し替えは最初の出現に書き、飛ばす判定は番号で比べる)。
+// 決まった道筋 (Claude 2.3、Gemini 2.9.1) は番号だけで、繰り返しの何番目かを区別しない (差し替えは最初の出現に書き、飛ばす判定は番号で比べる)。
 // 本文の欄と同じ番号の別の出現も飛ばされるので、伏せたあと本文の欄の外に値が残っていたら止める (D-EG-09)
 const MASKED = "連絡先は <PHONE_NUMBER_1> と <EMAIL_ADDRESS_1> です"; // ふつうに全部伏せた本文
 
 test("T-EG-09d 本文の道筋が繰り返され、本文でない方の出現に検出済みの値が残っていたら、送信を止める (Claude、Gemini)", () => {
   const other = `電話 ${PHONE}`;
   const sess = msg(1, str(1, "sess_x"));
-  for (const body of [cat(sess, msg(2, str(3, MASKED), str(3, other))), cat(sess, msg(2, str(3, MASKED)), msg(2, str(3, other)))]) {
+  for (const [shape, body] of [
+    ["Claude: root.2 の中で 2.3 が繰り返す", cat(sess, msg(2, str(3, MASKED), str(3, other)))],
+    ["Claude: root.2 が繰り返す", cat(sess, msg(2, str(3, MASKED)), msg(2, str(3, other)))],
+  ]) {
     const m = EG.adapters.claudeRpc.decode(body, []);
-    assert.deepEqual(EG.adapters.claudeRpc.extractInputs(m), [MASKED], "前提: 本文は最初の出現");
-    assert.equal(EG.adapters.claudeRpc.scrubOthers(m, S()).stuck, true);
+    assert.deepEqual(EG.adapters.claudeRpc.extractInputs(m), [MASKED], `${shape}: 前提: 本文は最初の出現`);
+    assert.equal(EG.adapters.claudeRpc.scrubOthers(m, S()).stuck, true, `${shape}: 送信を止める`);
   }
-  for (const proto of [msg(2, vint(1, 1), msg(9, str(1, MASKED), str(1, other))), msg(2, vint(1, 1), msg(9, str(1, MASKED)), msg(9, str(1, other)))]) {
+  for (const [shape, proto] of [
+    ["Gemini: root.2.9 の中で 2.9.1 が繰り返す", msg(2, vint(1, 1), msg(9, str(1, MASKED), str(1, other)))],
+    ["Gemini: root.2.9 が繰り返す", msg(2, vint(1, 1), msg(9, str(1, MASKED)), msg(9, str(1, other)))],
+  ]) {
     const m = EG.adapters.geminiSession.decode(`count=1&ofs=1&req0___data__=${encodeURIComponent(Buffer.from(proto).toString("base64"))}`, []);
-    assert.deepEqual(EG.adapters.geminiSession.extractInputs(m), [MASKED], "前提: 本文は最初の出現");
-    assert.equal(EG.adapters.geminiSession.scrubOthers(m, S()).stuck, true);
+    assert.deepEqual(EG.adapters.geminiSession.extractInputs(m), [MASKED], `${shape}: 前提: 本文は最初の出現`);
+    assert.equal(EG.adapters.geminiSession.scrubOthers(m, S()).stuck, true, `${shape}: 送信を止める`);
   }
 });
 
@@ -303,8 +309,67 @@ test("T-EG-09e Claude: 形が変わり、下書きと同じ中身で見つけた
   const raw = `連絡先は ${PHONE} と ${EMAIL} です`;
   const body = cat(msg(1, str(1, "sess_x")), msg(5, str(1, "前の話題")), msg(5, str(1, raw)));
   const m0 = a.decode(body, [raw]);
-  assert.deepEqual(m0.fields.map((f) => f.path.join(".")), ["5.1"], "前提: 決まった道筋 (2.3) が無く、下書きと同じ中身の欄を見つける");
+  assert.deepEqual(m0.fields.map((f) => f.path), [[{ n: 5, k: 1 }, { n: 1, k: 0 }]], "前提: 決まった道筋 (2.3) が無く、下書きと同じ中身の欄を、root.5 の 2 つ目の出現の 1 に見つける");
   const r = a.scrubOthers(a.replaceInputs(m0, [MASKED]), S());
   const out = a.encode(r.model);
   assert.ok(r.stuck || (!has(out, PHONE) && !has(out, EMAIL)), `原文のまま送らない (stuck=${r.stuck})`);
+});
+
+// ---- 救済の道でも、確認に出ていない出現の値を原文のまま送らない (C-1) ----------------------------------
+// 決まった道筋 (Claude 2.3、Gemini 2.9.1) が無いと、下書きと同じ中身の欄を本文として探す (救済の道)。
+// 下書きの欄が繰り返しの 2 つ目にある形を、Claude は root.5、Gemini は root.2.7 の繰り返しで作る
+const formOf = (proto) => `count=1&ofs=1&req0___data__=${encodeURIComponent(Buffer.from(proto).toString("base64"))}`;
+const RESCUE = [
+  {
+    shape: "Claude (root.5 の繰り返し)",
+    a: EG.adapters.claudeRpc,
+    make: (first, second) => cat(msg(1, str(1, "sess_x")), msg(5, str(1, first)), msg(5, str(1, second))),
+    bytesOf: (sent) => sent,
+    nth: (k) => [{ n: 5, k }, 1],
+  },
+  {
+    shape: "Gemini (root.2.7 の繰り返し)",
+    a: EG.adapters.geminiSession,
+    make: (first, second) => formOf(msg(2, vint(1, 1), msg(7, str(1, first)), msg(7, str(1, second)))),
+    bytesOf: (sent) => EG.parseWebChannelForm(sent).items[0].bytes,
+    nth: (k) => [2, { n: 7, k }, 1],
+  },
+];
+
+test("T-EG-09f 救済の道で、下書きの欄が繰り返しの 2 つ目にあっても、1 つ目の出現 (確認に出ていない欄) の検出済みの値を原文のまま送らない (Claude、Gemini)", () => {
+  const draft = "来週の会議の議題をまとめてください"; // 個人情報の無い下書き (確認は出ない)
+  for (const { shape, a, make, bytesOf } of RESCUE) {
+    const req = make(`前回の連絡先 ${PHONE} (古い話題)`, draft);
+    assert.deepEqual(a.extractInputs(a.decode(req, [])), [], `${shape}: 前提: 決まった道筋には無い`);
+    const m = a.decode(req, [draft]);
+    assert.deepEqual(a.extractInputs(m), [draft], `${shape}: 前提: 下書きと同じ中身の欄 (2 つ目の出現) を見つける`);
+    const r = a.scrubOthers(m, S());
+    assert.ok(r.stuck || !has(bytesOf(a.encode(r.model)), PHONE), `${shape}: 原文のまま送らない (stuck=${r.stuck})`);
+  }
+});
+
+test("T-EG-09g 救済の道で、下書きの欄が繰り返しの 2 つ目にあり、利用者が値を全部本文に残したら、決めたとおりに送る (Claude、Gemini)", () => {
+  const raw = `連絡先は ${PHONE} と ${EMAIL} です`;
+  for (const { shape, a, make, bytesOf, nth } of RESCUE) {
+    const m = a.decode(make("前の話題", raw), [raw]);
+    assert.deepEqual(a.extractInputs(m), [raw], `${shape}: 前提: 下書きと同じ中身の欄 (2 つ目の出現) を見つける`);
+    // 値を全部残したので、本文は書き換えない (injected.js と同じく replaceInputs を呼ばない)
+    const r = a.scrubOthers(m, S());
+    assert.equal(r.stuck, false, `${shape}: 送信を止めない`);
+    const out = bytesOf(a.encode(r.model));
+    assert.equal(td.decode(EG.getAtPath(out, nth(1))), raw, `${shape}: 決めた本文 (2 つ目の出現) を変えない`);
+    assert.equal(td.decode(EG.getAtPath(out, nth(0))), "前の話題", `${shape}: 1 つ目の出現を変えない`);
+  }
+});
+
+test("T-EG-09h Gemini: 本文が 128 バイト以上 (内側の長さが 2 バイト) で、本文に残した値が検出済みでも、送信を止めず、決めた本文と内側の長さを壊さない", () => {
+  const a = EG.adapters.geminiSession;
+  const tail = "。来週の打ち合わせの日程を調整したいので、候補の日を三つ挙げてください";
+  const raw = `連絡先は ${PHONE} と ${EMAIL} です${tail}`;
+  const decided = `${KEPT}${tail}`; // 確認で電話番号を外し、メールだけ伏せた本文
+  assert.ok(te.encode(decided).length >= 128, "前提: 決めた本文は 128 バイト以上 (長さの varint が 2 バイト)");
+  const r = a.scrubOthers(a.replaceInputs(a.decode(geminiForm(raw), []), [decided]), S());
+  assert.equal(r.stuck, false, "送信を止めない");
+  const item = EG.parseWebChannelForm(a.encode(r.model)).items[0].bytes;
+  assert.deepEqual(item, msg(2, vint(1, 1), msg(9, str(1, decided))), "届く protobuf は、決めた本文を正しい長さで包んだものとバイト単位で同じ");
 });
