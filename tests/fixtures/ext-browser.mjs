@@ -44,7 +44,15 @@ function pidsFor(userDataDir) {
  *   storage: 立ち上げの直後に chrome.storage.local に書く値 (テスト用の公開フラグ __pii_guard_e2e に足す)
  */
 export async function launchExtensionBrowser(opts) {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), opts.tmpPrefix));
+  // 一時ディレクトリを作れなかったときも、呼ぶ側が先に立ち上げたモックのサーバを閉じてから投げる
+  // (ブラウザはまだ無いので、片付けるのはサーバだけ)
+  let tmp;
+  try {
+    tmp = fs.mkdtempSync(path.join(os.tmpdir(), opts.tmpPrefix));
+  } catch (e) {
+    await opts.closeServer().catch(() => {});
+    throw e;
+  }
   const userDataDir = path.join(tmp, "profile");
   let ctx = null;
   let recorder = null;
