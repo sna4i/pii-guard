@@ -136,33 +136,41 @@
   /**
    * 文字列フィールドの中身を書き換える。値 (バイト列) を含むフィールドについて、入れ子として読めて
    * 中で書き換わればそれを使い、だめなら文字列として書き換える。長さの入れ子は直して組み直す。
+   * ただし、飛ばしたフィールドを中に持つフィールドは、文字列として書き換えない (D-EG-09)。文字列として
+   * 書き換えると、飛ばしたフィールド (確認画面で決めた本文) の値まで伏せ、中の長さを壊すため。
    * @param {Uint8Array} u8
    * @param {{mayContain:(Uint8Array)=>boolean, rewrite:(string)=>string}} rw
    * @param {(path:number[])=>boolean} [skip] この道筋のフィールドは触らない (確認画面で決めた本文など)
-   * @returns {{bytes:Uint8Array, changed:boolean, stuck:boolean}|null} 全体が protobuf で読めなければ null。
-   *   stuck = 値を含むのに書き換えられない (文字列でないバイト列) フィールドがあった
+   * @returns {{bytes:Uint8Array, changed:boolean, stuck:boolean, skipped:boolean}|null} 全体が protobuf で読めなければ null。
+   *   stuck = 値を含むのに書き換えられない (文字列でないバイト列) フィールドがあった。
+   *   skipped = skip に当たって飛ばしたフィールドが、調べた中 (入れ子を含む) にあった
    */
   function rewriteProto(u8, rw, skip, path = [], depth = 0) {
     const fields = parseMessage(u8);
     if (!fields) return null;
     let changed = false;
     let stuck = false;
+    let skipped = false;
     const parts = [];
     let last = 0;
     for (const f of fields) {
       if (f.wt !== 2) continue;
       const p = path.concat(f.num);
       const val = u8.subarray(f.valStart, f.end);
-      if ((skip && skip(p)) || !rw.mayContain(val)) continue;
+      if (skip && skip(p)) { skipped = true; continue; }
+      if (!rw.mayContain(val)) continue;
       let next = null;
       let fieldStuck = false;
+      let innerSkipped = false;
       if (depth < 24 && val.length >= 2) {
         const inner = rewriteProto(val, rw, skip, p, depth + 1);
         if (inner && inner.changed) next = inner.bytes;
         if (inner && inner.stuck) fieldStuck = true;
+        if (inner && inner.skipped) innerSkipped = true;
       }
-      if (!next) {
-        // 入れ子の中で書き換えられなかった: このフィールドを文字列として書き換える
+      if (innerSkipped) skipped = true;
+      if (!next && !innerSkipped) {
+        // 入れ子の中で書き換えられず、飛ばしたフィールドも中に無い: このフィールドを文字列として書き換える
         const t = asText(val);
         if (t !== null) {
           const t2 = rw.rewrite(t);
@@ -177,9 +185,9 @@
         last = f.end;
       }
     }
-    if (!changed) return { bytes: u8, changed: false, stuck };
+    if (!changed) return { bytes: u8, changed: false, stuck, skipped };
     parts.push(u8.subarray(last));
-    return { bytes: concat(parts), changed: true, stuck };
+    return { bytes: concat(parts), changed: true, stuck, skipped };
   }
 
   // ---- Base64 ---------------------------------------------------------------------

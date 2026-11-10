@@ -248,3 +248,33 @@ test("T-EG-04d Claude: 添付 (root.2.15 の繰り返し) の中身とファイ�
   assert.equal(td.decode(EG.getAtPath(out, [2, 3])), DRAFT);
   assert.equal(td.decode(EG.getAtPath(out, [2, 12])), "Asia/Tokyo");
 });
+
+// ---- T-EG-09 利用者が決めた本文の欄の親を、文字列として書き換えない (P-EG-02) ----------------
+const KEPT = `連絡先は ${PHONE} と <EMAIL_ADDRESS_1> です`; // 確認で電話番号を外した本文
+
+test("T-EG-09a Gemini: 本文に残した値が検出済みでも、本文を変えず、内側の長さも壊さない", () => {
+  const m = EG.adapters.geminiSession.decode(geminiForm(KEPT), [KEPT]);
+  const r = EG.adapters.geminiSession.scrubOthers(m, S());
+  assert.equal(r.stuck, false);
+  const wc = EG.parseWebChannelForm(EG.adapters.geminiSession.encode(r.model));
+  const v = EG.getAtPath(wc.items[0].bytes, [2, 9, 1]);
+  assert.ok(v, "本文の欄が protobuf として読める");
+  assert.equal(td.decode(v), KEPT);
+});
+
+test("T-EG-09b Claude: 本文に残した値が検出済みでも、送信を止めず、本文を変えない", () => {
+  const m = EG.adapters.claudeRpc.decode(claudeBody(KEPT), [KEPT]);
+  const r = EG.adapters.claudeRpc.scrubOthers(m, S());
+  assert.equal(r.stuck, false);
+  assert.equal(td.decode(EG.getAtPath(EG.adapters.claudeRpc.encode(r.model), [2, 3])), KEPT);
+});
+
+test("T-EG-09c 本文と同じ親の別の欄に残った値は伏せ、本文は変えない", () => {
+  const body = cat(msg(1, str(1, "sess_x")), msg(2, str(3, KEPT), str(20, `件名 ${PHONE}`)));
+  const m = EG.adapters.claudeRpc.decode(body, [KEPT]);
+  const r = EG.adapters.claudeRpc.scrubOthers(m, S());
+  assert.equal(r.stuck, false);
+  const out = EG.adapters.claudeRpc.encode(r.model);
+  assert.equal(td.decode(EG.getAtPath(out, [2, 3])), KEPT);
+  assert.match(td.decode(EG.getAtPath(out, [2, 20])), /<PHONE_NUMBER_\d+>/);
+});
