@@ -96,9 +96,9 @@ export function createLicenseManager({ extpayId, makeExtPay, storage, alarms, ru
       writtenGen = gen;
       latest = state;
       await storage.set({ [LICENSE_CACHE_KEY]: state });
-      return withDerived(state, "network");
     }
-    // もっと新しく始めた問い合わせの答えがある。この問い合わせを待っていた呼び手には、古い答えを見せない
+    // 返すのは、いちばん新しく始めた問い合わせの答え (書き込みを待つあいだに、もっと新しい答えが届いたときも)。
+    // 待っていた呼び手に、古い答えを見せない
     return withDerived(latest, "network");
   }
 

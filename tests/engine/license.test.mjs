@@ -419,6 +419,7 @@ test("T-PRO-14h 新しい答えを書いている途中に古い答えが届い�
   await Promise.all([first, second]);
   await tick();
   assert.equal(deps.storage.data[LICENSE_CACHE_KEY].paid, true, "古い答えで上書きしない");
+  assert.equal((await first).paid, true, "古い問い合わせを待っていた呼び手にも、新しい答えを返す (答えも書き込みを待つ前に決める)");
 });
 
 test("T-PRO-14i 見捨てた問い合わせを待っていた呼び手には、もっと新しい答えがあればそちらを返す", async () => {
