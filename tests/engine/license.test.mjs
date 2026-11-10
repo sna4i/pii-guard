@@ -45,28 +45,33 @@ function fakeRuntime() {
 }
 // user: getUser() が返すもの。fail: true なら通信の失敗として投げる。hang: true なら返らない (時間切れを試す)。
 // openFails: true なら購入とログインのページを開く操作が失敗する (API キーを作る通信の失敗)
-function fakeExtPay({ user = { paid: false, installedAt: new Date(T0) }, fail = false, hang = false, openFails = false, openHang = false } = {}) {
+// deferUser / deferOpen: true なら、答えをテストがあとから返す (pendingUsers / pendingOpens の resolve と reject)
+function fakeExtPay({ user = { paid: false, installedAt: new Date(T0) }, fail = false, hang = false, openFails = false, openHang = false, deferUser = false, deferOpen = false } = {}) {
   const calls = { getUser: 0, startBackground: 0, openPaymentPage: 0, openLoginPage: 0 };
+  const pendingUsers = [];
+  const pendingOpens = [];
+  const later = (list) => new Promise((resolve, reject) => list.push({ resolve, reject }));
   const api = {
-    calls,
+    calls, pendingUsers, pendingOpens,
     set user(u) { user = u; },
     set fail(f) { fail = f; },
     async getUser() {
       calls.getUser++;
       if (hang) return new Promise(() => {});
+      if (deferUser) return later(pendingUsers);
       await Promise.resolve();
       if (fail) throw new TypeError("Failed to fetch");
       return user;
     },
     startBackground() { calls.startBackground++; },
-    async openPaymentPage() { calls.openPaymentPage++; if (openHang) return new Promise(() => {}); if (openFails) throw new TypeError("Failed to fetch"); },
-    async openLoginPage() { calls.openLoginPage++; if (openFails) throw new TypeError("Failed to fetch"); },
+    async openPaymentPage() { calls.openPaymentPage++; if (openHang) return new Promise(() => {}); if (deferOpen) return later(pendingOpens); if (openFails) throw new TypeError("Failed to fetch"); },
+    async openLoginPage() { calls.openLoginPage++; if (openHang) return new Promise(() => {}); if (deferOpen) return later(pendingOpens); if (openFails) throw new TypeError("Failed to fetch"); },
   };
   return api;
 }
-function setup({ id = "pii-guard-test", now = T0, user, fail, hang, openFails, openHang, storage = {}, alarms = [], networkTimeoutMs } = {}) {
+function setup({ id = "pii-guard-test", now = T0, user, fail, hang, openFails, openHang, deferUser, deferOpen, storage = {}, alarms = [], networkTimeoutMs } = {}) {
   const clock = { now };
-  const extpay = fakeExtPay({ user, fail, hang, openFails, openHang });
+  const extpay = fakeExtPay({ user, fail, hang, openFails, openHang, deferUser, deferOpen });
   let made = 0;
   const deps = {
     extpayId: id,
@@ -318,6 +323,32 @@ test("T-PRO-14b 時間切れのあとも、問い合わせが返るまでは新�
   assert.equal(extpay.calls.getUser, 1, "返らない問い合わせがあるあいだは、次を始めない");
 });
 
+const tick = () => new Promise((r) => setTimeout(r, 0));
+
+test("T-PRO-14c 問い合わせが返ったら、次の確かめ直しは新しく始める", async () => {
+  const { lm, extpay } = setup({ user: paidUser() });
+  assert.equal((await lm.getLicenseState({ refresh: true })).source, "network");
+  assert.equal((await lm.getLicenseState({ refresh: true })).source, "network");
+  assert.equal(extpay.calls.getUser, 2, "返ったあとの確かめ直しは、前の答えを使い回さない");
+});
+
+test("T-PRO-14d 返らない問い合わせは、時間切れの 6 倍たったら見捨てて新しく始める。見捨てた答えが遅れて届いても、キャッシュを書き換えない", async () => {
+  const { lm, extpay, clock, deps } = setup({ deferUser: true, networkTimeoutMs: 20 });
+  assert.equal((await lm.getLicenseState({ refresh: true })).error, true, "1 本目は時間切れ");
+  assert.equal((await lm.getLicenseState({ refresh: true })).error, true, "まだ 1 本目を待つ");
+  assert.equal(extpay.calls.getUser, 1);
+  clock.now += 6 * 20 + 1;
+  const third = lm.getLicenseState({ refresh: true });
+  await tick();
+  assert.equal(extpay.calls.getUser, 2, "見捨てて 2 本目を始める");
+  extpay.pendingUsers[1].resolve(paidUser());
+  assert.equal((await third).paid, true);
+  extpay.pendingUsers[0].resolve(unpaidUser()); // 見捨てた 1 本目の答え (古い) が遅れて届く
+  await tick();
+  const stored = (await deps.storage.get(LICENSE_CACHE_KEY))[LICENSE_CACHE_KEY];
+  assert.equal(stored.paid, true, "見捨てた答えで書き換えない");
+});
+
 test("T-PRO-15 content script には、7 日以内のキャッシュをすぐ返し、古ければ裏で確かめ直す", async () => {
   const cached = { paid: true, plan: PLAN, email: "buyer@example.test", checkedAt: T0 - 2 * HOUR, trialEndsAt: null };
   // ExtPay は返らない。通信を待っていたら、時間切れのあとの答え (source "grace"、error) になる。時計では測らない
@@ -346,6 +377,34 @@ test("T-PRO-07g ページを開く待ちにも時間切れがある (ExtPay が�
   const { lm, deps } = setup({ openHang: true, networkTimeoutMs: 20 });
   lm.initLicense();
   assert.deepEqual(await send(deps, { type: "license:openPayment" }, POPUP), { ok: false, reason: "timeout" });
+});
+
+test("T-PRO-07h ページを開く依頼は 1 本ずつ。返らないあいだの押し直しは ExtPay を呼ばない (API キーを 2 つ作らない)。時間切れの 6 倍で見捨てる", async () => {
+  const { lm, deps, extpay, clock } = setup({ openHang: true, networkTimeoutMs: 20 });
+  lm.initLicense();
+  const timeout = { ok: false, reason: "timeout" };
+  assert.deepEqual(await send(deps, { type: "license:openPayment" }, POPUP), timeout);
+  assert.deepEqual(await send(deps, { type: "license:openPayment" }, POPUP), timeout);
+  assert.deepEqual(await send(deps, { type: "license:openLogin" }, POPUP), timeout);
+  assert.deepEqual([extpay.calls.openPaymentPage, extpay.calls.openLoginPage], [1, 0], "返らない依頼があるあいだは、ExtPay を呼ばない");
+  clock.now += 6 * 20 + 1;
+  assert.deepEqual(await send(deps, { type: "license:openPayment" }, POPUP), timeout);
+  assert.equal(extpay.calls.openPaymentPage, 2, "見捨てて新しく頼む");
+});
+
+test("T-PRO-07i 購入のページを開いている途中でログインを押すと、購入が終わってからログインを開く", async () => {
+  const { lm, deps, extpay } = setup({ deferOpen: true });
+  lm.initLicense();
+  const pay = send(deps, { type: "license:openPayment" }, POPUP);
+  const login = send(deps, { type: "license:openLogin" }, POPUP);
+  await tick();
+  assert.deepEqual([extpay.calls.openPaymentPage, extpay.calls.openLoginPage], [1, 0], "購入が終わるまで、ログインは待つ");
+  extpay.pendingOpens[0].resolve();
+  assert.deepEqual(await pay, { ok: true });
+  await tick();
+  assert.equal(extpay.calls.openLoginPage, 1);
+  extpay.pendingOpens[1].resolve();
+  assert.deepEqual(await login, { ok: true });
 });
 
 test("T-PRO-16 最後に確かめた日時が未来 (時計が戻った) なら、古いものとして確かめ直す", async () => {

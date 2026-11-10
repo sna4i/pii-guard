@@ -44,7 +44,14 @@ export function createLicenseManager({ extpayId, makeExtPay, storage, alarms, ru
   // 送り手がポップアップか設定画面か (#log などは除いて比べる)。content script と保護入力欄の iframe は違う
   const isUiPage = (sender) => typeof sender.url === "string" && uiPages.has(sender.url.split(/[?#]/)[0]);
   let extpay = null;
+  // 走っている ExtPay の問い合わせと、ページを開く依頼 ({ promise, startedAt }。開く依頼は type も持つ)
   let inflight = null;
+  let opening = null;
+  // 何本目の問い合わせか。見捨てた問い合わせの答えを、キャッシュに書かないために数える
+  let generation = 0;
+  // 返らない問い合わせ・依頼を見捨てて、新しく始めるまでの時間 (時間切れの 6 倍。D-PRO-04、D-PRO-11)
+  const giveUpMs = 6 * networkTimeoutMs;
+  const tooOld = (startedAt) => { const age = now() - startedAt; return age < 0 || age > giveUpMs; };
   // ExtPay は ID が決まっているときだけ、最初に要るときに作る (仮の ID のまま作ると、存在しない宛先に通信しうる)
   const getExtPay = () => {
     if (!configured) return null;
@@ -66,7 +73,7 @@ export function createLicenseManager({ extpayId, makeExtPay, storage, alarms, ru
     return c && typeof c === "object" ? c : null;
   }
 
-  async function revalidate() {
+  async function revalidate(gen) {
     const ep = getExtPay();
     if (!ep) return unconfiguredState();
     const user = await ep.getUser();
@@ -78,7 +85,8 @@ export function createLicenseManager({ extpayId, makeExtPay, storage, alarms, ru
       checkedAt: now(),
       trialEndsAt: installedAt === null ? null : installedAt + TRIAL_PERIOD_MS,
     };
-    await storage.set({ [LICENSE_CACHE_KEY]: state });
+    // 見捨てた問い合わせの答えは残さない (あとから始めた問い合わせの答えを、古い答えで上書きしない)
+    if (gen === generation) await storage.set({ [LICENSE_CACHE_KEY]: state });
     return withDerived(state, "network");
   }
 
@@ -93,10 +101,32 @@ export function createLicenseManager({ extpayId, makeExtPay, storage, alarms, ru
 
   // ExtPay への問い合わせは同時に 1 本だけ。時間切れは通信の失敗として扱うが、問い合わせは返るまで残り、
   // そのあいだの確かめ直しも同じ問い合わせを待つ (新しく始めない)。時間切れのあとで答えが届けば、
-  // キャッシュが書き換わり、storage の変化で画面と content script に伝わる (D-PRO-11)
+  // キャッシュが書き換わり、storage の変化で画面と content script に伝わる。giveUpMs たっても返らない
+  // 問い合わせは見捨てて、次の確かめ直しで新しく始める (D-PRO-11)
   function revalidateOnce() {
-    if (!inflight) inflight = revalidate().finally(() => { inflight = null; });
-    return withTimeout(inflight);
+    if (inflight && tooOld(inflight.startedAt)) inflight = null;
+    if (!inflight) {
+      const entry = { startedAt: now(), promise: null };
+      entry.promise = revalidate(++generation).finally(() => { if (inflight === entry) inflight = null; });
+      inflight = entry;
+    }
+    return withTimeout(inflight.promise);
+  }
+
+  // 購入とログインのページを開く依頼は 1 本ずつ。ExtPay は API キーが無いと、依頼のたびに新しいキーを作って
+  // 最後に届いたものだけを残すので、重ねると、残らなかったキーのページで買った人が無料版に見える。
+  // 返らないあいだの押し直しは、同じ種類なら同じ依頼を待ち、別の種類ならそのあとに回す。giveUpMs たっても
+  // 返らない依頼は見捨てる (D-PRO-04)
+  function openPage(ep, type) {
+    if (opening && tooOld(opening.startedAt)) opening = null;
+    if (opening && opening.type === type) return withTimeout(opening.promise);
+    const before = opening ? opening.promise.catch(() => {}) : Promise.resolve();
+    const entry = { type, startedAt: now(), promise: null };
+    entry.promise = before
+      .then(() => (type === "license:openPayment" ? ep.openPaymentPage() : ep.openLoginPage()))
+      .finally(() => { if (opening === entry) opening = null; });
+    opening = entry;
+    return withTimeout(entry.promise);
   }
 
   // 最後に確かめてからの時間。未来の日時 (時計が戻った) は、古いものとして扱う
@@ -159,7 +189,7 @@ export function createLicenseManager({ extpayId, makeExtPay, storage, alarms, ru
       if (!ep) { sendResponse({ ok: false, reason: "unconfigured" }); return false; }
       // ExtPay は API キーを作る通信のあとでページを開く。失敗したら画面に伝える。通信が返らないときも
       // networkTimeoutMs で答える (ページは、そのあとで開くこともある)
-      withTimeout(Promise.resolve().then(() => (msg.type === "license:openPayment" ? ep.openPaymentPage() : ep.openLoginPage())))
+      openPage(ep, msg.type)
         .then(() => sendResponse({ ok: true }),
           (e) => sendResponse({ ok: false, reason: e && e.code === "timeout" ? "timeout" : "network" }));
       return true;

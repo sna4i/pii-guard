@@ -226,13 +226,14 @@ test("T-PRO-12h ポップアップは開いたらすぐキャッシュで出し�
   // 12e のあと: キャッシュは無料版。最後に確かめたのを 2 時間前にして (60 分を過ぎ、7 日以内)、購入済みに替える
   pay.state.mode = "paid";
   let release = () => {};
-  pay.state.gate = new Promise((r) => { release = r; });
-  await h.ext.evaluate(async () => {
-    const { licenseState } = await chrome.storage.local.get("licenseState");
-    await chrome.storage.local.set({ licenseState: { ...licenseState, checkedAt: Date.now() - 2 * 3600 * 1000 } });
-  });
-  const p = await openPage("popup.html");
+  let p = null;
   try {
+    pay.state.gate = new Promise((r) => { release = r; });
+    await h.ext.evaluate(async () => {
+      const { licenseState } = await chrome.storage.local.get("licenseState");
+      await chrome.storage.local.set({ licenseState: { ...licenseState, checkedAt: Date.now() - 2 * 3600 * 1000 } });
+    });
+    p = await openPage("popup.html");
     await p.waitForSelector("#license-box:not([hidden])", { timeout: 5000 });
     assert.equal(await p.textContent("#license-status"), "無料版", "確かめ直しの答えを待たずに、キャッシュで出す");
     release();
@@ -240,7 +241,7 @@ test("T-PRO-12h ポップアップは開いたらすぐキャッシュで出し�
   } finally {
     pay.state.gate = null;
     release();
-    await p.close();
+    if (p) await p.close();
   }
 });
 
@@ -248,13 +249,14 @@ test("T-PRO-12i キャッシュで先に出したあと、裏の確かめ直し�
   // 12h のあと: キャッシュは購入済み。最後に確かめたのを 2 時間前にして、問い合わせを失敗させる
   pay.state.mode = "error";
   let release = () => {};
-  pay.state.gate = new Promise((r) => { release = r; });
-  await h.ext.evaluate(async () => {
-    const { licenseState } = await chrome.storage.local.get("licenseState");
-    await chrome.storage.local.set({ licenseState: { ...licenseState, checkedAt: Date.now() - 2 * 3600 * 1000 } });
-  });
-  const p = await openPage("popup.html");
+  let p = null;
   try {
+    pay.state.gate = new Promise((r) => { release = r; });
+    await h.ext.evaluate(async () => {
+      const { licenseState } = await chrome.storage.local.get("licenseState");
+      await chrome.storage.local.set({ licenseState: { ...licenseState, checkedAt: Date.now() - 2 * 3600 * 1000 } });
+    });
+    p = await openPage("popup.html");
     await p.waitForSelector("#license-box:not([hidden])", { timeout: 5000 });
     assert.equal(await p.textContent("#license-status"), "Pro (Pro 月額)");
     assert.equal(await p.isVisible("#license-note"), false, "答えが届くまでは注記を出さない");
@@ -265,7 +267,7 @@ test("T-PRO-12i キャッシュで先に出したあと、裏の確かめ直し�
   } finally {
     pay.state.gate = null;
     release();
-    await p.close();
+    if (p) await p.close();
     pay.state.mode = "paid";
   }
 });

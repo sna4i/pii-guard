@@ -805,9 +805,9 @@ async function loadProLicense(refresh) {
   let state = null;
   try { state = await chrome.runtime.sendMessage({ type: "license:get", refresh: refresh === true }); } catch (_) {}
   renderProLicense(state);
-  // キャッシュで先に出したとき (60 分を過ぎている) は、裏の確かめ直しの答えを待って出し直す。
-  // Service Worker の問い合わせは 1 本にまとまるので、通信は増えない。確かめられなければ注記が出る (D-PRO-11)
-  if (state && state.source === "stale") loadProLicense(true);
+  // キャッシュで先に出したとき (60 分を過ぎている) は、確かめ直しの答えを待って出し直す。確かめられなければ注記が出る。
+  // 裏の確かめ直しが走っていればそれを待ち、もう終わっていれば、もう 1 回問い合わせる (D-PRO-11)
+  if (refresh !== true && state && state.source === "stale") loadProLicense(true);
 }
 async function openProPage(type) {
   let r = null;

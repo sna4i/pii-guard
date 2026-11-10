@@ -117,9 +117,9 @@ async function loadLicense(refresh) {
   let state = null;
   try { state = await chrome.runtime.sendMessage({ type: "license:get", refresh: refresh === true }); } catch (_) {}
   renderLicense(state);
-  // キャッシュで先に出したとき (60 分を過ぎている) は、裏の確かめ直しの答えを待って出し直す。
-  // Service Worker の問い合わせは 1 本にまとまるので、通信は増えない。確かめられなければ注記が出る (D-PRO-11)
-  if (state && state.source === "stale") loadLicense(true);
+  // キャッシュで先に出したとき (60 分を過ぎている) は、確かめ直しの答えを待って出し直す。確かめられなければ注記が出る。
+  // 裏の確かめ直しが走っていればそれを待ち、もう終わっていれば、もう 1 回問い合わせる (D-PRO-11)
+  if (refresh !== true && state && state.source === "stale") loadLicense(true);
 }
 async function openLicensePage(type) {
   let r = null;
@@ -150,6 +150,10 @@ document.addEventListener("DOMContentLoaded", () => {
   $("license-upgrade").addEventListener("click", () => openLicensePage("license:openPayment"));
   $("license-login").addEventListener("click", () => openLicensePage("license:openLogin"));
   $("license-refresh").addEventListener("click", () => loadLicense(true));
+  // 時間切れのあとで答えが届いたときなど、購入状態が書き換わったら出し直す
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === "local" && "licenseState" in changes) loadLicense(false);
+  });
   $("enabled-toggle").addEventListener("change", (e) => {
     saveEnabled(e.target.checked);
   });
