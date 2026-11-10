@@ -304,7 +304,7 @@ test("T-EG-09d 本文の道筋が繰り返され、本文でない方の出現�
   }
 });
 
-test("T-EG-09e Claude: 形が変わり、下書きと同じ中身で見つけた本文の欄が繰り返しの 2 つ目にあっても、原文のまま送らない (伏せるか止める)", () => {
+test("T-EG-09e Claude: 形が変わり、下書きと同じ中身で見つけた本文の欄が繰り返しの 2 つ目にあっても、原文のまま送らない。伏せた本文は 2 つ目の出現に書き、1 つ目は書き換えない", () => {
   const a = EG.adapters.claudeRpc;
   const raw = `連絡先は ${PHONE} と ${EMAIL} です`;
   const body = cat(msg(1, str(1, "sess_x")), msg(5, str(1, "前の話題")), msg(5, str(1, raw)));
@@ -313,6 +313,9 @@ test("T-EG-09e Claude: 形が変わり、下書きと同じ中身で見つけた
   const r = a.scrubOthers(a.replaceInputs(m0, [MASKED]), S());
   const out = a.encode(r.model);
   assert.ok(r.stuck || (!has(out, PHONE) && !has(out, EMAIL)), `原文のまま送らない (stuck=${r.stuck})`);
+  assert.equal(r.stuck, false, "1 つ目の出現 (前の話題) に検出済みの値は無いので、送信を止めない");
+  assert.equal(td.decode(EG.getAtPath(out, [{ n: 5, k: 1 }, 1])), MASKED, "伏せた本文は、利用者が決めた 2 つ目の出現に書く");
+  assert.equal(td.decode(EG.getAtPath(out, [{ n: 5, k: 0 }, 1])), "前の話題", "1 つ目の出現 (関係のない欄) を書き換えない");
 });
 
 // ---- 救済の道でも、確認に出ていない出現の値を原文のまま送らない (C-1) ----------------------------------
