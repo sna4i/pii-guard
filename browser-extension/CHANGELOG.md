@@ -85,6 +85,10 @@
 - 対応サービスの名前と同じ語の繰り返しを、審査の決まり (サービス名は 1 回ずつ、同じ語は 5 回未満) に収めた。
   変更点に、確認で外した項目を本文に残しても送れるようにしたことを足した
 
+### 同梱の部品のライセンス
+- 同梱している Transformers.js と ONNX Runtime Web の告知 (`THIRD_PARTY_NOTICES.txt`) と、
+  ONNX Runtime の MIT License の本文 (`vendor/transformers/LICENSE-onnxruntime`) を加えた
+
 ### 動作ログ
 - 拡張機能はブラウザのコンソールに何も書かない。以前は動作の確認用に、送信の内容の先頭や、
   接続用の値を含む URL をコンソールに出していた
