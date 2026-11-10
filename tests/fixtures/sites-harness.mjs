@@ -1,105 +1,61 @@
-// tests/fixtures/sites-harness.mjs — 拡張機能を読み込んだ Chromium (既定はヘッドレス、browser-mode.mjs) と、モックのサイト
-// (mock-sites/server.mjs) と、CDP の記録係。拡張機能のディレクトリは PII_GUARD_EXT で切り替えられる (既定はこのリポジトリの
-// browser-extension)。スクリーンショットは PII_E2E_SHOTS にディレクトリを指定したときだけ残す。
-// close() はブラウザ・サーバ・一時ディレクトリを片付け、プロセスが残っていないことまで確かめる。
-import fs from "node:fs";
-import os from "node:os";
+// tests/fixtures/sites-harness.mjs — 拡張機能を読み込んだ Chromium と、モックのサイト (mock-sites/server.mjs) と、
+// CDP の記録係。ブラウザの立ち上げと片付け (ヘッドレスが既定、close() でプロセスが残っていないことまで確かめる、
+// PII_GUARD_EXT での拡張機能の切り替え) は ext-browser.mjs と共通。ここでは、モックのサイトを立ち上げ、
+// 各ホスト名をそこへ向け、サイドバーやアイコンを読む道具を足す。
+// スクリーンショットは PII_E2E_SHOTS にディレクトリを指定したときだけ残す。
 import path from "node:path";
-import { execFileSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { startMockSites, HOSTS } from "./mock-sites/server.mjs";
-import { browserMode } from "./browser-mode.mjs";
-import { startCdpRecorder } from "./cdp-recorder.mjs";
+import { launchExtensionBrowser, REPO, sleep } from "./ext-browser.mjs";
 
-const HERE = path.dirname(fileURLToPath(import.meta.url));
-export const REPO = path.resolve(HERE, "..", "..");
-const require = createRequire(path.join(REPO, "tests", "integration", "package.json"));
-export const { chromium } = require("playwright");
+export { sleep };
+const require = createRequire(import.meta.url);
 export const leak = require(path.join(REPO, "browser-extension", "security", "leak-detector.js"));
 export const EG = require(path.join(REPO, "browser-extension", "security", "egress-guard.js"));
 
-export const EXT_DIR = path.resolve(process.env.PII_GUARD_EXT || path.join(REPO, "browser-extension"));
 export const SHOTS = process.env.PII_E2E_SHOTS ? path.resolve(process.env.PII_E2E_SHOTS) : null;
-export const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // 架空の値だけ (spec 12.2 と同じ)
 export const FAKE = { phone: "090-1234-5678", email: "taro.yamada@example.test", address: "東京都渋谷区テスト町3丁目12番8号", card: "4111-1111-1111-1111" };
 export const RAW = [FAKE.phone, FAKE.email, FAKE.address, "09012345678"];
 
-function pidsFor(dir) {
-  try { return execFileSync("pgrep", ["-f", dir], { encoding: "utf8" }).trim().split("\n").filter(Boolean); } catch (_) { return []; }
-}
-
 export async function launchSites(opts = {}) {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pii-qa-"));
-  const userDataDir = path.join(tmp, "profile");
   const server = await startMockSites();
-  let ctx = null;
-  let recorder = null;
-  const closeAll = async () => {
-    if (recorder) await recorder.close().catch(() => {});
-    if (ctx) await ctx.close().catch(() => {});
-    await server.close().catch(() => {});
-    for (let i = 0; i < 30 && pidsFor(userDataDir).length; i++) await sleep(100);
-    for (const pid of pidsFor(userDataDir)) { try { process.kill(Number(pid), "SIGKILL"); } catch (_) {} }
-    for (let i = 0; i < 20 && pidsFor(userDataDir).length; i++) await sleep(100);
-    const left = pidsFor(userDataDir);
-    fs.rmSync(tmp, { recursive: true, force: true });
-    if (left.length) throw new Error(`browser processes still alive after close: ${left.join(",")}`);
+  const browser = await launchExtensionBrowser({
+    tmpPrefix: "pii-qa-",
+    hostRules: HOSTS.map((h) => `MAP ${h} 127.0.0.1:${server.port}`),
+    closeServer: () => server.close(),
+    viewport: opts.viewport || { width: 1280, height: 800 },
+    colorScheme: opts.colorScheme || "light",
+    storage: opts.storage,
+  });
+  const { ctx, recorder } = browser;
+  return {
+    ...browser,
+    server,
+    async open(url) {
+      const page = await ctx.newPage();
+      page.__errors = [];
+      page.__console = [];
+      page.on("pageerror", (e) => page.__errors.push(String(e && e.stack || e)));
+      page.on("console", (m) => { if (m.type() === "error" || m.type() === "warning") page.__console.push({ type: m.type(), text: m.text(), url: (m.location() || {}).url || "" }); });
+      await page.goto(url, { waitUntil: "domcontentloaded" });
+      await page.waitForFunction(() => window.QA !== undefined || document.title === "example", null, { timeout: 10000 }).catch(() => {});
+      return page;
+    },
+    /** values のどれかを含む、ブラウザから出ようとした通信 (CDP) と、実際に届いた通信 (サーバ) */
+    leaksOf(values, since = 0) {
+      const cdp = [];
+      for (const r of recorder.all()) {
+        if (r.t < since || !r.url || r.url.startsWith("chrome-extension://")) continue;
+        const hits = leak.scanRequest(r, values);
+        if (hits.length) cdp.push({ url: r.url.slice(0, 120), method: r.method, failed: r.failed || null, hits: hits.map((x) => `${x.index}:${x.kind}@${x.field}`) });
+      }
+      const srv = server.requests.filter((r) => r.t >= since && leak.findLeaks(r.body + JSON.stringify(r.headers), values).length).map((r) => ({ host: r.host, url: r.url.slice(0, 100), kind: r.kind }));
+      const ws = server.wsFrames.filter((f) => f.t >= since && leak.findLeaks(f.data, values).length).map((f) => ({ url: f.url }));
+      return { cdp, srv, ws, total: cdp.filter((x) => !x.failed).length + srv.length + ws.length };
+    },
   };
-  try {
-    ctx = await chromium.launchPersistentContext(userDataDir, {
-      ...browserMode(),
-      viewport: opts.viewport || { width: 1280, height: 800 },
-      colorScheme: opts.colorScheme || "light",
-      args: [
-        `--disable-extensions-except=${EXT_DIR}`, `--load-extension=${EXT_DIR}`,
-        `--host-resolver-rules=${HOSTS.map((h) => `MAP ${h} 127.0.0.1:${server.port}`).join(",")}`,
-        "--ignore-certificate-errors", "--disable-quic", "--no-sandbox", "--remote-debugging-port=0", "--no-first-run", "--no-default-browser-check",
-      ],
-    });
-    recorder = await startCdpRecorder(userDataDir);
-    let [sw] = ctx.serviceWorkers();
-    if (!sw) sw = await ctx.waitForEvent("serviceworker", { timeout: 15000 });
-    const extId = new URL(sw.url()).host;
-    const ext = await ctx.newPage();
-    await ext.goto(`chrome-extension://${extId}/options.html`);
-    await ext.evaluate(async () => { for (let i = 0; i < 100; i++) { const s = await chrome.storage.local.get(["enabled"]); if (typeof s.enabled === "boolean") return; await new Promise((r) => setTimeout(r, 100)); } });
-    await ext.evaluate(async (s) => { await chrome.storage.local.set({ __pii_guard_e2e: true, ...s }); }, opts.storage || {});
-    const h = {
-      ctx, server, recorder, extId, ext, sw, userDataDir,
-      async setStorage(obj) { await ext.evaluate(async (o) => { await chrome.storage.local.set(o); }, obj); },
-      async getStorage(keys) { return ext.evaluate(async (k) => chrome.storage.local.get(k), keys); },
-      async open(url) {
-        const page = await ctx.newPage();
-        page.__errors = [];
-        page.__console = [];
-        page.on("pageerror", (e) => page.__errors.push(String(e && e.stack || e)));
-        page.on("console", (m) => { if (m.type() === "error" || m.type() === "warning") page.__console.push({ type: m.type(), text: m.text(), url: (m.location() || {}).url || "" }); });
-        await page.goto(url, { waitUntil: "domcontentloaded" });
-        await page.waitForFunction(() => window.QA !== undefined || document.title === "example", null, { timeout: 10000 }).catch(() => {});
-        return page;
-      },
-      /** values のどれかを含む、ブラウザから出ようとした通信 (CDP) と、実際に届いた通信 (サーバ) */
-      leaksOf(values, since = 0) {
-        const cdp = [];
-        for (const r of recorder.all()) {
-          if (r.t < since || !r.url || r.url.startsWith("chrome-extension://")) continue;
-          const hits = leak.scanRequest(r, values);
-          if (hits.length) cdp.push({ url: r.url.slice(0, 120), method: r.method, failed: r.failed || null, hits: hits.map((x) => `${x.index}:${x.kind}@${x.field}`) });
-        }
-        const srv = server.requests.filter((r) => r.t >= since && leak.findLeaks(r.body + JSON.stringify(r.headers), values).length).map((r) => ({ host: r.host, url: r.url.slice(0, 100), kind: r.kind }));
-        const ws = server.wsFrames.filter((f) => f.t >= since && leak.findLeaks(f.data, values).length).map((f) => ({ url: f.url }));
-        return { cdp, srv, ws, total: cdp.filter((x) => !x.failed).length + srv.length + ws.length };
-      },
-      async close() { await closeAll(); },
-    };
-    return h;
-  } catch (e) {
-    await closeAll().catch(() => {});
-    throw e;
-  }
 }
 
 // ---- ページの中の拡張機能の表示を読む ----------------------------------------------------------
