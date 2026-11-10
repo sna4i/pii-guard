@@ -97,6 +97,36 @@ async function loadLlmIndicator() {
   }
 }
 
+// ---- Pro 版 (docs/pro-license.md の F-PRO-07、D-PRO-05) ------------------------------
+// 状態は Service Worker のライセンス管理に聞く。支払いの直後は自動では届かないので (extensionpay.com に
+// content script を置いていない)、「購入状態を更新」で確かめ直す
+function renderLicense(state) {
+  const v = window.PiiGuardLicenseView.describeLicense(state);
+  const st = $("license-status");
+  st.textContent = v.status;
+  st.className = "value " + (v.tone === "pro" ? "status-ok" : v.tone === "warn" ? "status-warn" : "");
+  $("license-note").textContent = v.note;
+  $("license-note").hidden = !v.note;
+  $("license-upgrade").hidden = !v.canUpgrade;
+  $("license-login").hidden = !v.canLogin;
+  $("license-refresh").hidden = !v.canRefresh;
+}
+async function loadLicense(refresh) {
+  try {
+    renderLicense(await chrome.runtime.sendMessage({ type: "license:get", refresh: refresh === true }));
+  } catch (_) {
+    renderLicense(null);
+  }
+}
+async function openLicensePage(type) {
+  let ok = false;
+  try { ok = !!(await chrome.runtime.sendMessage({ type }))?.ok; } catch (_) {}
+  if (!ok) {
+    $("license-note").textContent = "ページを開けませんでした";
+    $("license-note").hidden = false;
+  }
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   // バージョン表示を manifest から自動反映 — ハードコード文字列が
   // 古いままにならないよう runtime に寄せる。
@@ -112,7 +142,11 @@ document.addEventListener("DOMContentLoaded", () => {
   loadUiMode();
   loadDetectionCount();
   loadLlmIndicator();
+  loadLicense(false);
 
+  $("license-upgrade").addEventListener("click", () => openLicensePage("license:openPayment"));
+  $("license-login").addEventListener("click", () => openLicensePage("license:openLogin"));
+  $("license-refresh").addEventListener("click", () => loadLicense(true));
   $("enabled-toggle").addEventListener("change", (e) => {
     saveEnabled(e.target.checked);
   });

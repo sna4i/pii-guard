@@ -37,6 +37,25 @@
 //   2. Forward the message there with target:"offscreen".
 //   3. Relay the offscreen response back to the original sender.
 import "./diag-log.js";
+import ExtPay from "./vendor/extpay/ExtPay.esm.js";
+import { EXTPAY_ID } from "./license/config.js";
+import { createLicenseManager } from "./license/license.js";
+
+// ---- Pro 版のライセンス (docs/pro-license.md) --------------------------------------
+// 購入状態は license/license.js だけで決める。外との通信は ExtensionPay の購入状態の確認だけで、
+// 本文や検出結果は扱わない。ID が仮のあいだは ExtPay を作らず、無料版としてだけ動く (D-PRO-09)。
+// ExtPay の決まりに合わせ、Service Worker の最上位で 1 回だけ初期化する。ここで何かが投げても、
+// ほかの仕事 (バッジ、動作ログ、ML など、無料版の機能) を止めないよう、ここだけで受け止める
+// (そのときは license:get に答えが無く、画面は「確認できません」になる)
+try {
+  createLicenseManager({
+    extpayId: EXTPAY_ID,
+    makeExtPay: ExtPay,
+    storage: chrome.storage.local,
+    alarms: chrome.alarms,
+    runtime: chrome.runtime,
+  }).initLicense();
+} catch (_) { /* 無料版のまま動き続ける */ }
 
 // ---- 動作ログ (docs/diagnostic-log.md) ----------------------------------------
 // 保存は Service Worker だけが行う (D-LG-03)。書き込みは 1 本の列に並べ、0.3 秒まとめてから書く (D-LG-04)

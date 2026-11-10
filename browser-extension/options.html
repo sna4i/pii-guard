@@ -17,6 +17,25 @@
     </nav>
 
     <main id="tab-settings" role="tabpanel" aria-labelledby="tabbtn-settings">
+      <!-- Pro 版 (docs/pro-license.md の F-PRO-07)。出す文とボタンは license/license-view.js が決める -->
+      <section class="card" id="pro-card">
+        <h2>PII Guard Pro</h2>
+        <p class="hint">
+          購入状態の確認のときだけ、決済サービス (ExtensionPay) と通信します。入力した文章や検出結果は送りません。
+          購入したあとは「購入状態を更新」を押してください。
+        </p>
+        <div class="form-row">
+          <span class="form-label">今のプラン</span>
+          <span id="pro-status" class="pro-status" aria-live="polite">確認中…</span>
+        </div>
+        <p id="pro-note" class="pro-note" hidden></p>
+        <div class="bulk-actions">
+          <button id="pro-upgrade" type="button" class="btn-primary" hidden>Pro にアップグレード</button>
+          <button id="pro-login" type="button" class="btn-secondary" hidden>購入済みの方はこちら (ログイン)</button>
+          <button id="pro-refresh" type="button" class="btn-secondary" hidden>購入状態を更新</button>
+        </div>
+      </section>
+
       <section class="card">
         <h2>マスキング除外リスト</h2>
         <p class="hint">
@@ -245,6 +264,7 @@
 
     <script src="diag-log.js"></script>
     <script src="tint.js"></script>
+    <script src="license/license-view.js"></script>
     <script src="options.js"></script>
   </body>
 </html>

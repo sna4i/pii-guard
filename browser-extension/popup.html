@@ -11,6 +11,18 @@
       <span id="version">v0.5.0-dev</span>
     </header>
 
+    <!-- Pro 版 (docs/pro-license.md の F-PRO-07)。出す文とボタンは license/license-view.js が決める -->
+    <section class="row license-row">
+      <span class="label">プラン</span>
+      <span id="license-status" class="value status-unknown" aria-live="polite">確認中…</span>
+    </section>
+    <p id="license-note" class="license-note" hidden></p>
+    <div class="license-actions">
+      <button id="license-upgrade" type="button" class="license-upgrade" hidden>Pro にアップグレード</button>
+      <button id="license-login" type="button" class="link-button" hidden>購入済みの方はこちら (ログイン)</button>
+      <button id="license-refresh" type="button" class="link-button" hidden>購入状態を更新</button>
+    </div>
+
     <section class="row toggle-row">
       <label for="enabled-toggle" class="toggle-label">
         <span>マスキングを有効化</span>
@@ -68,6 +80,7 @@
     </footer>
 
     <script src="diag-log.js"></script>
+    <script src="license/license-view.js"></script>
     <script src="popup.js"></script>
   </body>
 </html>

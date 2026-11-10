@@ -535,3 +535,29 @@ main {
 .lv-warn { background: rgba(217, 119, 6, 0.14); color: var(--warn); }
 .lv-error { background: rgba(220, 38, 38, 0.14); color: var(--err); }
 .log-note { color: var(--muted); font-size: 12px; margin-left: 6px; }
+
+/* Pro 版 (docs/pro-license.md の F-PRO-07)。文字は本文の色で読ませ、状態は左の印で見せる */
+.pro-status {
+  font-weight: 600;
+  color: var(--fg);
+}
+.pro-status::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--muted);
+  vertical-align: middle;
+}
+.pro-status[data-tone="pro"]::before { background: var(--accent); }
+.pro-status[data-tone="warn"]::before { background: var(--warn); }
+.pro-note {
+  margin: 0 0 12px;
+  padding: 6px 10px;
+  border-left: 3px solid var(--warn);
+  color: var(--fg);
+  font-size: 12.5px;
+  line-height: 1.5;
+}

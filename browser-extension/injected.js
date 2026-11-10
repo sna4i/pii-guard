@@ -103,6 +103,7 @@
         ...NS.settings,
         ...data.settings,
       };
+      applyPro(NS.engine);
       try {
         window.dispatchEvent(
           new CustomEvent("mask-mcp:settings-updated", {
@@ -243,7 +244,14 @@
 
   async function getEngine() {
     const e = await enginePromise;
-    return isEngineReady(e) ? e : null;
+    if (!isEngineReady(e)) return null;
+    applyPro(e);
+    return e;
+  }
+  // Pro かどうか (docs/pro-license.md の D-PRO-06)。content.js が設定と一緒に配る値を、使う前にエンジンへ渡す。
+  // 設定が届く前にエンジンを使っても、無料版のルールで動く
+  function applyPro(e) {
+    try { if (e && typeof e.setProEnabled === "function") e.setProEnabled(!!(NS.settings && NS.settings.pro === true)); } catch (_) {}
   }
 
   // V-02: マスクは ISOLATED world (content.js) のエンジンにリスト込みで頼む。リストの値は

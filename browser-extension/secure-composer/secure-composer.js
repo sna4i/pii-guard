@@ -57,10 +57,23 @@
     } catch (_) { /* 既定のまま */ }
   }
   chrome.storage.onChanged.addListener((changes, area) => {
-    if (area !== "local" || !SETTING_KEYS.some((k) => k in changes)) return;
+    if (area !== "local") return;
+    if ("licenseState" in changes) refreshPro();
+    if (!SETTING_KEYS.some((k) => k in changes)) return;
     // オン/オフやリストが変わったら、オフの警告を出し直す (オフにした直後でも下書きの個人情報で黄色にする)
     loadSettings().then(() => scheduleDraftScan(0));
   });
+  // Pro かどうか (docs/pro-license.md の D-PRO-06)。Service Worker のライセンス管理に聞き、この iframe の
+  // エンジンに渡す。答えが来るまでは無料版のルールで動く
+  function refreshPro() {
+    try {
+      chrome.runtime.sendMessage({ type: "license:get" }, (r) => {
+        if (chrome.runtime.lastError) return;
+        if (NS.engine && typeof NS.engine.setProEnabled === "function") NS.engine.setProEnabled(!!(r && r.pro === true));
+      });
+    } catch (_) { /* 拡張機能が入れ替わった直後など */ }
+  }
+  refreshPro();
   // 除外リストの値か (F-SC-18、D-SC-06)。常に伏せる語にも入っている値は伏せる
   // (送る前の裏取りは、常に伏せる語の生値が残っていると送信を止めるため)
   function allowedMatcher() {

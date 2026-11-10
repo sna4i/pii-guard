@@ -785,6 +785,36 @@ async function loadLlmSettings() {
 }
 
 
+// ---- Pro 版 (docs/pro-license.md の F-PRO-07、D-PRO-05) ------------------------------
+// 状態は Service Worker のライセンス管理に聞く。支払いの直後は自動では届かないので (extensionpay.com に
+// content script を置いていない)、「購入状態を更新」で確かめ直す
+function renderProLicense(state) {
+  const v = window.PiiGuardLicenseView.describeLicense(state);
+  const st = $("pro-status");
+  st.textContent = v.status;
+  st.dataset.tone = v.tone;
+  $("pro-note").textContent = v.note;
+  $("pro-note").hidden = !v.note;
+  $("pro-upgrade").hidden = !v.canUpgrade;
+  $("pro-login").hidden = !v.canLogin;
+  $("pro-refresh").hidden = !v.canRefresh;
+}
+async function loadProLicense(refresh) {
+  try {
+    renderProLicense(await chrome.runtime.sendMessage({ type: "license:get", refresh: refresh === true }));
+  } catch (_) {
+    renderProLicense(null);
+  }
+}
+async function openProPage(type) {
+  let ok = false;
+  try { ok = !!(await chrome.runtime.sendMessage({ type }))?.ok; } catch (_) {}
+  if (!ok) {
+    $("pro-note").textContent = "ページを開けませんでした";
+    $("pro-note").hidden = false;
+  }
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   // version / engine-version のプレースホルダを manifest から自動反映。
   try {
@@ -802,7 +832,15 @@ document.addEventListener("DOMContentLoaded", () => {
   loadUiMode();
   loadLlmSettings();
   loadMlSettings();
+  loadProLicense(false);
 
+  $("pro-upgrade").addEventListener("click", () => openProPage("license:openPayment"));
+  $("pro-login").addEventListener("click", () => openProPage("license:openLogin"));
+  $("pro-refresh").addEventListener("click", () => loadProLicense(true));
+  // 購入状態が変わったら (60 分ごとの確かめ直しなど)、開いている設定画面にも出す
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === "local" && "licenseState" in changes) loadProLicense(false);
+  });
   $("allowlist-add-btn").addEventListener("click", () => {
     const input = $("allowlist-input");
     addToAllowlist(input.value);

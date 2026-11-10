@@ -6,7 +6,8 @@
   "permissions": [
     "storage",
     "activeTab",
-    "offscreen"
+    "offscreen",
+    "alarms"
   ],
   "host_permissions": [
     "https://claude.ai/*",
@@ -51,6 +52,7 @@
         "engine/blocklist.js",
         "engine/user-force-mask.js",
         "engine/confidential.js",
+        "engine/pro-rules.js",
         "engine/engine.js",
         "engine/bundle.js",
         "content.js",
@@ -81,6 +83,7 @@
         "engine/user-force-mask.js",
         "engine/surrogates.js",
         "engine/llm-prompts.js",
+        "engine/pro-rules.js",
         "engine/engine.js",
         "engine/bundle.js",
         "engine/onnx-detector.js",

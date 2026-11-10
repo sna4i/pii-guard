@@ -137,6 +137,7 @@
     "engine/confidential.js",
     "engine/surrogates.js",
     "engine/llm-prompts.js",
+    "engine/pro-rules.js",
     "engine/engine.js",
     "engine/bundle.js",
   ];
@@ -220,10 +221,24 @@
       {
         source: TAG_OUT,
         type: "settings",
-        settings: { interactive, uiMode, maskAllowlist, maskForceList, mlEnabled, enabled, scOwnsComposer, hasSecretLists, listsVersion },
+        settings: { interactive, uiMode, maskAllowlist, maskForceList, mlEnabled, enabled, scOwnsComposer, hasSecretLists, listsVersion, pro: proEnabled },
       },
       "*"
     );
+  }
+  // Pro かどうか (docs/pro-license.md の D-PRO-06)。Service Worker のライセンス管理に聞き、この ISOLATED world の
+  // エンジンに渡し、ページの世界 (injected.js) へは設定と一緒に配る。答えが来るまでは無料版のルールで動く
+  let proEnabled = false;
+  function refreshPro() {
+    try {
+      chrome.runtime.sendMessage({ type: "license:get" }, (r) => {
+        if (chrome.runtime.lastError) return;
+        const next = !!(r && r.pro === true);
+        const e = window.__localMaskMCP && window.__localMaskMCP.engine;
+        if (e && typeof e.setProEnabled === "function") e.setProEnabled(next);
+        if (next !== proEnabled) { proEnabled = next; broadcastSettings(); }
+      });
+    } catch (_) { /* 拡張機能が入れ替わった直後など、Service Worker に届かないとき */ }
   }
   // adapter (同じ isolated world) が overlay の生死を知らせる口。live が変わるたびに再配布し、
   // injected.js の scOwnsComposer と機密配布を即座に切り替える (fail-closed, F-SC-11)。
@@ -235,9 +250,11 @@
     broadcastSettings();
   };
   broadcastSettings();
+  refreshPro();
   try {
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area !== "local") return;
+      if ("licenseState" in changes) refreshPro();
       if ("maskAllowlist" in changes || "maskForceList" in changes) listsVersion++;
       if ("interactive" in changes || "uiMode" in changes || "maskAllowlist" in changes || "maskForceList" in changes || "mlEnabled" in changes || "enabled" in changes || "secureComposerEnabled" in changes) {
         broadcastSettings();

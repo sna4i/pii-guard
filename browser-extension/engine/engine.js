@@ -20,9 +20,10 @@
       load("userForceMask", "./user-force-mask");
       load("onnxDetector", "./onnx-detector");
       load("confidential", "./confidential");
+      load("proRules", "./pro-rules");
     }
     const ns = (root && root.__localMaskMCP && root.__localMaskMCP.engine) || {};
-    for (const k of ["patterns","classification","severity","categories","aggregate","forceMask","blocklist","userForceMask","onnxDetector","confidential"]) {
+    for (const k of ["patterns","classification","severity","categories","aggregate","forceMask","blocklist","userForceMask","onnxDetector","confidential","proRules"]) {
       d[k] = d[k] || ns[k];
     }
     return d;
@@ -120,11 +121,21 @@
     return { norm, map };
   }
 
+  // Pro かどうか (docs/pro-license.md の D-PRO-06、D-PRO-07)。決めるのは Service Worker のライセンス管理で、
+  // エンジンが動く場所 (content script・ページの世界・保護入力欄) が、その結果を setProEnabled() で渡す。
+  // 真偽値の true だけを Pro として扱う
+  let proEnabled = false;
+  function setProEnabled(on) { proEnabled = on === true; }
+  function isProEnabled() { return proEnabled; }
+
   function collectDetections(text, options) {
     const deps = resolveDeps();
     if (!deps.patterns) throw new Error("mask-mcp engine: patterns missing");
     const disabled = new Set((options && options.disabledCategories) || []);
-    return matchPatterns(text, deps.patterns.getPresetPatterns(disabled));
+    const preset = deps.patterns.getPresetPatterns(disabled);
+    // ルールを読む所で Pro のルールパックを足す。Pro でなければ今と同じ配列をそのまま使う
+    const pro = proEnabled && deps.proRules ? deps.proRules.getProPatterns(disabled) : [];
+    return matchPatterns(text, pro.length ? preset.concat(pro) : preset);
   }
 
   // 与えられたパターン群を NFKC 正規化テキストに当て、元テキストの座標で返す。
@@ -367,7 +378,7 @@
     };
   }
 
-  const api = { maskAggregated, maskSanitize, collectDetections, resolveOverlaps, runPipeline, runPipelineAsync };
+  const api = { maskAggregated, maskSanitize, collectDetections, resolveOverlaps, runPipeline, runPipelineAsync, setProEnabled, isProEnabled };
   if (typeof module === "object" && module.exports) module.exports = api;
   if (root && typeof root === "object") {
     root.__localMaskMCP = root.__localMaskMCP || {};
