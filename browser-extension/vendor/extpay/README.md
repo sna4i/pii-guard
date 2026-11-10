@@ -26,11 +26,17 @@ export default ExtPay;
 
 ## ライセンス
 
-表記が食い違っている。どちらに従うかは、ストアに出す前に確かめる。
+**LGPL-3.0 として扱う** (2026-11-11 に決定。`docs/pro-license.md` の D-PRO-14)。本家の GitHub の `LICENSE` も、ここに写した `LICENSE` も「LGPL-3.0」の 1 行。ただし、次のとおり表記が食い違っている。
 
 - `package.json` の `license`: `AGPL-3.0-or-later`
 - 同梱の `LICENSE` ファイル (ここに写したもの): `LGPL-3.0` (識別子だけで、本文は入っていない)
 - `dist/ExtPay.js` の中のコメント (1234 行目): "AGPLv3 licensed"
+
+LGPL-3.0 の条件に合わせて、次を同梱している。
+
+- 本文: `COPYING.LESSER` (LGPL-3.0) と `COPYING` (GPL-3.0。LGPL-3.0 が参照する)。Debian の `/usr/share/common-licenses/` の写し
+- 告知: 拡張機能の直下の `THIRD_PARTY_NOTICES.txt`。設定画面の「エンジン」の欄からリンクしている
+- 手を入れたところ: 告知に、末尾に足した 1 行をそのまま書いている。このファイルは別のファイルのままなので、利用者が差し替えられる
 
 ## 通信と保存 (3.1.2 のコードを読んで確かめたこと)
 

@@ -21,3 +21,17 @@ The full license text of each component is in the file listed below.
    ライセンス / License: MIT License (Copyright (c) Microsoft Corporation)
    本文 / Full text: vendor/transformers/LICENSE-onnxruntime
    https://github.com/microsoft/onnxruntime
+
+3. ExtPay 3.1.2 (ExtensionPay)
+   Pro 版の購入状態の確認に使います (license/license.js)
+   Used to check the Pro purchase state.
+   ファイル / Files: vendor/extpay/ExtPay.esm.js
+   ライセンス / License: GNU Lesser General Public License v3.0 (LGPL-3.0)
+   本文 / Full text: vendor/extpay/COPYING.LESSER (LGPL-3.0)
+                     vendor/extpay/COPYING (GPL-3.0。LGPL-3.0 が参照する本文)
+   手を入れたところ / Modification: npm の extpay 3.1.2 の dist/ExtPay.js の末尾に、次の 1 行を足しただけです。
+     それより前は 1 バイトも変えていません。差し替えるときは、このファイルを入れ替えてください。
+     One line was appended to dist/ExtPay.js of the npm package extpay 3.1.2; nothing else was changed.
+     You may replace this file with another version of the library.
+       export default ExtPay;
+   https://github.com/Glench/ExtPay
