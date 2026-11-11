@@ -1,6 +1,6 @@
 # ExtPay (同梱)
 
-ExtensionPay の公式ライブラリ。Pro 版の購入状態を確かめるために、Service Worker から読み込む (`license/license.js`、設計は `docs/pro-license.md`)。
+ExtensionPay の公式ライブラリ。Pro 版の購入状態を確かめるために、Service Worker から読み込む (`license/license.js`)。
 
 ## 出どころ
 
@@ -26,7 +26,7 @@ export default ExtPay;
 
 ## ライセンス
 
-**LGPL-3.0 として扱う** (2026-11-11 に決定。`docs/pro-license.md` の D-PRO-14)。本家の GitHub の `LICENSE` も、ここに写した `LICENSE` も「LGPL-3.0」の 1 行。ただし、次のとおり表記が食い違っている。
+**LGPL-3.0 として扱う** (2026-11-11 に決定)。本家の GitHub の `LICENSE` も、ここに写した `LICENSE` も「LGPL-3.0」の 1 行。ただし、次のとおり表記が食い違っている。
 
 - `package.json` の `license`: `AGPL-3.0-or-later`
 - 同梱の `LICENSE` ファイル (ここに写したもの): `LGPL-3.0` (識別子だけで、本文は入っていない)
