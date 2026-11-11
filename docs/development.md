@@ -21,7 +21,7 @@
 
 生成 AI サービスへ送信する前に、ローカル PC 上で個人情報を検出・マスクする軽量ゲートウェイ + Chrome 拡張機能です。ブラウザ拡張 (Chrome MV3) が Claude.ai / ChatGPT / Manus の送信を横取りし、PII を検出します。オプションで FastAPI ゲートウェイ (Docker) と Presidio / SudachiPy / プリセット正規表現による多段アナライザを使用でき、さらに Ollama / LM Studio / llama.cpp によるローカル LLM を接続すれば文脈考慮型の追加検出と AI 置換モードが利用できます (v0.5.0+)。検出結果は送信直前にサイドバーでユーザー確認され、確定したものだけマスク済みペイロードとして送信されます。第三者サーバーへの送信はありません。(100%の検出が可能というわけではありません。補助的なツールとして利用ください。)
 
-Chrome ウェブストアで配布している拡張機能と、開発用のビルドがあります。版ごとの変更は [CHANGELOG](../browser-extension/CHANGELOG.md)、今後の予定は [TODO.md](../TODO.md) を参照してください。
+Chrome ウェブストアで配布している拡張機能と、開発用のビルドがあります。版ごとの変更は [CHANGELOG](../browser-extension/CHANGELOG.md) を参照してください。
 
 push する前の検査 (端末のパス・個人情報・秘密情報) は [prepush-check.md](./prepush-check.md) にまとめています。クローンしたら最初に `git config core.hooksPath .githooks` を実行してください。
 
@@ -561,7 +561,7 @@ docker exec -it ollama ollama pull qwen3:4b
 
 検出プロンプトは `browser-extension/engine/llm-prompts.js` で Qwen3 の特性 (JSON grammar 追従、CJK+EN 混在耐性、`<think>` トークン抑止) に合わせて最適化されています。他モデル (Llama3 / Gemma2 / Phi3.5) でも動作しますが、精度と応答速度の安定性で **Qwen3:4b 以上を推奨**。
 
-検出補助モードのシステムプロンプトは、入力によらず 1 通りです。日本語と英語の両方の例を含み、入力の中に書かれた指示には従わないよう、例でも実演しています。出力は値とラベルだけで、理由は書かせません。モデルの大きさや正規表現の検出結果に合わせて組み立てを変える方法も試しましたが、精度が下がったので採用していません。設計と評価の結果は [llm-prompt-optimization.md](./llm-prompt-optimization.md) にあります。
+検出補助モードのシステムプロンプトは、入力によらず 1 通りです。日本語と英語の両方の例を含み、入力の中に書かれた指示には従わないよう、例でも実演しています。出力は値とラベルだけで、理由は書かせません。モデルの大きさや正規表現の検出結果に合わせて組み立てを変える方法も試しましたが、精度が下がったので採用していません。
 
 プロンプトを変えたら、実物の LLM で現行版と比べてください。
 
@@ -763,12 +763,11 @@ pii-guard/
 │   ├── mcp-stdio.sh            MCP stdio ラッパー (Docker 経由起動)
 │   └── generate-icons.py       拡張アイコン生成
 ├── tests/                      pytest スイート
-├── docs/                       要件定義・設計ドキュメント
+├── docs/                       開発の手順、push 前チェック、プライバシーポリシー、ストアの画像
 ├── docker-compose.yml
 ├── Dockerfile
 ├── pyproject.toml
 ├── uv.lock                     依存ロック (repo にコミット)
 ├── CHANGELOG.md                ルート CHANGELOG (ゲートウェイ側)
-├── TODO.md                     ロードマップ
 └── README.md                   このファイル
 ```
