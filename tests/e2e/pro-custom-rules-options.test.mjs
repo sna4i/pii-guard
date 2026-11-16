@@ -275,39 +275,73 @@ test("T-CR-44 書き出し: ダウンロードされた JSON の format と rule
   } finally { await p.close(); }
 });
 
-test("T-CR-45 Pro でないとき (お試しの終わり): 案内が出て、保存・読み込みの操作は disabled。保存したルールは残る。Pro に戻ると操作できる", async () => {
-  await setRules([WORDS_RULE]);
+test("T-CR-45 Pro でないとき (お試しの終わり): 案内が出て、追加・編集・保存・読み込み・有効の切り替えは disabled。書き出しと削除は使える (削除すると proCustomRules から消える)。Pro に戻ると、すべて操作できる", async () => {
+  await setRules([WORDS_RULE, REGEX_RULE]);
   try {
-    // 開いている画面が、お試しの終わりに追いつく (storage の変化で出し直す)
+    // 開いている画面が、お試しの終わりに追いつく (storage の変化で出し直す)。書き出しと削除は、そのときも使えるまま
     const live = await openCard();
     try {
+      await waitRows(live, 2);
       await live.waitForFunction(() => document.getElementById("cr-save").disabled === false, null, { timeout: 5000 });
       assert.equal(await setInstalledAt(Date.now() - 8 * DAY), false, "お試しが終わり、無料版になる");
       await live.waitForFunction(() => document.getElementById("cr-save").disabled === true, null, { timeout: 8000 });
       assert.equal(await live.isVisible("#cr-pro-note"), true);
+      assert.equal(await live.isDisabled("#cr-export"), false, "開いている画面でも、書き出しは使えるまま");
+      assert.equal(await row(live, 0).locator(".cr-delete").isDisabled(), false, "開いている画面でも、削除は使えるまま");
+      assert.equal(await row(live, 0).locator(".switch input").isDisabled(), true, "有効の切り替えは止まる");
     } finally { await live.close(); }
 
-    // 無料版になってから開く
+    // 無料版になってから開く: 一覧は、読むだけの形で出る
     const p = await openCard();
     try {
       assert.equal(await p.isVisible("#cr-pro-note"), true, "案内が出る");
       assert.equal((await p.textContent("#cr-pro-note")).trim(), NOTE_NOT_PRO);
-      for (const id of ["cr-save", "cr-import", "cr-export", "cr-kind", "cr-label", "cr-words", "cr-match"]) {
+      await waitRows(p, 2);
+      // 足す・変える操作は止まる (フォーム・保存・読み込み・有効の切り替え・編集)
+      for (const id of ["cr-kind", "cr-label", "cr-pattern", "cr-ignore-case", "cr-words", "cr-match", "cr-save", "cr-cancel", "cr-import"]) {
         assert.equal(await p.isDisabled(`#${id}`), true, `${id} は disabled`);
       }
-      await waitRows(p, 1);
-      for (const sel of [".switch input", ".cr-edit", ".cr-delete"]) {
-        assert.equal(await row(p, 0).locator(sel).isDisabled(), true, `一覧の ${sel} は disabled`);
+      for (const i of [0, 1]) {
+        for (const sel of [".switch input", ".cr-edit"]) {
+          assert.equal(await row(p, i).locator(sel).isDisabled(), true, `一覧 ${i + 1} 行目の ${sel} は disabled`);
+        }
+        assert.equal(await row(p, i).locator(".cr-delete").isDisabled(), false, `一覧 ${i + 1} 行目の削除は使える`);
       }
-      assert.deepEqual(await savedRules(), { version: 1, rules: [WORDS_RULE] }, "保存したルールは残っている");
+      assert.equal(await p.isDisabled("#cr-export"), false, "書き出しは使える");
+      assert.deepEqual(await savedRules(), { version: 1, rules: [WORDS_RULE, REGEX_RULE] }, "保存したルールは残っている");
+
+      // 書き出しは、Pro でなくてもできる (自分のデータを持ち出せる)
+      const [download] = await Promise.all([p.waitForEvent("download", { timeout: 10000 }), p.click("#cr-export")]);
+      assert.equal(download.suggestedFilename(), EXPORT_FILE);
+      assert.deepEqual(JSON.parse(fs.readFileSync(await download.path(), "utf8")).rules, [WORDS_RULE, REGEX_RULE]);
+
+      // 削除も、Pro でなくてもできる: 確認を取り消せば残り、受ければ proCustomRules から消える
+      p.once("dialog", (d) => d.dismiss());
+      await row(p, 0).locator(".cr-delete").click();
+      await sleep(500);
+      assert.equal((await savedRules()).rules.length, 2, "確認を取り消すと消えない");
+      p.once("dialog", (d) => d.accept());
+      await row(p, 0).locator(".cr-delete").click();
+      await waitRows(p, 1);
+      assert.deepEqual(await savedRules(), { version: 1, rules: [REGEX_RULE] }, "削除すると proCustomRules から消える");
+      // 残った行は、読むだけのまま (削除だけ使える)
+      assert.equal(await row(p, 0).locator(".switch input").isDisabled(), true);
+      assert.equal(await row(p, 0).locator(".cr-edit").isDisabled(), true);
+      p.once("dialog", (d) => d.accept());
+      await row(p, 0).locator(".cr-delete").click();
+      await waitRows(p, 0);
+      assert.deepEqual(await savedRules(), { version: 1, rules: [] }, "最後の 1 本も消せる");
+      assert.equal(await p.isDisabled("#cr-save"), true, "消したあとも、足す操作は止まったまま");
     } finally { await p.close(); }
 
-    // Pro に戻ると、案内が消えて操作できる
+    // Pro に戻ると、案内が消えて、すべて操作できる
     assert.equal(await setInstalledAt(Date.now()), true, "お試しに戻る");
     const q = await openCard();
     try {
       assert.equal(await q.isVisible("#cr-pro-note"), false);
-      assert.equal(await q.isDisabled("#cr-save"), false);
+      for (const id of ["cr-save", "cr-import", "cr-export", "cr-kind", "cr-label", "cr-words", "cr-match"]) {
+        assert.equal(await q.isDisabled(`#${id}`), false, `${id} は使える`);
+      }
     } finally { await q.close(); }
   } finally {
     await setInstalledAt(Date.now()); // どこで落ちても、お試しに戻す (このあとのテストは Pro で動く)

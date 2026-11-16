@@ -26,7 +26,7 @@
   // 完全一致の文字の種類のうち「ひらがな」。ー はカタカナの仲間なので、ここには入らない
   const CR_HIRAGANA = /^\p{Script=Hiragana}$/u;
 
-  let crPro = false; // 今 Pro か。false のあいだは、カードの操作を全部止める
+  let crPro = false; // 今 Pro か。false のあいだは、足す・変える操作を止める (書き出しと削除は使える)
   let crBusy = false; // 保存・読み込み・一覧の操作の最中。重ねて操作させない
   let crEditing = null; // 編集中のルール { index, snapshot } か null
   let crListShown = false; // 一覧を出したか (カードが見えるようになったとき 1 回だけ読む。そのあとは storage の変化で出し直す)
@@ -284,10 +284,14 @@
   }
 
   // ---- 操作 ----
-  // カードの操作は、Pro のときだけ、最中でないときだけ押せる
+  // カードの操作は、最中でないときだけ押せる。Pro でないときは、足す・変える操作 (フォーム・保存・読み込み・有効の切り替え・編集) を
+  // 止めて、一覧を読むだけの形にする。書き出しと、各ルールの削除は、Pro でなくても使える
+  // (ルールには顧客名などが入りうる。自分のデータを持ち出す手段と、消す手段は残す)
   function crSyncControls() {
-    const off = !crPro || crBusy;
-    for (const el of $("custom-rules-card").querySelectorAll("input, select, textarea, button")) el.disabled = off;
+    for (const el of $("custom-rules-card").querySelectorAll("input, select, textarea, button")) {
+      const usableWithoutPro = el.id === "cr-export" || el.classList.contains("cr-delete");
+      el.disabled = crBusy || (!crPro && !usableWithoutPro);
+    }
   }
   // 保存・読み込み・一覧の操作は、1 つずつ走らせる (最中は、カードの操作を止める)
   async function crRun(job) {
@@ -408,7 +412,7 @@
   }
 
   // ---- Pro の出し分けと配線 ----
-  // renderProLicense から呼ぶ。ID が仮 (visible が false) なら、カードごと出さない。Pro でなければ、案内を出して操作を止める
+  // renderProLicense から呼ぶ。ID が仮 (visible が false) なら、カードごと出さない。Pro でなければ、案内を出して、足す・変える操作を止める
   function crApplyLicense(visible, pro) {
     const card = $("custom-rules-card");
     card.hidden = !visible || !CR;

@@ -39,7 +39,7 @@
 
       <!-- Pro のカスタムルール (Pro Phase 2 の設計 (P1))。動きは options-custom-rules.js。出し方は #pro-card と同じ
            (options.js の renderProLicense から渡す): ExtensionPay に登録する前 (ID が仮) は、まるごと出さない。
-           Pro でないときは案内を出して、操作を止める。一覧・エラー・結果は textContent だけで組む。
+           Pro でないときは案内を出して、足す・変える操作を止める (書き出しと削除は使える)。一覧・エラー・結果は textContent だけで組む。
            確かめは options-rules-worker.js (Worker) で走る -->
       <section class="card" id="custom-rules-card" hidden>
         <h2>カスタムルール</h2>
