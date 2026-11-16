@@ -21,9 +21,10 @@
       load("onnxDetector", "./onnx-detector");
       load("confidential", "./confidential");
       load("proRules", "./pro-rules");
+      load("customRules", "./custom-rules");
     }
     const ns = (root && root.__localMaskMCP && root.__localMaskMCP.engine) || {};
-    for (const k of ["patterns","classification","severity","categories","aggregate","forceMask","blocklist","userForceMask","onnxDetector","confidential","proRules"]) {
+    for (const k of ["patterns","classification","severity","categories","aggregate","forceMask","blocklist","userForceMask","onnxDetector","confidential","proRules","customRules"]) {
       d[k] = d[k] || ns[k];
     }
     return d;
@@ -128,6 +129,19 @@
   function setProEnabled(on) { proEnabled = on === true; }
   function isProEnabled() { return proEnabled; }
 
+  // Pro のカスタムルール (Pro Phase 2 の設計 (P1))。engine/custom-rules.js の compileRules で組み立てたものを持つ。
+  // 組み立ては上限いっぱいで数十ミリ秒かかるので、送るたびではなく、ルールが変わったときに setCustomRules で 1 回だけ行う。
+  // 持つのは、有効で正しいものを先頭から上限の数まで (オフのもの・正しくないものは持たない)。返すのは持った数。
+  // 当てるのは Pro のときだけ (collectWithCustom)
+  let customPatterns = [];
+  function setCustomRules(rules) {
+    const deps = resolveDeps();
+    if (!deps.customRules) throw new Error("mask-mcp engine: custom-rules missing");
+    customPatterns = deps.customRules.compileRules(rules);
+    return customPatterns.length;
+  }
+  function getCustomRuleCount() { return customPatterns.length; }
+
   function collectDetections(text, options) {
     const deps = resolveDeps();
     if (!deps.patterns) throw new Error("mask-mcp engine: patterns missing");
@@ -141,7 +155,12 @@
   // 与えられたパターン群を NFKC 正規化テキストに当て、元テキストの座標で返す。
   // collectDetections と、機密文の中だけで使う数値パターンが共有する。
   function matchPatterns(text, patternList) {
-    const { norm, map } = nfkcWithMap(text);
+    return matchNormalized(text, nfkcWithMap(text), patternList);
+  }
+
+  // matchPatterns の照合の部分。整えた本文 (nfkcWithMap の { norm, map }) を受けるので、整えるのを 1 回にしたまま
+  // パターンを分けて当てられる (カスタムルールは、1 本ごとに時間を見る)
+  function matchNormalized(text, { norm, map }, patternList) {
     const identity = norm === text;
     const out = [];
     for (const { entity_type, pattern, validate } of patternList) {
@@ -258,6 +277,40 @@
     return dets;
   }
 
+  // 今の検出に、Pro のカスタムルールの検出を足す (重なりは、このあと finishPipeline が今の検出と一緒に解く)。
+  // custom は結果に付ける状態で、今の ml と同じく maskSanitize・maskAggregated まで運ぶ。
+  // Pro でないか、ルールが 0 個なら、カスタムの処理を通らず (時計も見ない)、今の検出をそのまま返す
+  function collectWithCustom(text, opts, deps) {
+    const dets = collectRawDetections(text, opts, deps);
+    if (!proEnabled || customPatterns.length === 0) return { dets, custom: { status: "off" } };
+    const found = collectCustomDetections(text, opts, deps);
+    return { dets: dets.concat(found.dets), custom: { status: found.status } };
+  }
+
+  const nowMs = () => (typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now());
+
+  // カスタムルールを当てる。collectDetections の中で当てないのは、途中で時間を見るため (Pro のルールパックの口は、
+  // 今のルールとつなげて 1 回で当てる)。正規表現の 1 回の照合は途中で止められないので、時間はルールとルールの
+  // あいだで見る: 1 本目を含め、各ルールの前に、始めからの時間が上限 (opts.customBudgetMs、既定は
+  // custom-rules.js の LIMITS.sendBudgetMs) に届いていたら (>=)、残りを当てずに "partial" を返す。上限 0 なら 1 本も当てない。
+  // 本文を整える (nfkcWithMap) のは 1 回だけで、その時間も上限に数える。組み立てた正規表現は、この整えた本文に
+  // 当てる前提で作ってある (engine/custom-rules.js)。止めた分類 (disabledCategories) は、ルールの名前 (category) で外す。
+  // opts.clock はミリ秒の時計 (テスト用。既定は performance.now)
+  function collectCustomDetections(text, opts, deps) {
+    const disabled = new Set(opts.disabledCategories || []);
+    const rules = customPatterns.filter((p) => !disabled.has(p.category));
+    const clock = typeof opts.clock === "function" ? opts.clock : nowMs;
+    const budget = Number.isFinite(opts.customBudgetMs) ? opts.customBudgetMs : deps.customRules.LIMITS.sendBudgetMs;
+    const start = clock();
+    const normalized = nfkcWithMap(text);
+    let dets = [];
+    for (const rule of rules) {
+      if (clock() - start >= budget) return { dets, status: "partial" };
+      dets = dets.concat(matchNormalized(text, normalized, [rule]));
+    }
+    return { dets, status: "ok" };
+  }
+
   // Apply the post-collection filters in a fixed order: blocklist →
   // minScore → enabledPiiClasses → overlap resolver. Idempotent enough
   // that calling it after merging in async ML detections still yields
@@ -275,8 +328,11 @@
     return resolveOverlaps(dets);
   }
 
+  // Returns { dets, custom }; custom.status is "off" / "ok" / "partial"
+  // (collectWithCustom) so callers can tell when custom rules ran out of time.
   function runPipeline(text, opts, deps) {
-    return finishPipeline(collectRawDetections(text, opts, deps), opts, deps);
+    const { dets, custom } = collectWithCustom(text, opts, deps);
+    return { dets: finishPipeline(dets, opts, deps), custom };
   }
 
   // Async variant: same as runPipeline but also invokes the ML detector
@@ -284,11 +340,12 @@
   // truthy. ML failures degrade — regex/dict detections always survive
   // even if the SW is asleep / WASM hasn't loaded yet — and the wait is
   // capped (opts.mlTimeoutMs, docs/release-1.7.1.md D-SC-09) so a model
-  // that is still loading can never stall a send. Returns { dets, ml };
+  // that is still loading can never stall a send. Returns { dets, ml, custom };
   // ml.status is "off" / "ok" / "timeout" / "error" / "unavailable"
   // (onnx-detector.js) so callers can tell the user when ML was skipped.
   async function runPipelineWithMl(text, opts, deps) {
-    let dets = collectRawDetections(text, opts, deps);
+    const collected = collectWithCustom(text, opts, deps);
+    let dets = collected.dets;
     let ml = { status: "off" };
     if (opts.mlEnabled && deps.onnxDetector) {
       try {
@@ -298,7 +355,7 @@
         if (mlDets.length > 0) dets = dets.concat(mlDets);
       } catch (_) { ml = { status: "error" }; /* fall through with regex-only */ }
     }
-    return { dets: finishPipeline(dets, opts, deps), ml };
+    return { dets: finishPipeline(dets, opts, deps), ml, custom: collected.custom };
   }
   async function runPipelineAsync(text, opts, deps) {
     return (await runPipelineWithMl(text, opts, deps)).dets;
@@ -341,9 +398,9 @@
     }
     const kws = opts.forceMaskKeywords || deps.forceMask.DEFAULT_KEYWORDS;
     const cats = opts.forceMaskCategories || deps.forceMask.DEFAULT_CATEGORIES;
-    const { dets, ml } = opts.mlEnabled
+    const { dets, ml, custom } = opts.mlEnabled
       ? await runPipelineWithMl(text, opts, deps)
-      : { dets: runPipeline(text, opts, deps), ml: { status: "off" } };
+      : { ...runPipeline(text, opts, deps), ml: { status: "off" } };
     let agg = deps.aggregate.aggregateDetections(dets);
     const fired = deps.forceMask.detectForceMaskTrigger(text, kws);
     const forced = deps.forceMask.resolveForcedCategories(fired, cats);
@@ -353,6 +410,7 @@
       force_masked_categories: forced,
       confidential: collectConfidential(text, opts, deps),
       ml,
+      custom,
     };
   }
 
@@ -360,9 +418,9 @@
   async function maskSanitize(text, options) {
     const opts = options || {};
     const deps = resolveDeps();
-    const { dets, ml } = opts.mlEnabled
+    const { dets, ml, custom } = opts.mlEnabled
       ? await runPipelineWithMl(text, opts, deps)
-      : { dets: runPipeline(text, opts, deps), ml: { status: "off" } };
+      : { ...runPipeline(text, opts, deps), ml: { status: "off" } };
     const sanitized = deps.aggregate.applyTagMask(text, dets);
     const enriched = dets.map((d) => ({
       entity_type: d.entity_type, start: d.start, end: d.end, score: d.score,
@@ -375,10 +433,11 @@
       detections: enriched, forwarded: false,
       confidential: collectConfidential(text, opts, deps),
       ml,
+      custom,
     };
   }
 
-  const api = { maskAggregated, maskSanitize, collectDetections, resolveOverlaps, runPipeline, runPipelineAsync, setProEnabled, isProEnabled };
+  const api = { maskAggregated, maskSanitize, collectDetections, resolveOverlaps, runPipeline, runPipelineAsync, setProEnabled, isProEnabled, setCustomRules, getCustomRuleCount };
   if (typeof module === "object" && module.exports) module.exports = api;
   if (root && typeof root === "object") {
     root.__localMaskMCP = root.__localMaskMCP || {};
