@@ -557,13 +557,9 @@
       const llmRows = [];
       const llmValues = new Set();
       const counters = {};
-      // Pro のカスタムルールの行 (ISOLATED world が custom の印を付ける) と同じ値は、LLM が挙げても LLM の行にしない
-      // (カスタムの行の位置と名前を残す)。LLM の行は位置を数え直すとき英数字の語の途中の出現を数えないので、置き換えると
-      // 部分一致のカスタムの語が漏れる。印の無い行 (無料版の行) は今どおり LLM の行に置き換わる
-      const customValues = new Set((aggResp.aggregated || []).filter((a) => a && a.custom === true).map((a) => String(a.value)));
       for (const ent of llmEnts) {
         const value = typeof ent.text === "string" ? ent.text.trim() : "";
-        if (!value || llmValues.has(value) || customValues.has(value)) continue;
+        if (!value || llmValues.has(value)) continue;
         const label = String(ent.entity_type || "SENSITIVE_FACT").toUpperCase();
         // 英数字の語の途中は除く (「1234567」を「123456789012」の中で見つけない)。
         // 人名は、名字の後の下の名前と、フルネームの各部分も含める (1.5.1)
@@ -593,13 +589,18 @@
       // This gives LLM final say on label/severity while retaining
       // structured regex detections (email, credit card, etc.) that
       // LLM might not have surfaced.
+      // Pro のカスタムルールの行 (ISOLATED world が custom の印を付ける) は例外で、LLM が同じ値を挙げても捨てない。LLM の行も
+      // 今どおり作るので、伏せる範囲は両方を合わせたもの (LLM の数え直しが落とす英数字の語の途中の出現も、LLM の人名の範囲の
+      // 広げも残る)。重なった所の名前は applySpans が決める (長いほう、同じ長さなら先に並んだほう)。カスタムの行を先に並べるので、
+      // 同じ長さならカスタムの名前になる。印の無い行 (無料版の行) は今どおり LLM の行に置き換わり、並び順も今と同じ
+      const customRows = (aggResp.aggregated || []).filter((a) => a && a.custom === true);
       const keptRegex = (aggResp.aggregated || []).filter(
-        (a) => !llmValues.has(String(a.value))
+        (a) => !(a && a.custom === true) && !llmValues.has(String(a.value))
       );
       const replaced = (aggResp.aggregated || []).length - keptRegex.length;
-      // LLM rows come first in the aggregated list so the sidebar
-      // shows them at the top of their severity tab.
-      aggResp.aggregated = [...llmRows, ...keptRegex];
+      // LLM rows come first in the aggregated list (after any Pro custom
+      // rows) so the sidebar shows them at the top of their severity tab.
+      aggResp.aggregated = [...customRows, ...llmRows, ...keptRegex];
       plog("llm.detect", { status: "found", added: llmRows.length, filtered: droppedFp });
       return aggResp;
     } catch (err) {

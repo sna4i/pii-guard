@@ -67,8 +67,10 @@
   // ``data-row-key`` on each checkbox AND as the entry in the
   // ``maskedEntityKeys`` set the caller receives so a downstream
   // consumer can correlate UI selections with the aggregated rows.
+  // Pro のカスタムルールの行 (custom の印) は、LLM の同じ値の行と並ぶことがあるので、鍵を分ける (同じ鍵だと、まとめての
+  // 切り替えで片方の行のチェックの表示だけが古いまま残る)。印の無い行の鍵は今のまま
   function rowKeyOf(entity) {
-    return `${String(entity.category || "")}|${String(entity.value || "")}`;
+    return `${String(entity.category || "")}|${String(entity.value || "")}${entity.custom === true ? "|custom" : ""}`;
   }
 
   // Pure function — used both at build-time (initial preview) and on

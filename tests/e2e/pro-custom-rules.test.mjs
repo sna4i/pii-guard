@@ -488,6 +488,65 @@ test("T-CR-39b LLM の検出を混ぜても、カスタムの行は位置と名�
   }
 });
 
+test("T-CR-39c LLM がカスタムの行と同じ値を挙げても、どちらの行も残る: 人名 (PERSON) の範囲の広げが効き、下の名前が伏せ字の外に残らない。同じ値の 2 行は、まとめての切り替えで両方が切り替わる。ルールが無いときは今と同じ", async () => {
+  // 模擬の LLM (検出のモード) が返す検出は、場面ごとに替える
+  let entities = [];
+  const llm = await startMockLlm({ reply: () => JSON.stringify({ entities }) });
+  const LLM = { interactive: true, localLlmEnabled: true, localLlmUrl: llm.url, localLlmModel: "qwen3:1.7b", localLlmKind: "ollama", localLlmMode: "detect" };
+  const words = (id, label, list) => ({ id, label, kind: "words", words: list, match: "exact", enabled: true });
+  // [ルール, 本文, LLM の検出, 届く文]。重なった所の名前は、重なりのまとめ方 (長いほう、同じ長さなら先に並んだカスタムの行) で決まる
+  const scenes = [
+    [[words("p1", "CLIENT", ["小田切"])], "小田切 智子さんに連絡しました", [{ text: "小田切", entity_type: "PERSON" }], "<PERSON_1>さんに連絡しました"],
+    [[words("p2", "CLIENT", ["小田切 智子"])], "小田切 智子さんへ。智子さんの件は来週。", [{ text: "小田切 智子", entity_type: "PERSON" }], "<CLIENT_1>さんへ。<PERSON_1>さんの件は来週。"],
+    // どこにも当たらないルールでも、名前が組み込みの種類 (JP_SURNAME) と同じだと、組み込みの 田中 の行に印が付く
+    [[words("p3", "JP_SURNAME", ["ゼータ計画"])], "田中 太郎さんに連絡しました", [{ text: "田中", entity_type: "PERSON" }], "<PERSON_1>さんに連絡しました"],
+    // ルールが無いとき (704856f と同じ)
+    [[], "小田切 智子さんに連絡しました", [{ text: "小田切", entity_type: "PERSON" }], "<PERSON_1>さんに連絡しました"],
+  ];
+  try {
+    for (const [rules, text, ents, expected] of scenes) {
+      entities = ents;
+      const p = await openSite("claude", { ...LLM, proCustomRules: { version: 1, rules } });
+      try {
+        await waitSettings(p, { pro: true, hasSecretLists: rules.length > 0 });
+        const t0 = Date.now();
+        await send(p, "claude", text);
+        await confirmAfterLlm(p);
+        const sent = await waitSent("claude", t0);
+        assert.deepEqual(sent, [expected], `届いた文 (${text})`);
+        assert.ok(!/智子|太郎/.test(String(sent[0])), `下の名前が伏せ字の外に残らない (${sent[0]})`);
+      } finally { await p.close(); }
+    }
+
+    // 同じ値の 2 行 (カスタムの CLIENT と LLM の PROJECT_CODE。どちらも分類は OTHER): すべて解除・すべて選択で、両方の行の
+    // チェックが切り替わる (片方の表示だけが古いまま残らない)
+    entities = [{ text: "オメガ案件", entity_type: "PROJECT_CODE" }];
+    const q = await openSite("claude", { ...LLM, proCustomRules: { version: 1, rules: [words("p4", "CLIENT", ["オメガ案件"])] } });
+    try {
+      await waitSettings(q, { pro: true, hasSecretLists: true });
+      const t0 = Date.now();
+      await send(q, "claude", "オメガ案件の資料を送ります");
+      const end = Date.now() + 10000;
+      let st = null;
+      while (Date.now() < end) {
+        st = await S.sidebarState(q);
+        if (st && st.rows.length >= 2 && !(await q.evaluate((sel) => !!document.querySelector(sel).shadowRoot.querySelector(".llm-overlay"), SIDEBAR))) break;
+        await S.sleep(100);
+      }
+      assert.equal(st && st.rows.length, 2, `同じ値の行が 2 つ並ぶ (${JSON.stringify(st && st.rows)})`);
+      assert.ok(await S.clickInShadow(q, SIDEBAR, /すべて解除/), "すべて解除を押せる");
+      assert.deepEqual((await S.sidebarState(q)).rows.map((r) => r.checked), ["false", "false"], "すべて解除で、両方の行のチェックが外れる");
+      assert.ok(await S.clickInShadow(q, SIDEBAR, /すべて選択/), "すべて選択を押せる");
+      assert.deepEqual((await S.sidebarState(q)).rows.map((r) => r.checked), ["true", "true"], "すべて選択で、両方の行にチェックが付く");
+      assert.ok(await S.clickInShadow(q, SIDEBAR, /マスクして送信/), "送るを押せる");
+      assert.deepEqual(await waitSent("claude", t0), ["<CLIENT_1>の資料を送ります"]);
+    } finally { await q.close(); }
+  } finally {
+    await h.ext.evaluate(() => chrome.storage.local.remove(["localLlmEnabled", "localLlmUrl", "localLlmModel", "localLlmKind", "localLlmMode"]));
+    await llm.close();
+  }
+});
+
 test("T-CR-40 ルールがあるのに Pro かどうか分からない (待つ上限を過ぎても答えが来ない) ときは、時間切れと同じく確認に回り、一文が出る。ルールが無ければ確認は出ない", async () => {
   // 答えを待つ上限は 300 ミリ秒に上書きする (ふだんは 3 秒)。PAST_WAIT_MS はそれを過ぎるまで待つ
   const SHORT = { [PRO_WAIT_KEY]: 300 };
