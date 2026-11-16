@@ -118,14 +118,61 @@ test("T-CR-24 今の検出と重なる: 語「山田商事」と本文「山田�
     const res = await engine.maskSanitize("山田商事株式会社の山田太郎", {});
     assert.deepEqual(res.custom, { status: "ok" });
     for (const piece of ["山田", "商事", "株式会社"]) assert.ok(!res.sanitized_text.includes(piece), `「${piece}」が残っている: ${res.sanitized_text}`);
-    // 重なった所 (山田商事株式会社) は、伏せ字 1 つになる
-    assert.match(res.sanitized_text, /^<[A-Z_]+_1>の/);
+    // 重なった所 (山田商事株式会社) は、伏せ字 1 つになる。1 つ (会社名) がほかを全部包む組なので、まとめずに、
+    // 今の重なりの解消に任せる (包む会社名が残る)
+    assert.match(res.sanitized_text, /^<COMPANY_1>の/);
 
     // 重ならない所に出てきた語は、カスタムの伏せ字になる (今の検出だけだと「<JP_SURNAME_1>商事」で「商事」が残る)
     const more = await sanitize("山田商事株式会社の山田太郎。山田商事の担当です");
     assert.ok(more.endsWith("。<CLIENT_1>の担当です"), more);
     for (const piece of ["山田", "商事"]) assert.ok(!more.includes(piece), `「${piece}」が残っている: ${more}`);
   });
+
+  // またがる重なり: 重なりでつながった組を、全体を合わせた 1 つの伏せ字にまとめる (名前は、いちばん左から始まるカスタムの名前)。
+  // 重なりの解消は、左端から取って負けた範囲を丸ごと捨てるので、まとめないと、カスタムが今の検出の頭に食い込むと今の検出の
+  // 尻尾が残り (「<ORDER_1>-4567」)、尻尾からはみ出すとカスタムが捨てられる。Pro でないときは今と同じ
+  const straddles = [
+    // 頭に食い込む (今の検出は郵便番号の形の「123-4567」)
+    ["注文 ORD123-4567 の件", { kind: "regex", pattern: "ORD\\d+" }, "ORDER", "注文 <ORDER_1> の件", ["4567", "ORD", "123"]],
+    ["注文 ORD123-4567 の件", { kind: "words", words: ["ORD123"], match: "exact" }, "ORDER", "注文 <ORDER_1> の件", ["4567", "ORD", "123"]],
+    ["注文 ORD123ー4567 の件", { kind: "regex", pattern: "ORD\\d+" }, "ORDER", "注文 <ORDER_1> の件", ["4567", "ORD", "123"]],
+    // 尻尾からはみ出す (今の検出は電話番号)
+    ["電話 090-1234-5678ACME", { kind: "regex", pattern: "5678ACME" }, "ACME_CODE", "電話 <ACME_CODE_1>", ["5678", "ACME"]],
+    // 3 つがつながる (電話番号 2 つと、そのあいだをまたぐカスタム)。まとめないと、カスタムのまん中の「XYZ」が残る
+    ["回線 090-1234-5678XYZ03-1234-5678 まで", { kind: "regex", pattern: "5678XYZ03" }, "LINE", "回線 <LINE_1> まで", ["XYZ", "5678", "090", "03-"]],
+    // 接するだけ (重ならない) なら、まとめない
+    ["連絡先 090-1234-5678ACME-1234", { kind: "regex", pattern: "ACME-\\d{4}" }, "ACME_ID", "連絡先 <PHONE_NUMBER_1><ACME_ID_1>", ["5678", "ACME", "1234"]],
+  ];
+  try {
+    for (const [text, body, label, expected, pieces] of straddles) {
+      engine.setCustomRules([]);
+      engine.setProEnabled(false);
+      const free = await sanitize(text);
+      engine.setCustomRules([{ id: "s1", label, enabled: true, ...body }]);
+      assert.equal(await sanitize(text), free, `Pro でないときは今と同じ: ${text}`);
+      engine.setProEnabled(true);
+      const res = await engine.maskSanitize(text, {});
+      assert.equal(res.sanitized_text, expected, `${text} / ${JSON.stringify(body)}`);
+      assert.deepEqual(res.custom, { status: "ok" });
+      const rest = res.sanitized_text.replace(/<[A-Z][A-Z0-9_]*_\d+>/g, ""); // 伏せ字の外に残った文
+      for (const piece of pieces) assert.ok(!rest.includes(piece), `「${piece}」が残っている: ${res.sanitized_text}`);
+      // まとめた検出の文字も、元の文のその範囲 (サイドバーに出る字・ブロックリストを引く字)
+      for (const d of res.detections) assert.equal(d.text, text.slice(d.start, d.end), `${text} の ${d.entity_type}`);
+    }
+
+    // カスタムを含まない組 (今の検出どうし。ここではサイドバーの「常に伏せる語」と郵便番号の形) は、カスタムの検出が
+    // ほかの所にあっても、今のまま (まとめるのはカスタムを含む組だけ。今の検出どうしのまたがりは、ここでは変えない)
+    engine.setCustomRules(RULES);
+    const ufm = { userForceMaskEntries: [{ value: "ORD123", category: "OTHER" }] };
+    const mixed = "アルファ計画の注文 ORD123-4567 の件";
+    engine.setProEnabled(false);
+    assert.equal(await sanitize(mixed, ufm), "アルファ計画の注文 <USER_DEFINED_OTHER_1>-4567 の件");
+    engine.setProEnabled(true);
+    assert.equal(await sanitize(mixed, ufm), "<PROJECT_1>の注文 <USER_DEFINED_OTHER_1>-4567 の件");
+  } finally {
+    engine.setCustomRules([]);
+    engine.setProEnabled(false);
+  }
 });
 
 test("T-CR-25 ルールが 0 個、または Pro でないとき、時計を 1 回も呼ばない (足した処理を通らない)", async () => {

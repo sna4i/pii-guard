@@ -329,8 +329,8 @@
   // Pro のカスタムルールの検出 (customDets) は、ブロックリストの絞り込みのあとで足す。ブロックリストは自動の検出の
   // 誤検出を抑えるためのもので、利用者が書いたルールを黙って無効にしない (サイドバーから足す「常に伏せる語」は、
   // 誤って足すことがあるので、これまでどおりブロックリストに負ける)。minScore・enabledPiiClasses・重なりの解消は、
-  // 今の検出と同じく効く
-  function finishPipeline(dets, opts, deps, customDets) {
+  // 今の検出と同じく効く。重なりの解消の前に、カスタムの検出がまたがる組をまとめる (mergeStraddlingCustom)
+  function finishPipeline(dets, opts, deps, customDets, text) {
     const minScore = typeof opts.minScore === "number" ? opts.minScore : 0.0;
     const bl = opts.commonNounBlocklist instanceof Set ? opts.commonNounBlocklist
       : new Set(opts.commonNounBlocklist || deps.blocklist.DEFAULT_COMMON_NOUN_BLOCKLIST);
@@ -341,7 +341,36 @@
       const en = new Set(opts.enabledPiiClasses);
       dets = dets.filter((d) => en.has(deps.classification.classificationFor(d.entity_type)));
     }
+    if (customDets.length > 0) dets = mergeStraddlingCustom(dets, new Set(customDets), text);
     return resolveOverlaps(dets);
+  }
+
+  // カスタムの検出が、今の検出とまたがって重なるときは、重なりでつながった組を、全体を合わせた 1 つの範囲にまとめる。
+  // resolveOverlaps は左端、次に長さの順に取り、負けた範囲を丸ごと捨てるので、まとめないと、カスタムが今の検出の頭に
+  // 食い込むと今の検出の尻尾が残り (「注文 ORD123-4567」に ORD\d+ で「<ORDER_1>-4567」)、尻尾からはみ出すとカスタムが
+  // 捨てられる。Pro が無料版より弱く伏せないように、つながった組 (A と B、B と C が重なれば A・B・C) のうち、カスタムを
+  // 含み、1 つがほかを全部包んではいないものだけをまとめる。名前は、組の中でいちばん左から始まるカスタムの検出の名前。
+  // カスタムを含まない組と、1 つがほかを全部包む組は、そのまま resolveOverlaps に任せる (包むものが残るので、かけらは
+  // 出ない)。custom は、カスタムの検出 (オブジェクトそのもの) の集合。範囲は半開区間で、接するだけなら重ならない
+  function mergeStraddlingCustom(dets, custom, text) {
+    const sorted = dets.slice().sort((a, b) => a.start - b.start || b.end - a.end);
+    const out = [];
+    for (let i = 0; i < sorted.length;) {
+      // i から始まる、重なりでつながった組 [i, j) と、その全体の範囲 [start, end)
+      const start = sorted[i].start;
+      let end = sorted[i].end;
+      let j = i + 1;
+      while (j < sorted.length && sorted[j].start < end) { end = Math.max(end, sorted[j].end); j += 1; }
+      const group = sorted.slice(i, j);
+      const first = group.find((d) => custom.has(d)); // 左から (同じ位置なら長い順に) 並べてあるので、いちばん左のカスタム
+      if (first && !group.some((d) => d.start === start && d.end === end)) {
+        out.push({ ...first, start, end, text: text.slice(start, end) });
+      } else {
+        out.push(...group);
+      }
+      i = j;
+    }
+    return out;
   }
 
   // Returns { dets, custom }; custom.status is "off" / "ok" / "partial"
@@ -349,7 +378,7 @@
   function runPipeline(text, opts, deps) {
     const dets = collectRawDetections(text, opts, deps);
     const custom = collectCustom(text, opts, deps);
-    return { dets: finishPipeline(dets, opts, deps, custom.dets), custom: { status: custom.status } };
+    return { dets: finishPipeline(dets, opts, deps, custom.dets, text), custom: { status: custom.status } };
   }
 
   // Async variant: same as runPipeline but also invokes the ML detector
@@ -372,7 +401,7 @@
         if (mlDets.length > 0) dets = dets.concat(mlDets);
       } catch (_) { ml = { status: "error" }; /* fall through with regex-only */ }
     }
-    return { dets: finishPipeline(dets, opts, deps, custom.dets), ml, custom: { status: custom.status } };
+    return { dets: finishPipeline(dets, opts, deps, custom.dets, text), ml, custom: { status: custom.status } };
   }
   async function runPipelineAsync(text, opts, deps) {
     return (await runPipelineWithMl(text, opts, deps)).dets;
