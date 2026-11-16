@@ -75,11 +75,18 @@
   // 動作ログ (docs/diagnostic-log.md)。件数と経路だけを残し、ファイル名は残さない
   const DL = window.PiiGuardDiagLog;
   const dlog = (code, d) => { if (DL) DL.log(code, d); };
-  // カスタムルールを時間内に当て終えられなかった結果は、伏せ切れていないので使わない (伏せられない添付として確認に回す)
+  // カスタムルールを当て終えられなかったときの、確認の一文 (ページの送信の injected.js、保護入力欄の secure-composer.js と
+  // 同じ文)。時間の上限に届いた (timeout) か、ルールがあるのに Pro かどうか分からず、1 本も当てなかった (pro-unknown) か
+  const CUSTOM_PARTIAL_NOTICES = {
+    timeout: "カスタムルールの一部を時間内に調べきれませんでした。伏せられていない語が残っているかもしれません。送る前に確かめてください。",
+    "pro-unknown": "Pro の状態を確かめられないため、カスタムルールを当てていません。送る前に確かめてください。",
+  };
+  // カスタムルールを時間内に当て終えられなかった結果は、伏せ切れていないので使わない (伏せられない添付として確認に回す)。
+  // 投げる例外の customPartial で、読めない文字コードなどのほかの失敗と見分ける (確認の文を分けるため)
   function rejectIncomplete(res) {
     if (!res || !res.custom || res.custom.status !== "partial") return;
-    dlog("custom.partial", { via: "attachment" });
-    throw new Error("custom rules incomplete");
+    dlog("custom.partial", { via: "attachment", cause: "timeout" });
+    throw Object.assign(new Error("custom rules incomplete"), { customPartial: true });
   }
 
   // 日本の CSV は Shift_JIS、Windows のツールは UTF-16 で書くことが多い。UTF-8 決め打ちだと
@@ -125,13 +132,16 @@
 
   // 伏せられないファイルを、マスキングがオンでも添付するかを利用者に聞く (docs/release-1.7.1.md の D-SC-24)。
   // ブラウザの確認 (window.confirm) はページの外の表示で、ページのスクリプトからは答えられず偽れない。
-  // ファイル名は確認の中に出すだけで、どこにも送らない。出せない・例外・キャンセルは止める (fail-closed)
+  // ファイル名は確認の中に出すだけで、どこにも送らない。出せない・例外・キャンセルは止める (fail-closed)。
+  // notice: カスタムルールを当て終えられなかったファイルがあるときの一文。そのときは「(画像・PDF など)」の代わりに一文を出す。
+  // ほかの理由で伏せられないファイル (画像・PDF・読めない文字コードなど。otherKinds) も混ざるときは、両方を出す
   const CONFIRM_NAMES = 5;
-  function confirmUnmaskable(files) {
+  function confirmUnmaskable(files, notice, otherKinds) {
     if (typeof window.confirm !== "function") return false;
     const names = files.slice(0, CONFIRM_NAMES).map((f) => "・" + String(f.name || "(名前なし)").slice(0, 60));
     if (files.length > CONFIRM_NAMES) names.push(`ほか ${files.length - CONFIRM_NAMES} 件`);
-    const msg = `PII Guard: 次のファイルは中身を伏せられません (画像・PDF など)。\n${names.join("\n")}\n\n` +
+    const why = `${!notice || otherKinds ? " (画像・PDF など)" : ""}。${notice || ""}`;
+    const msg = `PII Guard: 次のファイルは中身を伏せられません${why}\n${names.join("\n")}\n\n` +
       "マスキングはオンですが、伏せずにこのまま添付しますか?";
     try { return window.confirm(msg) === true; } catch (_) { return false; }
   }
@@ -144,6 +154,10 @@
     const unmasked = [];
     const unmaskable = [];
     let maskedCount = 0;
+    // 確認の文を選ぶための数え: カスタムルールを当て終えられなかったファイルの理由 (timeout / pro-unknown) と、
+    // ほかの理由 (画像・PDF・読めない文字コードなど) で伏せられないファイルがあるか
+    let partialCause = null;
+    let otherKinds = false;
     // 保存した Pro のカスタムルールを content.js がエンジンに渡し終えてから伏せる (読んだのにまだ渡していない状態で、伏せない)。
     // ルールがあるのに Pro かどうか分からないと true (ルールを当てられないので、時間切れと同じに扱う)
     const customUnknown = settings.enabled && typeof NS.__customRulesReady === "function" ? await NS.__customRulesReady() : false;
@@ -152,18 +166,23 @@
         // マスキング OFF: 中身はそのまま通す (利用者の選択)。未マスクであることだけ知らせる。
         masked.push(f); unmasked.push(f.name);
       } else if (isText(f) && f.size <= MAX_TEXT_BYTES && engineReady() && customUnknown) {
-        dlog("custom.partial", { via: "attachment" });
+        dlog("custom.partial", { via: "attachment", cause: "pro-unknown" });
+        partialCause = "pro-unknown";
         unmaskable.push(f); // 伏せられない添付として確認に回す
       } else if (isText(f) && f.size <= MAX_TEXT_BYTES && engineReady()) {
         try { const m = await maskOneFile(f); masked.push(m.file); maskedCount += m.count; }
-        catch (_) { unmaskable.push(f); } // 読めない文字コード/マスクの失敗
+        catch (e) { // カスタムルールの時間切れ / 読めない文字コード / マスクの失敗
+          if (e && e.customPartial === true) partialCause = partialCause || "timeout"; else otherKinds = true;
+          unmaskable.push(f);
+        }
       } else {
+        otherKinds = true;
         unmaskable.push(f); // バイナリ/巨大/エンジン不在
       }
     }
     // 伏せられないファイルは、1 回の添付につき 1 回だけ聞く。選んだら元のまま渡し、「未マスク」として知らせる
     if (unmaskable.length) {
-      if (confirmUnmaskable(unmaskable)) for (const f of unmaskable) { masked.push(f); unmasked.push(f.name); }
+      if (confirmUnmaskable(unmaskable, partialCause ? CUSTOM_PARTIAL_NOTICES[partialCause] : "", otherKinds)) for (const f of unmaskable) { masked.push(f); unmasked.push(f.name); }
       else for (const f of unmaskable) blocked.push(f.name);
     }
     return { masked, blocked, unmasked, maskedCount };

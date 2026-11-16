@@ -224,18 +224,24 @@
     }
   }
 
-  // Pro のカスタムルールを時間内に当て終えられなかったときの確認の一文 (Pro Phase 2 の設計 (P1))
-  const CUSTOM_PARTIAL_NOTICE = "カスタムルールの一部を時間内に調べきれませんでした。";
+  // Pro のカスタムルールを当て終えられなかったときの確認の一文 (Pro Phase 2 の設計 (P1))。理由ごとに分ける: 時間の上限に
+  // 届いた (timeout) か、ルールがあるのに Pro かどうか分からず、1 本も当てなかった (pro-unknown) か。
+  // ページの送信 (injected.js) と添付 (attachments/attachment-guard.js) も同じ文を使う
+  const CUSTOM_PARTIAL_NOTICES = {
+    timeout: "カスタムルールの一部を時間内に調べきれませんでした。伏せられていない語が残っているかもしれません。送る前に確かめてください。",
+    "pro-unknown": "Pro の状態を確かめられないため、カスタムルールを当てていません。送る前に確かめてください。",
+  };
   // PII 検出時の送信前確認。表示して iframe を伸ばし、ボタンが押されるまで待つ。
-  // notice があれば (カスタムルールの時間切れ)、件数の代わりにその一文を出す
+  // notice があれば (カスタムルールを当て終えられなかった)、件数の代わりにその一文と「このまま送信しますか?」を出し、
+  // ボタンは「この内容で送信」にする (伏せ切れていないかもしれない文を、確かめてから送ってもらう)。いつもの確認は今のまま
   function confirmPii(count, notice) {
     return new Promise((resolve) => {
       confirmMsg.textContent = notice
-        ? `${notice}${settings.enabled ? "マスキングして送信しますか?" : "マスキングせずに送信しますか?"}`
+        ? `${notice}このまま送信しますか?`
         : settings.enabled
         ? `個人情報が ${count} 件見つかりました。マスキングして送信しますか?`
         : `個人情報が ${count} 件含まれています。マスキングせずに送信しますか?`;
-      confirmSendBtn.textContent = settings.enabled ? "マスキングして送信" : "このまま送信";
+      confirmSendBtn.textContent = notice ? "この内容で送信" : settings.enabled ? "マスキングして送信" : "このまま送信";
       confirmEl.hidden = false;
       confirmEl.setAttribute("data-show", "1");
       rootEl.dataset.confirm = "1"; // テスト観測用
@@ -272,15 +278,17 @@
     // ML の判定を使えたか (off / ok / timeout / error / unavailable)。時間切れと失敗は呼び手が知らせる (D-SC-10)
     const ml = res.ml && typeof res.ml.status === "string" ? res.ml.status : "off";
     // Pro のカスタムルール (off / ok / partial)。partial (時間切れ) なら、呼び手は必ず確認を出す。
-    // ルールがあるのに Pro かどうか分からず、ルールを当てられなかったときも partial と同じに扱う
+    // ルールがあるのに Pro かどうか分からず、ルールを当てられなかったときも partial と同じに扱う。
+    // customCause は partial の理由 (timeout / pro-unknown。確認の一文と動作ログを分ける)
     const custom = customUnknown ? "partial" : res.custom && typeof res.custom.status === "string" ? res.custom.status : "off";
+    const customCause = customUnknown ? "pro-unknown" : custom === "partial" ? "timeout" : undefined;
     // 除外リストの値は伏せない (F-SC-18)。除いたときは、残りの検出だけで伏せ字を作り直す
     const allowed = allowedMatcher();
     const kept = all.filter((d) => !(d && (allowed(String(d.text)) || allowed(text.slice(d.start, d.end)))));
-    if (kept.length === all.length) return { text: res.sanitized_text, count: all.length, ml, custom };
+    if (kept.length === all.length) return { text: res.sanitized_text, count: all.length, ml, custom, customCause };
     const agg = NS.engine.aggregate;
     if (!agg || typeof agg.applySpans !== "function") throw new Error("engine not ready");
-    return { text: agg.applySpans(text, kept), count: kept.length, ml, custom };
+    return { text: agg.applySpans(text, kept), count: kept.length, ml, custom, customCause };
   }
 
   // 0.3 秒より長くかかるときだけ、待っていることを出す。送る前の検出は「確認中…」(F-SC-22、D-SC-11。
@@ -416,9 +424,10 @@
       // 個人情報を検出したときは送信前に確認を出す (無いときは無言で送る)。
       // カスタムルールを時間内に調べきれなかったときは、件数や piiSendWarning にかかわらず確認を出す (黙って送らない)
       const partial = res.custom === "partial";
-      if (partial) dl("custom.partial", { via: "secure-composer" });
+      const cause = res.customCause === "pro-unknown" ? "pro-unknown" : "timeout";
+      if (partial) dl("custom.partial", { via: "secure-composer", cause });
       if (partial || (piiCount > 0 && settings.piiSendWarning)) {
-        const ok = await confirmPii(piiCount, partial ? CUSTOM_PARTIAL_NOTICE : "");
+        const ok = await confirmPii(piiCount, partial ? CUSTOM_PARTIAL_NOTICES[cause] : "");
         if (!ok) { machine.to("EDITING"); setStatus(""); dl("send.cancelled", { via: "secure-composer" }); return; } // 取消: 下書きはそのまま
       }
       machine.to("COMMIT_READY");

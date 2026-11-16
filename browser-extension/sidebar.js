@@ -2561,7 +2561,9 @@
         // keeps the sidebar visually coherent so the user knows
         // the analysis actually completed rather than silently
         // vanishing.
-        if (categoryOrder.length === 0) {
+        // 一文 (notice) があるとき (Pro のカスタムルールを当て終えられなかった) は出さない。調べきれていないのに
+        // 「検出されませんでした — そのまま送信できます」と言わない
+        if (categoryOrder.length === 0 && !notice) {
           const emptyMsg = document.createElement("div");
           emptyMsg.className = "empty";
           emptyMsg.textContent = isDraft ? "✓ PII は検出されませんでした" : "✓ PII は検出されませんでした — そのまま送信できます";

@@ -264,14 +264,21 @@
   // ISOLATED に頼めなかったとき: リストがあるなら、MAIN world のエンジン (リスト無し) で黙って
   // 続けると「常に伏せる語」を伏せないまま送る。マスク失敗として呼び手に返す (fail-closed)。
   const listsNeeded = () => !!(NS.settings && NS.settings.hasSecretLists);
-  // Pro のカスタムルールを、時間の上限までに当て終えられなかった (ISOLATED world の結果の custom.status が partial)。
-  // その送信は、確認を出さない設定でも確認の画面 (サイドバーかモーダル) に回し、上にこの一文を出す。確認の画面が
-  // 無ければ送らない (Pro Phase 2 の設計 (P1))。時間切れは動作ログに残す
-  const CUSTOM_PARTIAL_NOTICE = "カスタムルールの一部を時間内に調べきれませんでした。";
+  // Pro のカスタムルールを当て終えられなかった (ISOLATED world の結果の custom.status が partial)。
+  // その送信は、確認を出さない設定でも確認の画面 (サイドバーかモーダル) に回し、上に一文を出す。確認の画面が
+  // 無ければ送らない (Pro Phase 2 の設計 (P1))。理由 (custom.cause) は、時間の上限に届いた (timeout。エンジンの partial) か、
+  // ルールがあるのに Pro かどうか分からず、1 本も当てなかった (pro-unknown。content.js が付ける) か。動作ログに理由ごと残す。
+  // 保護入力欄 (secure-composer.js) と添付 (attachments/attachment-guard.js) も同じ文を使う
+  const CUSTOM_PARTIAL_NOTICES = {
+    timeout: "カスタムルールの一部を時間内に調べきれませんでした。伏せられていない語が残っているかもしれません。送る前に確かめてください。",
+    "pro-unknown": "Pro の状態を確かめられないため、カスタムルールを当てていません。送る前に確かめてください。",
+  };
+  // partial なら、記録して一文を返す。そうでなければ "" (偽)
   function noteCustomPartial(result) {
-    if (!(result && result.custom && result.custom.status === "partial")) return false;
-    plog("custom.partial", { via: "page" });
-    return true;
+    if (!(result && result.custom && result.custom.status === "partial")) return "";
+    const cause = result.custom.cause === "pro-unknown" ? "pro-unknown" : "timeout";
+    plog("custom.partial", { via: "page", cause });
+    return CUSTOM_PARTIAL_NOTICES[cause];
   }
   // 送信を止める (fail-closed)。fetch・XHR・WebSocket の監視が受け止め、動作ログの send.blocked に reason を残す
   const sendBlocked = (reason) => Object.assign(new Error("mask-mcp: send blocked"), { blockReason: reason });
@@ -1277,7 +1284,7 @@
         const initialAgg = Array.isArray(aggResp.aggregated)
           ? aggResp.aggregated
           : [];
-        const notice = noteCustomPartial(aggResp) ? CUSTOM_PARTIAL_NOTICE : undefined;
+        const notice = noteCustomPartial(aggResp) || undefined;
         let decision;
         if (llmEnabled) {
           const llmPromise = mergeLlmDetect(aggResp, text);
@@ -1320,7 +1327,7 @@
 
       // カスタムルールの時間切れ: 確認を出さない経路 (確認がオフ、または選んだ画面の部品が無い) でも、この送信だけ
       // 確認の画面に回す。サイドバーは集めた形の結果で開くので、頼み直す
-      const notice = noteCustomPartial(result) ? CUSTOM_PARTIAL_NOTICE : undefined;
+      const notice = noteCustomPartial(result) || undefined;
       if (notice && !useModal && timeoutUi !== "modal") {
         if (timeoutUi !== "sidebar") throw sendBlocked("custom-rules-incomplete");
         const aggResp = await sanitizeAggregated(text, adapter.name, url);

@@ -413,8 +413,9 @@
           } else {
             result = await engine.maskSanitize(text, opts);
           }
-          // ルールがあるのに Pro かどうか分からず、ルールを当てられなかった: 時間切れと同じに扱う (ページの世界が確認に回す)
-          if (customUnknown && kind !== "lists" && result) result.custom = { status: "partial" };
+          // ルールがあるのに Pro かどうか分からず、ルールを当てられなかった: 時間切れと同じに扱う (ページの世界が確認に回す)。
+          // 理由 (cause) を添えて、確認の一文を時間切れと分ける (エンジンの partial は時間切れ)
+          if (customUnknown && kind !== "lists" && result) result.custom = { status: "partial", cause: "pro-unknown" };
         }
       }
     } catch (_) { result = null; }

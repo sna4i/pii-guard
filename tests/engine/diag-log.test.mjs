@@ -208,6 +208,21 @@ test("T-LG-04c send.failed names the new reasons and how the send was made (P-SC
   assert.equal(e.d.path, undefined, "知らない送り方は残さない");
 });
 
+test("T-LG-04d custom.partial keeps why the custom rules were not fully applied (timeout / pro-unknown) and words the line by it", () => {
+  // Pro のカスタムルールを当て終えられなかった理由: 時間切れ (timeout) と、Pro かどうか分からず当てなかった (pro-unknown)
+  const timeout = DL.sanitize({ code: "custom.partial", d: { via: "page", cause: "timeout" } }, meta());
+  assert.deepEqual(timeout.d, { via: "page", cause: "timeout" });
+  assert.match(DL.format(timeout), /カスタムルールの一部を時間内に調べきれませんでした/);
+  const unknown = DL.sanitize({ code: "custom.partial", d: { via: "attachment", cause: "pro-unknown" } }, meta());
+  assert.deepEqual(unknown.d, { via: "attachment", cause: "pro-unknown" });
+  assert.match(DL.format(unknown), /Pro の状態を確かめられないため、カスタムルールを当てませんでした/);
+  assert.doesNotMatch(DL.format(unknown), /時間内に/, "Pro が分からないときは、時間切れとは書かない");
+  assert.doesNotMatch(DL.format(unknown), /undefined|null|\{|\}/);
+  const other = DL.sanitize({ code: "custom.partial", d: { via: "page", cause: "アルファ計画" } }, meta());
+  assert.deepEqual(other.d, { via: "page" }, "知らない理由は残さない");
+  assert.match(DL.format(other), /時間内に調べきれませんでした/, "理由の無い記録 (前の版) は、今までどおりの文");
+});
+
 test("T-LG-04b level depends on the status where the catalog says so", () => {
   assert.equal(DL.sanitize({ code: "llm.detect", d: { status: "failed" } }, meta()).lv, "warn");
   assert.equal(DL.sanitize({ code: "llm.detect", d: { status: "found" } }, meta()).lv, "info");

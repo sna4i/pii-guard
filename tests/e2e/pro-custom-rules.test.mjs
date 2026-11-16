@@ -16,7 +16,14 @@ const TEXT = "アルファ計画は ACME-1234 で管理しています";
 const MASKED = "<PROJECT_1>は <ACME_ID_1> で管理しています";
 const FILE_NAME = "アルファ計画_議事録.txt";
 const FILE_TEXT = "アルファ計画の議事録\n管理番号 ACME-1234\n";
-const NOTICE = /カスタムルールの一部を時間内に調べきれませんでした/;
+// 確認に出す一文。時間切れと、ルールがあるのに Pro かどうか分からない (ルールを当てていない) とき
+const TIMEOUT_NOTICE = "カスタムルールの一部を時間内に調べきれませんでした。伏せられていない語が残っているかもしれません。送る前に確かめてください。";
+const PRO_UNKNOWN_NOTICE = "Pro の状態を確かめられないため、カスタムルールを当てていません。送る前に確かめてください。";
+// 一文があるときは出さない、伏せる候補が 0 件のときの文言 (サイドバー)
+const EMPTY_TEXT = "PII は検出されませんでした";
+// 一文があるときの保護入力欄の確認の題とボタン (いつもの確認は「マスキングして送信しますか?」と「マスキングして送信」のまま)
+const NOTICE_QUESTION = "このまま送信しますか?";
+const NOTICE_SEND = "この内容で送信";
 const BUDGET_KEY = "__pii_guard_e2e_custom_budget_ms";
 // E2E のときだけの、Pro かどうかの答えを待つ上限の上書き (ふだんは 3 秒)。開いた直後の間を作るテストは長く、
 // 待ちきったあとを見るテストは短くする (作りの中の 3 秒に頼らない)
@@ -127,6 +134,11 @@ const sidebarNotice = (p) => p.evaluate((sel) => {
   const n = host && host.shadowRoot && host.shadowRoot.querySelector(".notice");
   return n ? n.textContent : null;
 }, SIDEBAR);
+// サイドバーに 0 件の文言 (EMPTY_TEXT) が出ているか
+const sidebarShowsEmpty = (p) => p.evaluate(([sel, text]) => {
+  const host = document.querySelector(sel);
+  return !!(host && host.shadowRoot && host.shadowRoot.textContent.includes(text));
+}, [SIDEBAR, EMPTY_TEXT]);
 // お試しの始まり (ExtPay が覚えているインストールの日時) を替えて確かめ直し、Pro かどうかを返す
 async function setInstalledAt(ms) {
   await h.ext.evaluate((t) => chrome.storage.sync.set({ extensionpay_installed_at: new Date(t).toISOString() }), ms);
@@ -224,6 +236,8 @@ test("T-CR-32 ChatGPT の保護入力欄: 届いた文で伏せられている",
       assert.equal(h.server.byKind("conversation").length, 0, "ルールを渡し終えるまでは送らない");
       await release();
       await frame.waitForSelector('#confirm[data-show="1"]', { timeout: 5000 }); // 見つかった 2 件の確認
+      assert.equal(await frame.textContent("#confirm-msg"), "個人情報が 2 件見つかりました。マスキングして送信しますか?", "いつもの確認の題は今のまま");
+      assert.equal((await frame.textContent("#confirm-send")).trim(), "マスキングして送信", "いつもの確認のボタンは今のまま");
       await frame.click("#confirm-send");
       await page.waitForFunction(() => window.__mock.events.some((e) => e.type === "conversation-ok"), null, { timeout: 10000 });
       assert.equal(chatSent(), MASKED);
@@ -332,13 +346,14 @@ test("T-CR-37 時間切れ (上書きで 0 ミリ秒): 確認を出さない設�
     for (const interactive of [false, true]) {
       const p = await openSite("claude", { [BUDGET_KEY]: 0, piiSendWarning: false, interactive });
       try {
-        const logged = await logCount("custom.partial", { via: "page" });
+        const logged = await logCount("custom.partial", { via: "page", cause: "timeout" });
         const t0 = Date.now();
         await send(p, "claude", text);
         assert.ok(await S.waitSidebar(p), `サイドバーが開く (interactive: ${interactive})`);
-        assert.match(String(await sidebarNotice(p)), NOTICE);
+        assert.equal(await sidebarNotice(p), TIMEOUT_NOTICE);
+        assert.equal(await sidebarShowsEmpty(p), false, "一文があるときは、伏せる候補が 0 件でも 0 件の文言を出さない");
         assert.equal(SITES.claude.sent(t0).length, 0, "確かめる前は届かない");
-        assert.ok(await waitLogAbove("custom.partial", { via: "page" }, logged), "動作ログに残る (page)");
+        assert.ok(await waitLogAbove("custom.partial", { via: "page", cause: "timeout" }, logged), "動作ログに残る (page、時間切れ)");
         assert.ok(await S.clickInShadow(p, SIDEBAR, /キャンセル/), "キャンセルを押せる");
         await S.sleep(400);
         assert.equal(SITES.claude.sent(t0).length, 0, "キャンセルすると届かない");
@@ -355,7 +370,7 @@ test("T-CR-37 時間切れ (上書きで 0 ミリ秒): 確認を出さない設�
         const n = host && host.shadowRoot && host.shadowRoot.querySelector(".notice");
         return n ? n.textContent : null;
       }, null, { timeout: 8000 });
-      assert.match(await modalNotice.jsonValue(), NOTICE);
+      assert.equal(await modalNotice.jsonValue(), TIMEOUT_NOTICE);
       assert.equal(await S.sidebarState(m), null, "サイドバーは出ない");
       assert.equal(SITES.claude.sent(t0).length, 0, "確かめる前は届かない");
       await m.evaluate(() => [...document.querySelector("div[data-mask-mcp-modal]").shadowRoot.querySelectorAll("button")].find((b) => b.dataset.action === "cancel").click());
@@ -368,13 +383,14 @@ test("T-CR-37 時間切れ (上書きで 0 ミリ秒): 確認を出さない設�
     try {
       const frame = await h.waitSecureReady(page, 10000);
       assert.ok(frame, "保護入力欄が立ち上がる");
-      const logged = await logCount("custom.partial", { via: "secure-composer" });
+      const logged = await logCount("custom.partial", { via: "secure-composer", cause: "timeout" });
       await h.type(page, frame, text);
       await h.enterNoConfirm(page, frame);
       await frame.waitForSelector('#confirm[data-show="1"]', { timeout: 5000 });
-      assert.match(await frame.textContent("#confirm-msg"), NOTICE);
+      assert.equal(await frame.textContent("#confirm-msg"), TIMEOUT_NOTICE + NOTICE_QUESTION, "一文と、このまま送るかの題");
+      assert.equal((await frame.textContent("#confirm-send")).trim(), NOTICE_SEND);
       assert.equal(h.server.byKind("conversation").length, 0, "確かめる前は届かない");
-      assert.ok(await waitLogAbove("custom.partial", { via: "secure-composer" }, logged), "動作ログに残る (secure-composer)");
+      assert.ok(await waitLogAbove("custom.partial", { via: "secure-composer", cause: "timeout" }, logged), "動作ログに残る (secure-composer、時間切れ)");
       await frame.click("#confirm-cancel");
     } finally { await page.close(); }
   } finally {
@@ -388,17 +404,47 @@ test("T-CR-38 時間切れの添付: 今の「伏せられない添付」の確�
     try {
       const dialogs = [];
       p.on("dialog", (d) => { dialogs.push(d.message()); d.dismiss().catch(() => {}); });
-      const logged = await logCount("custom.partial", { via: "attachment" });
+      const logged = await logCount("custom.partial", { via: "attachment", cause: "timeout" });
       await p.setInputFiles(SITES.claude.file, { name: FILE_NAME, mimeType: "text/plain", buffer: Buffer.from(FILE_TEXT, "utf8") });
       for (let i = 0; i < 50 && !dialogs.length; i++) await S.sleep(100);
       assert.equal(dialogs.length, 1, "確認が出る");
       assert.match(dialogs[0], /伏せられません/);
+      assert.ok(dialogs[0].includes(TIMEOUT_NOTICE), `確認に時間切れの一文が出る (${dialogs[0]})`);
+      assert.ok(!dialogs[0].includes("画像・PDF"), `伏せられない形式 (画像・PDF など) の説明は出さない (${dialogs[0]})`);
       assert.ok(dialogs[0].includes(FILE_NAME), `確認にファイルの名前が出る (${dialogs[0]})`);
       await S.sleep(300);
       // 模擬の Claude は、渡されたファイルが 0 件でも change のたびに attached を残すので、ファイルの数で見る
       assert.equal((await attached(p)).reduce((n, e) => n + e.names.length, 0), 0, "キャンセルすると、ページにファイルが渡らない");
-      assert.ok(await waitLogAbove("custom.partial", { via: "attachment" }, logged), "動作ログに残る (attachment)");
+      assert.ok(await waitLogAbove("custom.partial", { via: "attachment", cause: "timeout" }, logged), "動作ログに残る (attachment、時間切れ)");
     } finally { await p.close(); }
+
+    // 画像と時間切れのテキストのファイルを一緒に添付する: 確認は 1 回で、伏せられない形式の説明と時間切れの一文の両方を出す
+    const mixed = await openSite("claude", { [BUDGET_KEY]: 0 });
+    try {
+      const dialogs = [];
+      mixed.on("dialog", (d) => { dialogs.push(d.message()); d.dismiss().catch(() => {}); });
+      await mixed.setInputFiles(SITES.claude.file, [
+        { name: "photo.png", mimeType: "image/png", buffer: Buffer.from([0x89, 0x50, 0x4e, 0x47]) },
+        { name: FILE_NAME, mimeType: "text/plain", buffer: Buffer.from(FILE_TEXT, "utf8") },
+      ]);
+      for (let i = 0; i < 50 && !dialogs.length; i++) await S.sleep(100);
+      assert.equal(dialogs.length, 1, "画像と時間切れの添付: 確認は 1 回");
+      assert.ok(dialogs[0].includes("(画像・PDF など)") && dialogs[0].includes(TIMEOUT_NOTICE), `両方の説明が出る (${dialogs[0]})`);
+      assert.ok(dialogs[0].includes("photo.png") && dialogs[0].includes(FILE_NAME), `両方のファイルの名前が出る (${dialogs[0]})`);
+    } finally { await mixed.close(); }
+
+    // いつもの伏せられない添付 (画像だけ) は今のまま: 時間切れの一文は出さない
+    await removeBudget();
+    const image = await openSite("claude");
+    try {
+      const dialogs = [];
+      image.on("dialog", (d) => { dialogs.push(d.message()); d.dismiss().catch(() => {}); });
+      await image.setInputFiles(SITES.claude.file, { name: "photo.png", mimeType: "image/png", buffer: Buffer.from([0x89, 0x50, 0x4e, 0x47]) });
+      for (let i = 0; i < 50 && !dialogs.length; i++) await S.sleep(100);
+      assert.equal(dialogs.length, 1, "画像: 確認が出る");
+      assert.ok(dialogs[0].startsWith("PII Guard: 次のファイルは中身を伏せられません (画像・PDF など)。\n"), `いつもの確認の文 (${dialogs[0]})`);
+      assert.ok(!dialogs[0].includes("カスタムルール") && !dialogs[0].includes("Pro の状態"), `一文は出さない (${dialogs[0]})`);
+    } finally { await image.close(); }
 
     // 本文に入れて送る添付 (Claude の PerformAction の添付の欄) は、確認を出さずに送る前にもう一度伏せる。
     // そこで時間切れになったら、本文を確かめて送るを押しても、送らない
@@ -557,13 +603,14 @@ test("T-CR-40 ルールがあるのに Pro かどうか分からない (待つ�
       const p = await openSite("claude", SHORT, { pill: false });
       try {
         await S.sleep(PAST_WAIT_MS);
-        const logged = await logCount("custom.partial", { via: "page" });
+        const logged = await logCount("custom.partial", { via: "page", cause: "pro-unknown" });
         const t0 = Date.now();
         await sendNow(p, "claude", TEXT);
         assert.ok(await S.waitSidebar(p), "ページの送信: サイドバーが開く");
-        assert.match(String(await sidebarNotice(p)), NOTICE);
+        assert.equal(await sidebarNotice(p), PRO_UNKNOWN_NOTICE, "ルールを当てていないことを知らせる (時間切れの文ではない)");
+        assert.equal(await sidebarShowsEmpty(p), false, "一文があるときは、0 件の文言を出さない");
         assert.equal(SITES.claude.sent(t0).length, 0, "確かめる前は届かない");
-        assert.ok(await waitLogAbove("custom.partial", { via: "page" }, logged), "動作ログに残る (page)");
+        assert.ok(await waitLogAbove("custom.partial", { via: "page", cause: "pro-unknown" }, logged), "動作ログに残る (page、Pro が分からない)");
         assert.ok(await S.clickInShadow(p, SIDEBAR, /キャンセル/), "キャンセルを押せる");
       } finally { await p.close(); }
 
@@ -575,13 +622,14 @@ test("T-CR-40 ルールがあるのに Pro かどうか分からない (待つ�
         const frame = await h.waitSecureReady(page, 10000);
         assert.ok(frame, "保護入力欄が立ち上がる");
         await S.sleep(PAST_WAIT_MS);
-        const logged = await logCount("custom.partial", { via: "secure-composer" });
+        const logged = await logCount("custom.partial", { via: "secure-composer", cause: "pro-unknown" });
         await h.type(page, frame, TEXT);
         await h.enterNoConfirm(page, frame);
         await frame.waitForSelector('#confirm[data-show="1"]', { timeout: 5000 });
-        assert.match(await frame.textContent("#confirm-msg"), NOTICE);
+        assert.equal(await frame.textContent("#confirm-msg"), PRO_UNKNOWN_NOTICE + NOTICE_QUESTION);
+        assert.equal((await frame.textContent("#confirm-send")).trim(), NOTICE_SEND);
         assert.equal(h.server.byKind("conversation").length, 0, "確かめる前は届かない");
-        assert.ok(await waitLogAbove("custom.partial", { via: "secure-composer" }, logged), "動作ログに残る (secure-composer)");
+        assert.ok(await waitLogAbove("custom.partial", { via: "secure-composer", cause: "pro-unknown" }, logged), "動作ログに残る (secure-composer、Pro が分からない)");
         await frame.click("#confirm-cancel");
       } finally { await page.close(); }
 
@@ -591,14 +639,16 @@ test("T-CR-40 ルールがあるのに Pro かどうか分からない (待つ�
         const dialogs = [];
         a.on("dialog", (d) => { dialogs.push(d.message()); d.dismiss().catch(() => {}); });
         await S.sleep(PAST_WAIT_MS);
-        const logged = await logCount("custom.partial", { via: "attachment" });
+        const logged = await logCount("custom.partial", { via: "attachment", cause: "pro-unknown" });
         await a.setInputFiles(SITES.claude.file, { name: FILE_NAME, mimeType: "text/plain", buffer: Buffer.from(FILE_TEXT, "utf8") });
         for (let i = 0; i < 50 && !dialogs.length; i++) await S.sleep(100);
         assert.equal(dialogs.length, 1, "添付: 確認が出る");
         assert.match(dialogs[0], /伏せられません/);
+        assert.ok(dialogs[0].includes(PRO_UNKNOWN_NOTICE), `添付: Pro が分からない一文が出る (${dialogs[0]})`);
+        assert.ok(!dialogs[0].includes("画像・PDF"), `添付: 伏せられない形式の説明は出さない (${dialogs[0]})`);
         await S.sleep(300);
         assert.equal((await attached(a)).reduce((n, e) => n + e.names.length, 0), 0, "キャンセルすると、ページにファイルが渡らない");
-        assert.ok(await waitLogAbove("custom.partial", { via: "attachment" }, logged), "動作ログに残る (attachment)");
+        assert.ok(await waitLogAbove("custom.partial", { via: "attachment", cause: "pro-unknown" }, logged), "動作ログに残る (attachment、Pro が分からない)");
       } finally { await a.close(); }
 
       // ルールが無ければ、答えが来なくても今と同じ (確認は出ず、そのまま届く)
@@ -644,7 +694,7 @@ test("T-CR-40 ルールがあるのに Pro かどうか分からない (待つ�
         const t0 = Date.now();
         await sendNow(f, "claude", TEXT);
         assert.ok(await S.waitSidebar(f), "確かめに失敗したとき (ページの送信): サイドバーが開く");
-        assert.match(String(await sidebarNotice(f)), NOTICE);
+        assert.equal(await sidebarNotice(f), PRO_UNKNOWN_NOTICE);
         assert.equal(SITES.claude.sent(t0).length, 0, "確かめる前は届かない");
         assert.ok(await S.clickInShadow(f, SIDEBAR, /キャンセル/), "キャンセルを押せる");
       } finally { await f.close(); }
@@ -659,7 +709,7 @@ test("T-CR-40 ルールがあるのに Pro かどうか分からない (待つ�
         await h.type(page, frame, TEXT);
         await h.enterNoConfirm(page, frame);
         await frame.waitForSelector('#confirm[data-show="1"]', { timeout: 5000 });
-        assert.match(await frame.textContent("#confirm-msg"), NOTICE, "確かめに失敗したとき (保護入力欄): 確認に一文が出る");
+        assert.equal(await frame.textContent("#confirm-msg"), PRO_UNKNOWN_NOTICE + NOTICE_QUESTION, "確かめに失敗したとき (保護入力欄): 確認に一文が出る");
         assert.equal(h.server.byKind("conversation").length, 0, "確かめる前は届かない");
         await frame.click("#confirm-cancel");
       } finally { await page.close(); }
