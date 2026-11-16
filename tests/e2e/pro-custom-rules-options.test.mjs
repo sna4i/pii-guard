@@ -1,5 +1,5 @@
 // tests/e2e/pro-custom-rules-options.test.mjs — 設定画面の Pro のカスタムルールのカード
-// (Pro Phase 2 の設計 (P1)、T-CR-41〜45・47〜51・56。T-CR-46 は ID が仮の版が要るので別のファイル)
+// (Pro Phase 2 の設計 (P1)、T-CR-41〜45・47〜51・56・57。T-CR-46 は ID が仮の版が要るので別のファイル)
 //
 // 土台は tests/fixtures/pro-ext.mjs の launchPro (拡張機能の写し + 模擬の ExtensionPay。入れた直後はお試しの Pro)。
 // 設定画面 (options.html) を開き、フォームの入力・一覧・読み込み・書き出しを、ふつうの利用者と同じように操作する。
@@ -582,4 +582,48 @@ test("T-CR-56 編集の保存: 確かめ (Worker) を待つあいだに別の画
     assert.deepEqual((await savedRules()).rules, changed, "別の画面の変更が残り、同じ id のルールが新しく足されない");
     assert.deepEqual(p.__errors, [], "ページのエラーは無い");
   } finally { await p.close(); }
+});
+
+test("T-CR-57 カードの部品 (options-custom-rules.js の apply・init) が投げても、設定画面のほかの部分と Pro のカード (#pro-card) は動く。投げたカードは隠す", async () => {
+  await setRules([WORDS_RULE]);
+  // 部品の中の思わぬ失敗を真似る: init と apply の両方が投げる / apply だけが投げる (init はふつうに配線する)
+  for (const failing of [["init", "apply"], ["apply"]]) {
+    const p = await h.ctx.newPage();
+    p.__errors = [];
+    p.on("pageerror", (e) => p.__errors.push(String((e && e.stack) || e)));
+    await p.addInitScript((names) => {
+      let card;
+      Object.defineProperty(window, "PiiGuardCustomRules", {
+        configurable: true,
+        get: () => card,
+        set: (real) => {
+          card = { ...real };
+          for (const name of names) card[name] = () => { throw new Error(`card ${name} failed`); };
+        },
+      });
+    }, failing);
+    try {
+      await p.goto(`chrome-extension://${h.extId}/options.html`);
+      // Pro のカードに今のプランが出る (購入状態の出し分けが最後まで走る)
+      await p.waitForFunction(() => {
+        const card = document.getElementById("pro-card");
+        const status = document.getElementById("pro-status");
+        return !!card && !card.hidden && !!status && status.textContent.trim() !== "";
+      }, null, { timeout: 8000 });
+      assert.equal(await p.evaluate(() => document.getElementById("custom-rules-card").hidden), true, `投げたカードは隠す (${failing})`);
+      // 無料版の設定も動く (init のあとの配線が走っている): 除外リストに足せる
+      await p.fill("#allowlist-input", "山田商事");
+      await p.click("#allowlist-add-btn");
+      await waitStored(async () => ((await h.getStorage(["maskAllowlist"])).maskAllowlist || []).includes("山田商事"));
+      // 購入状態を確かめ直して出し直しても (購入状態の更新の口)、カードは隠れたまま、Pro のカードは出たまま
+      await p.evaluate(() => document.getElementById("pro-refresh").click());
+      await sleep(500);
+      assert.equal(await p.evaluate(() => document.getElementById("custom-rules-card").hidden), true);
+      assert.equal(await p.evaluate(() => document.getElementById("pro-card").hidden), false);
+      assert.deepEqual(p.__errors, [], `ページのエラーは無い (カードの例外は継ぎ目で受け止める: ${failing})`);
+    } finally {
+      await p.close();
+      await h.setStorage({ maskAllowlist: [] });
+    }
+  }
 });

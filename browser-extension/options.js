@@ -786,12 +786,28 @@ async function loadLlmSettings() {
 
 
 // ---- Pro 版 (docs/pro-license.md の F-PRO-07、D-PRO-05) ------------------------------
+// カスタムルールのカード (options-custom-rules.js) との継ぎ目 (apply と init)。カードの部品が投げても、無料版の設定と
+// #pro-card は動かし続ける: 例外はここで受け止め、動作ログに残し、カードを隠す (操作の配線が途中のカードを見せない)。
+// 一度投げたら、このページを開き直すまでカードには触らない
+let customRulesFailed = false;
+function callCustomRules(fn) {
+  if (customRulesFailed || !window.PiiGuardCustomRules) return;
+  try {
+    fn(window.PiiGuardCustomRules);
+  } catch (e) {
+    customRulesFailed = true;
+    const card = $("custom-rules-card");
+    if (card) card.hidden = true;
+    if (window.PiiGuardDiagLog) PiiGuardDiagLog.log("error", PiiGuardDiagLog.errorFields(e, "options"));
+  }
+}
+
 // 状態は Service Worker のライセンス管理に聞く。支払いの直後は自動では届かないので (extensionpay.com に
 // content script を置いていない)、「購入状態を更新」で確かめ直す
 function renderProLicense(state) {
   const v = window.PiiGuardLicenseView.describeLicense(state);
   // カスタムルールのカード (options-custom-rules.js) も、同じ答えで出し分ける
-  if (window.PiiGuardCustomRules) window.PiiGuardCustomRules.apply(v.visible, !!state && state.pro === true);
+  callCustomRules((card) => card.apply(v.visible, !!state && state.pro === true));
   $("pro-card").hidden = !v.visible;
   if (!v.visible) return;
   const st = $("pro-status");
@@ -837,7 +853,7 @@ document.addEventListener("DOMContentLoaded", () => {
   loadUiMode();
   loadLlmSettings();
   loadMlSettings();
-  if (window.PiiGuardCustomRules) window.PiiGuardCustomRules.init();
+  callCustomRules((card) => card.init());
   loadProLicense(false);
 
   $("pro-upgrade").addEventListener("click", () => openProPage("license:openPayment"));
