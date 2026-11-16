@@ -37,6 +37,81 @@
         </div>
       </section>
 
+      <!-- Pro のカスタムルール (Pro Phase 2 の設計 (P1))。出し方は #pro-card と同じ (options.js の renderProLicense から):
+           ExtensionPay に登録する前 (ID が仮) は、まるごと出さない。Pro でないときは案内を出して、操作を止める。
+           一覧・エラー・結果は options.js が textContent だけで組む。確かめは options-rules-worker.js (Worker) で走る -->
+      <section class="card" id="custom-rules-card" hidden>
+        <h2>カスタムルール</h2>
+        <p class="hint">自社の ID・プロジェクト名・顧客名など、ふつうの検出では拾えない語を、単語リストか正規表現で足せます。当たった部分は、伏せ字の名前が PROJECT なら &lt;PROJECT_1&gt; のように置き換わります。ルールはこの端末の中だけに保存し、外には送りません。</p>
+        <p id="cr-pro-note" class="pro-note" hidden>カスタムルールは Pro の機能です</p>
+        <p class="hint">カスタムルールを使っているあいだは、LLM の置き換えモードは使わず、いつもの伏せ方で送ります</p>
+
+        <div class="list-header">
+          <span>登録済みのルール</span>
+          <span id="cr-count" class="count-badge">0 / 50 件</span>
+        </div>
+        <div id="cr-list" class="entries-list"></div>
+
+        <h3 id="cr-form-title" class="cr-subtitle">ルールを追加</h3>
+        <div class="form-row cr-field">
+          <label class="form-label" for="cr-kind">種類</label>
+          <select id="cr-kind" class="cr-input">
+            <option value="words">単語リスト</option>
+            <option value="regex">正規表現</option>
+          </select>
+        </div>
+        <div class="form-row cr-field">
+          <label class="form-label" for="cr-label">伏せ字の名前</label>
+          <input type="text" id="cr-label" class="cr-input cr-mono" placeholder="CUSTOM" maxlength="32" autocomplete="off" spellcheck="false" />
+          <small class="hint-inline">英大文字で始め、英大文字・数字・_ だけで 32 文字までです。空なら CUSTOM になります</small>
+        </div>
+        <div id="cr-regex-fields" hidden>
+          <div class="form-row cr-field">
+            <label class="form-label" for="cr-pattern">正規表現</label>
+            <input type="text" id="cr-pattern" class="cr-input cr-mono" placeholder="例: ACME-\d{4}" autocomplete="off" spellcheck="false" />
+            <small class="hint-inline">200 文字までです。本文は、全角の英数字を半角に直してから照合します</small>
+          </div>
+          <div class="form-row">
+            <label class="form-label" for="cr-ignore-case">大文字と小文字を区別しない</label>
+            <input type="checkbox" id="cr-ignore-case" />
+          </div>
+        </div>
+        <div id="cr-words-fields">
+          <div class="form-row cr-field">
+            <label class="form-label" for="cr-words">語 (1 行に 1 つ)</label>
+            <textarea id="cr-words" class="cr-input cr-mono" rows="5" placeholder="例: アルファ計画" spellcheck="false"></textarea>
+            <small class="hint-inline">500 語まで、1 語 100 文字までです。ACME と書けば、本文の全角の ＡＣＭＥ にも当たります</small>
+          </div>
+          <div class="form-row cr-field">
+            <label class="form-label" for="cr-match">一致のしかた</label>
+            <select id="cr-match" class="cr-input">
+              <option value="exact">完全一致</option>
+              <option value="partial">部分一致</option>
+            </select>
+            <small class="hint-inline">完全一致は、語の前後が、記号・空白・文の端か、別の種類の文字 (英数字・ひらがな・カタカナ・漢字) のときだけ当たります。「アルファ計画は」には当たり、「アルファ計画書」には当たりません。部分一致は、どこにあっても当たります</small>
+          </div>
+          <p id="cr-advice" class="cr-advice" hidden></p>
+        </div>
+
+        <div id="cr-errors" class="cr-errors" role="alert"></div>
+        <p id="cr-status" class="hint cr-status" role="status"></p>
+        <div class="bulk-actions">
+          <button id="cr-save" type="button" class="btn-primary">保存</button>
+          <button id="cr-cancel" type="button" class="btn-secondary" hidden>編集をやめる</button>
+        </div>
+
+        <h3 class="cr-subtitle">書き出しと読み込み</h3>
+        <div class="bulk-actions">
+          <button id="cr-export" type="button" class="btn-secondary">JSON で書き出し</button>
+        </div>
+        <p id="cr-export-note" class="hint cr-note">書き出したファイルには、顧客名などが入ることがあります。扱いに気を付けてください</p>
+        <div class="form-row cr-field">
+          <label class="form-label" for="cr-import">JSON から読み込み (今のルールに足します)</label>
+          <input type="file" id="cr-import" class="cr-file" accept=".json,application/json" />
+        </div>
+        <div id="cr-import-result" class="cr-import-result" role="status"></div>
+      </section>
+
       <section class="card">
         <h2>マスキング除外リスト</h2>
         <p class="hint">
@@ -270,6 +345,7 @@
     <script src="diag-log.js"></script>
     <script src="tint.js"></script>
     <script src="license/license-view.js"></script>
+    <script src="engine/custom-rules.js"></script>
     <script src="options.js"></script>
   </body>
 </html>

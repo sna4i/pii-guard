@@ -561,3 +561,118 @@ main {
   font-size: 12.5px;
   line-height: 1.5;
 }
+
+/* Pro のカスタムルール (Pro Phase 2 の設計 (P1))。カードの見た目は今のカード (.card / .form-row / .hint / .entries-list) に合わせる */
+.cr-subtitle {
+  margin: 20px 0 4px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.cr-field {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+.cr-input {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--fg);
+  font: inherit;
+  font-size: 13px;
+}
+.cr-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.15);
+}
+.cr-mono, .cr-item-name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+textarea.cr-input { resize: vertical; min-height: 96px; }
+.cr-file { font: inherit; font-size: 13px; color: var(--fg); }
+.cr-file::file-selector-button {
+  margin-right: 10px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--fg);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+#custom-rules-card :disabled { opacity: 0.55; cursor: not-allowed; }
+#custom-rules-card .switch input:disabled + .slider { cursor: not-allowed; }
+
+/* 一覧 */
+.cr-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.cr-item:last-child { border-bottom: none; }
+.cr-item-main {
+  flex: 1 1 220px;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 10px;
+}
+.cr-item-name { font-weight: 600; font-size: 12.5px; word-break: break-all; }
+.cr-item-kind { color: var(--muted); font-size: 12px; }
+.cr-item-body { flex-basis: 100%; font-size: 12.5px; word-break: break-all; }
+.cr-item-body code {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--card-bg);
+  font-size: 12px;
+}
+.cr-item .btn-secondary, .cr-item .btn-danger { padding: 4px 10px; font-size: 12px; }
+.cr-unused {
+  flex-basis: 100%;
+  margin: 0;
+  padding: 6px 10px;
+  border-left: 3px solid var(--warn);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* 保存できない理由・案内・読み込みの結果。中身が空のときは、場所を取らない */
+.cr-errors, .cr-import-result { font-size: 12.5px; line-height: 1.5; }
+.cr-errors:not(:empty) {
+  margin: 12px 0 8px;
+  padding: 8px 12px;
+  border-left: 3px solid var(--err);
+  background: rgba(220, 38, 38, 0.08);
+}
+.cr-errors p, .cr-import-result p { margin: 0 0 4px; }
+.cr-errors p:last-child, .cr-import-result p:last-child { margin-bottom: 0; }
+.cr-error-hint { color: var(--muted); }
+.cr-errors code {
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--bg);
+  font-size: 12px;
+}
+.cr-advice {
+  margin: 4px 0 8px;
+  padding: 6px 10px;
+  border-left: 3px solid var(--warn);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+.cr-status { min-height: 1.5em; margin: 4px 0; }
+.cr-note { margin: 8px 0 12px; }
+.cr-import-result:not(:empty) {
+  margin-top: 8px;
+  padding: 8px 12px;
+  border-left: 3px solid var(--accent);
+  background: var(--bg);
+}
