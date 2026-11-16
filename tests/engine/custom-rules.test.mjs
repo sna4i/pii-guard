@@ -14,7 +14,18 @@ const {
   validateRule, isRiskyPattern, stressTest, compileRule, compileRules, exportRules, importRules,
 } = require("../../browser-extension/engine/custom-rules.js");
 
-// エンジンと同じに、組み立てた pattern を NFKC に直した文に当て、当たった文字列を文の順に返す
+// 見えない文字・全角の空白・ハイフン類は、文字そのものをファイルに書かず、コード番号から作る
+const fromCodes = (...codes) => String.fromCharCode(...codes);
+const ZWSP = fromCodes(0x200b); // ゼロ幅スペース
+const SOFT_HYPHEN = fromCodes(0x00ad);
+const BOM = fromCodes(0xfeff);
+const IDEOGRAPHIC_SPACE = fromCodes(0x3000); // 全角の空白
+// 数字に挟まれると、エンジンが - に直すハイフン類のうち、NFKC では変わらないもの (ー・U+2010・U+2012〜U+2015・U+2212)
+const DASHES = [0x30fc, 0x2010, 0x2012, 0x2013, 0x2014, 0x2015, 0x2212].map((c) => fromCodes(c));
+
+// エンジンと同じに、組み立てた pattern を NFKC に直した文に当て、当たった文字列を文の順に返す。
+// これは NFKC だけの近似。見えない文字・数字に挟まれたハイフン類・1 桁ずつ空白で区切った数字まで含めて、
+// エンジンの本文の形と合うかは、tests/engine/custom-rules-normalization.test.mjs が本物のエンジンで確かめる
 function hits(rule, text) {
   const compiled = compileRule(rule);
   assert.ok(compiled, `組み立てられるルールで試す: ${JSON.stringify(rule)}`);
@@ -83,6 +94,11 @@ test("T-CR-03 正規表現: 文法の誤り・空の文字に当たるもの (x*
   for (const empty of ["x*", "\\b", "^", "$", "a?", "(?:)", "(?=a)", "\\d*", "(ACME)?", "[A-Z]*", "\\B"]) {
     assert.ok(errorsOf(regex(empty)).some((m) => m.includes("空")), `空の文字に当たる: ${empty}`);
   }
+  // 文脈があるときだけ空に当たる形 (先読み・後読みだけ、後ろが省けるもの) も断る。
+  // エンジンは長さ 0 の当たりを飛ばして 1 文字進むので、何も伏せないルールになる
+  for (const context of ["(?=ACME)", "(?<=ID:)", "(?<=ACME-)\\d*", "(?=ACME)|ACME-\\d{4}"]) {
+    assert.ok(errorsOf(regex(context)).some((m) => m.includes("空")), `文脈があるときだけ空に当たる: ${context}`);
+  }
   // 中身のあるものと一緒に使う \b・^・$・先読みは通る。\p{...} も使える (エンジンの今のルールと同じ u フラグ)
   for (const fine of ["\\b\\d{4}\\b", "^ACME-\\d{4}$", "(?<![A-Za-z0-9])ACME(?![A-Za-z0-9])", "\\p{Script=Han}{2,4}さん"]) {
     assert.equal(validateRule(regex(fine)).ok, true, fine);
@@ -107,11 +123,13 @@ test("T-CR-04 危ない形を断る: (a+)+ / (a*)* / (\\w+\\s?)+ / (a|aa)* は t
     "(?:(?<!x)a|a)+",
     // 繰り返しも選択肢も無く見えても、中身が全部省けて空に当たりうる並びの繰り返し ("ab" の列で指数的に遅い)
     "(a?b?)+c",
+    // \p{...} で書いた文字の種類も、見本の文字 (アラビア・ヘブライ・タイ・ハングルなど) で、重なりを調べる
+    "(\\p{Script=Arabic}|\\p{L})+$", "(\\p{Script=Thai}|\\p{L})+x", "(\\p{Script=Thai}|[ก-๛])+x",
   ];
   const safe = [
     "ACME-\\d{4}", "[A-Z]{2,5}-\\d+", "\\d{3}-\\d{4}-\\d{4}", "(?:090|080|070)-\\d{4}-\\d{4}", "(株)?山田商事", "https?://[^\\s]+",
     "\\d{1,3}(,\\d{3})+", "(\\d{1,3}\\.){3}\\d{1,3}", "(?:a|b)+c", "(東京|大阪|名古屋)支社", "\\b\\d{4}\\b", "(?:\\d{3}-?){2,}",
-    "a|aa", "x(a|aa)?y", "((a|)b)+",
+    "a|aa", "x(a|aa)?y", "((a|)b)+", "(\\p{Script=Arabic}|\\p{Script=Hebrew})+x",
     // エスケープした括弧やクラスの中の + は、グループや繰り返しとして数えない
     "\\(\\d+\\)+", "([+-]\\d)+", "[(+*]+x",
   ];
@@ -131,7 +149,7 @@ test("T-CR-05 単語リスト: 空・501 語・101 文字の語は断る。500 �
   const words = (list, extra) => ({ kind: "words", words: list, match: "exact", ...extra });
   assert.ok(errorsOf(words([])).length >= 1, "空のリスト");
   assert.ok(errorsOf(words(["", "   ", "\t\n"])).length >= 1, "空白だけの行は語として数えない");
-  assert.ok(errorsOf(words(["\u200b", " \u00ad\ufeff "])).length >= 1, "見えない文字だけの行も、語として数えない (組み立てると空の語になる)");
+  assert.ok(errorsOf(words([ZWSP, ` ${SOFT_HYPHEN}${BOM} `])).length >= 1, "見えない文字だけの行も、語として数えない (組み立てると空の語になる)");
   assert.ok(errorsOf({ kind: "words", match: "exact" }).length >= 1, "words が無い");
   assert.ok(errorsOf(words([123])).length >= 1, "文字列でない語");
 
@@ -145,7 +163,7 @@ test("T-CR-05 単語リスト: 空・501 語・101 文字の語は断る。500 �
   assert.ok(errorsOf(words(["ﷺ".repeat(6)])).some((m) => m.includes("100")));
 
   // 前後の空白 (全角の空白を含む) と重複を取り除く。順番は最初に出てきた順
-  assert.deepEqual(ruleOf(words(["  アルファ計画 ", "アルファ計画", "山田商事", "\t山田商事\n", "\u3000ACME-1234\u3000"])).words, ["アルファ計画", "山田商事", "ACME-1234"]);
+  assert.deepEqual(ruleOf(words(["  アルファ計画 ", "アルファ計画", "山田商事", "\t山田商事\n", `${IDEOGRAPHIC_SPACE}ACME-1234${IDEOGRAPHIC_SPACE}`])).words, ["アルファ計画", "山田商事", "ACME-1234"]);
   // 語の途中の空白は残す
   assert.deepEqual(ruleOf(words(["山田 商事"])).words, ["山田 商事"]);
   // 重複を除いて 500 語に収まるなら通る
@@ -192,6 +210,15 @@ test("T-CR-06 完全一致の境界: 同じ種類の文字が続くなら当た�
   ];
   for (const [word, text, want] of cases) assert.deepEqual(hits(exact(word), text), want, `完全一致 ${word} / ${text}`);
 
+  // 先頭の文字の種類が違う語 (漢字・カタカナ・英数字・記号・ひらがな) を 1 つのリストに混ぜても、語ごとに自分の境界で当たる
+  const mixed = exact("山田商事", "アルファ計画", "ABC-123", "#アルファ", "さくら");
+  assert.deepEqual(hits(mixed, "山田商事、アルファ計画、ABC-123、x#アルファ、さくら"), ["山田商事", "アルファ計画", "ABC-123", "#アルファ", "さくら"]);
+  assert.deepEqual(hits(mixed, "株式会社山田商事 ベータアルファ計画 XABC-123 ABC-1234 アルファ計画書 山田商事株式会社 さくらさん"), []);
+  // 500 語でも、後読みは先頭の文字の種類ごとに 1 つだけ (語の数だけ置くと、長い本文で 10 倍ほど遅い)
+  const kinds = ["山", "ア", "A", "あ", "#"];
+  const big = compileRule(exact(...Array.from({ length: 500 }, (_, i) => `${kinds[i % 5]}${String(i).padStart(3, "0")}語`)));
+  assert.ok((big.pattern.source.match(/\(\?<!/g) || []).length <= 4, "後読みの数");
+
   // 部分一致はどこでも当たる
   assert.deepEqual(hits(partial("アルファ計画"), "アルファ計画書"), ["アルファ計画"]);
   assert.deepEqual(hits(partial("ABC-123"), "ABC-1234"), ["ABC-123"]);
@@ -205,6 +232,7 @@ test("T-CR-06 完全一致の境界: 同じ種類の文字が続くなら当た�
   // 正規表現の記号を含む語は、そのままの文字として当たる
   const symbols = "a.b*c(1)[x]{2}|d+e?f^g$h\\i";
   assert.deepEqual(hits(partial(symbols), `z ${symbols} z axb*c(1)[x]{2}|d+e?f^g$h\\i`), [symbols]);
+  assert.deepEqual(hits(exact(symbols), `z ${symbols} z axb*c(1)[x]{2}|d+e?f^g$h\\i`), [symbols]);
 });
 
 test("T-CR-07 全角の本文にも当たる (NFKC): 語 ACME-1234 と正規表現 ACME-\\d{4} が「ＡＣＭＥ－１２３４」に当たる", () => {
@@ -215,18 +243,37 @@ test("T-CR-07 全角の本文にも当たる (NFKC): 語 ACME-1234 と正規表�
   // 語のほうを全角で書いても当たる (語も NFKC に直して組み立てる)
   assert.deepEqual(hits(exact("ＡＣＭＥ－１２３４"), "ID: ACME-1234"), ["ACME-1234"]);
   // 語に見えない文字 (ゼロ幅スペース) が紛れていても当たる。エンジンは本文のほうの見えない文字を落とす
-  assert.deepEqual(hits(partial("アルファ\u200b計画"), "アルファ計画"), ["アルファ計画"]);
+  assert.deepEqual(hits(partial(`アルファ${ZWSP}計画`), "アルファ計画"), ["アルファ計画"]);
   // 見えない文字を落としたあとに端に残る空白は、語の一部にしない
-  assert.deepEqual(hits(partial("\u200b ABC"), "x ABC y"), ["ABC"]);
+  assert.deepEqual(hits(partial(`${ZWSP} ABC`), "x ABC y"), ["ABC"]);
 
   // 正規表現の元は、そのまま使う (語のようには直せない)。全角の英数字・半角のカナ・㈱・見えない文字のように、
   // 本文を NFKC に直すと形が変わる文字が入っていると、本文には決して当たらない。黙って効かないルールにせず、保存のときに断る
-  for (const bad of ["ＡＣＭＥ-\\d{4}", "ACME－\\d{4}", "ｱﾙﾌｧ計画", "㈱山田商事", "ACME\u200b-\\d{4}", "山田\u3000商事"]) {
+  for (const bad of ["ＡＣＭＥ-\\d{4}", "ACME－\\d{4}", "ｱﾙﾌｧ計画", "㈱山田商事", `ACME${ZWSP}-\\d{4}`, `山田${IDEOGRAPHIC_SPACE}商事`]) {
     assert.ok(errorsOf(regex(bad)).some((m) => m.includes("NFKC")), `NFKC で形が変わる文字: ${JSON.stringify(bad)}`);
   }
   // 本文の形 (半角) で書けば当たる。かなや漢字は NFKC で変わらないので、そのまま書ける
   assert.deepEqual(hits(regex("\\(株\\)山田商事"), "㈱山田商事"), ["(株)山田商事"]);
   assert.equal(validateRule(regex("山田商事(さん|様)")).ok, true);
+  // 文字クラスの中は、直した形がそのクラスにも入っていれば通す ([:：] の ： は、本文では : になり、: が入っている)。
+  // 全部が変わってしまうクラスや、クラスの外に書いた文字は、断る
+  for (const fine of ["社員番号[:：]\\s*\\d{3}", "[0-9０-９]{3}-\\d{4}", "[ＡA]CME-\\d{4}"]) assert.equal(validateRule(regex(fine)).ok, true, `通る形: ${fine}`);
+  for (const bad of ["[Ａ-Ｚ]+-\\d{4}", "社員番号[：]\\d{3}", "社員番号：\\d{3}", "[ｱ-ﾝ]+", "(ＡＣＭＥ)-\\d{4}"]) {
+    assert.ok(errorsOf(regex(bad)).some((m) => m.includes("NFKC")), `当たらない文字だけのクラス・クラスの外の文字: ${bad}`);
+  }
+
+  // 数字に挟まれたハイフン類 (ー ‐ ― − など) は、エンジンが - に直してから照合する。正規表現に書くと決して当たらないので断る
+  for (const d of DASHES) {
+    // (グループの前後・グループの中・グループの両端の数字も見る)
+    for (const bad of [`\\d{3}${d}\\d{4}`, `[0-9]+${d}[0-9]+`, `(\\d{3})${d}(\\d{4})`, `090${d}1234`, `\\d{3}(?:${d})\\d{4}`, `\\d{3}[${d}${DASHES[1]}]\\d{4}`,
+      `x(?:\\d{3}${d}\\d{4})`, `(?:[A-Z]\\d)${d}\\d{3}`, `\\d{3}${d}(?:\\d[A-Z])`]) {
+      assert.ok(errorsOf(regex(bad)).some((m) => m.includes("数字の間")), `数字の間のハイフン類: ${bad}`);
+    }
+    // 当たりうる形は通す: - で書く・- も含むクラス・省ける・前後が数字とは限らない・数字だけとは限らない
+    for (const fine of [`\\d{3}-\\d{4}`, `\\d{3}[-${d}]\\d{4}`, `\\d{3}${d}?\\d{4}`, `あ${d}\\d{4}`, `\\d{3}${d}あ`, `\\d{3}${d}[A-Z]{2}`, `\\d*${d}\\d+`, `[0-9A-Z]${d}[0-9A-Z]`, `\\w+${d}\\d+`]) {
+      assert.equal(validateRule(regex(fine)).ok, true, `通る形: ${fine}`);
+    }
+  }
 });
 
 test("T-CR-08 ignoreCase: true なら acme-1234 にも当たり、false なら当たらない", () => {
@@ -276,32 +323,54 @@ test("T-CR-10 stressTest: 危ない形を通り抜けた遅い正規表現は ok
   assert.deepEqual(stressTest(re, undefined, slow), { ok: false, ms: 60 });
   // ずっと 0 を返す時計なら、いくら試しても 0 ミリ秒
   assert.deepEqual(stressTest(re, undefined, () => 0), { ok: true, ms: 0 });
-  // 上限の既定は 50 ミリ秒ちょうど (50 ずつ進むなら通り、超える 51 ずつ進むなら通らない)。引数で変えられる
+  // 50 ミリ秒は、ルール 1 本ぶん (試し全部の合計)。1 回ごとは 10 ミリ秒でも、6 回で 60 になれば通らない
   const stepper = (step) => { let t = -step; return () => (t += step); };
-  assert.deepEqual(stressTest(re, undefined, stepper(50)), { ok: true, ms: 50 }, "ms は、いちばん遅かった 1 本の時間");
-  assert.equal(stressTest(re, undefined, stepper(51)).ok, false);
-  assert.equal(stressTest(re, 100, stepper(60)).ok, true);
-  assert.equal(stressTest(re, 10, stepper(40)).ok, false);
+  assert.deepEqual(stressTest(re, undefined, stepper(10)), { ok: false, ms: 60 });
+  // 1 回目だけが重く、あとは 0 の時計: 合計がちょうど 50 なら通り、51 なら通らない。上限は引数で変えられる
+  const firstOnly = (ms) => { let n = 0; return () => (n++ < 1 ? 0 : ms); };
+  assert.deepEqual(stressTest(re, undefined, firstOnly(50)), { ok: true, ms: 50 }, "ms は、試し全部の合計");
+  assert.equal(stressTest(re, undefined, firstOnly(51)).ok, false);
+  assert.equal(stressTest(re, 100, firstOnly(60)).ok, true);
+  assert.equal(stressTest(re, 10, firstOnly(40)).ok, false);
   // 渡した正規表現の状態 (lastIndex) を変えない
   re.lastIndex = 7;
   stressTest(re, undefined, () => 0);
   assert.equal(re.lastIndex, 7);
   // 空の文字に当たる正規表現を渡しても、止まらずに終わる (長さ 0 の当たりで 1 つ進める)
   assert.equal(stressTest(/x*/gu, undefined, () => 0).ok, true);
+  // 試す回数 (時計を呼んだ回数の半分)。合計で上限を見るので、同じ動きをする文字は 1 つだけ試し、広い文字の種類に当たる文字を
+  // 何本も足し合わせない。普通に書いた文字は 4 つまで。区切りの記号は試さず、パターンの文字に当たらない決まった文字は 1 つ試す。
+  // \b があるときは、単語を作る文字かどうかも分ける。1 つの動きにつき、改行の有無 2 通り × 長さの段 5 つ = 10 回
+  const probesOf = (source) => {
+    let calls = 0;
+    stressTest(compileRule(regex(source)).pattern, undefined, () => { calls += 1; return 0; });
+    return calls / 2;
+  };
+  const sNoBoundary = probesOf("\\S+@\\S+"); // \S に当たる文字と当たらない文字 (空白) の 2 通り
+  assert.ok(sNoBoundary >= 15 && sNoBoundary <= 40, `\\S+@\\S+: ${sNoBoundary}`);
+  const literals = probesOf("[a-z]+abcdefghij"); // 書かれた文字は a b c d の 4 つまで
+  assert.ok(literals >= 40 && literals <= 70, `[a-z]+abcdefghij: ${literals}`);
+  assert.ok(probesOf("@+@+@+x") >= 15, "書かれた文字に当たらない決まった文字も試す");
+  assert.ok(probesOf("\\b\\S+\\b") > probesOf("\\S+"), "\\b があると、単語を作る文字とそうでない文字を分ける");
   // 本物の時計で、速い形は通り、時間は数で返る
   const real = stressTest(re, 5000);
   assert.equal(real.ok, true);
   assert.equal(typeof real.ms, "number");
   // 本物の遅い形: 入れ子も重なる選択肢も無い (isRiskyPattern は通す) が、同じ文字の長い列で 3 乗の時間がかかる。
-  // \w+\s*\w+@ は a の列で、x*x*x*y はパターンに書かれた x の列で遅くなる (試す文字に、パターンの中の文字を足してある)
-  for (const cubic of ["\\w+\\s*\\w+@", "x*x*x*y"]) {
+  // \w+\s*\w+@ は a の列で、x*x*x*y はパターンに書かれた x の列で、\p{Script=Hangul} はハングルの列で遅くなる
+  // (試す文字に、パターンの中の文字と、\p{...} などの文字の種類に当たる文字を足してある)
+  for (const cubic of ["\\w+\\s*\\w+@", "x*x*x*y", "\\p{Script=Hangul}+\\p{Script=Hangul}+\\p{Script=Hangul}+x"]) {
     assert.equal(validateRule(regex(cubic)).ok, true, cubic);
     const slowReal = stressTest(compileRule(regex(cubic)).pattern);
     assert.equal(slowReal.ok, false, cubic);
     assert.ok(slowReal.ms > 50, `${cubic} ms: ${slowReal.ms}`);
   }
-  // 2 乗で済む形 ([A-Z]+-\d+) は通る
-  assert.equal(stressTest(compileRule(regex("[A-Z]+-\\d+")).pattern).ok, true);
+  // 2 乗で済む形は通る。合計で見るので、広い文字の種類 (\S ・ . ・ \p{L}) を使う、ふつうの形が断られないことも確かめる
+  // (同じ動きをする文字は 1 つだけ試す。パターンに書かれた記号 @ や . だけの長い列は試さない)
+  for (const common of ["[A-Z]+-\\d+", "\\S+@\\S+", ".*ERROR.*", "\\p{L}+\\s\\p{L}+", "[^\\s]+@[^\\s]+\\.[a-z]+", "[a-z0-9-]+\\.internal\\.example\\.test", "[\\w.+-]+@example\\.test", "\\S+\\s*=\\s*\\S+"]) {
+    const result = stressTest(compileRule(regex(common)).pattern);
+    assert.equal(result.ok, true, `${common} ms: ${result.ms}`);
+  }
 });
 
 test("T-CR-11 書き出しと読み込みの往復で同じルールに戻る。形と版は format/version", () => {

@@ -1,10 +1,10 @@
-// engine/custom-rules.js — Pro 版のカスタムルール (Pro Phase 2 の設計 (P1)、T-CR-01〜13)
+// engine/custom-rules.js — Pro 版のカスタムルール (Pro Phase 2 の設計 (P1)、T-CR-01〜14)
 //
 // 利用者が足す「正規表現」と「単語リスト」のルールを、確かめ、エンジンが当てられる形に組み立てる。
 // 純粋な関数だけの部品 (node のテストからも、設定画面からも、エンジンからも読む)。
 //   validateRule    1 件のルールを確かめる。保存と読み込みで同じ決まりを使う。理由は日本語
 //   isRiskyPattern  時間を食いやすい形か (繰り返しの中の繰り返し、重なる選択肢の繰り返し)
-//   stressTest      長い意地悪な文に当てて、1 回の照合が上限を超えないか測る
+//   stressTest      長い意地悪な文に当てて、そのルールの試し全部で上限を超えないか測る
 //   compileRule(s)  pro-rules.js と同じ { entity_type, pattern } に、止める単位 category を足した形に組み立てる
 //   exportRules / importRules  JSON の書き出しと読み込み
 //
@@ -12,7 +12,7 @@
 // 固まるのを防げない。保存と読み込みのときの 2 つの確かめ (isRiskyPattern と stressTest) で、
 // 遅い形をそもそもルールに入れない。
 //
-// 照合は NFKC に直した文に対して行う (engine/engine.js の matchPatterns)。語も同じ形に直して組み立てる。
+// 照合は、エンジンが整えた本文 (engine/engine.js の nfkcWithMap) に対して行う。語も同じ形に直して組み立てる。
 // 完全一致の境界 (語の前後の文字の種類) は、エンジンの validate には隣の文字が渡らないので、
 // 組み立てる正規表現の中に先読み・後読みで書く。
 "use strict";
@@ -37,16 +37,51 @@
   }
 
   // ---- エンジンが当てる本文の形にそろえる -------------------------------------------------
-  // 本文は NFKC (全角の英数字・半角のカタカナなど) に直され、見えない文字 (ソフトハイフン・ゼロ幅スペースなど・
-  // 単語結合子・BOM。Web や PDF からの貼り付けで紛れ込む) は落とされてから照合される。
-  // 語は、この形に直して組み立てる。正規表現の元は、記号の意味が変わるので直せない (保存のときに断る)
-  const INVISIBLE_RE = /[\u00ad\u200b-\u200d\u2060\ufeff]/g;
+  // engine/engine.js の nfkcWithMap と同じ決まりで、語を直す。ずれると、語が本文に黙って当たらなくなる
+  // (ずれは tests/engine/custom-rules-normalization.test.mjs が、本物のエンジンを通して見つける)。
+  //   - NFKC に直す (全角の英数字・半角のカナなど)
+  //   - 見えない文字 (ソフトハイフン・ゼロ幅スペースなど・単語結合子・BOM。Web や PDF からの貼り付けで紛れ込む) を落とす
+  //   - 数字に挟まれたハイフン類を - に直す
+  //   - 1 桁ずつ空白で区切った数字 (OCR や PDF の貼り付け) の空白を落とす
+  // 正規表現の元は、記号の意味が変わるので直せない。この形と違う文字を書いていたら、保存のときに断る。
+  // 見えない文字・全角の空白・ハイフン類は、文字そのものをファイルに書かず、コード番号から作る
+  const fromCodes = (...codes) => String.fromCharCode(...codes);
+  const INVISIBLE_RE = new RegExp(`[${fromCodes(0x00ad, 0x200b)}-${fromCodes(0x200d)}${fromCodes(0x2060, 0xfeff)}]`, "g");
+  // 数字に挟まれたとき、エンジンが - に直すハイフン類: ー (30FC)、‐ ‑ ‒ – — ― (2010〜2015)、− (2212)、﹣ (FE63)
+  const DASHES = fromCodes(0x30fc, 0x2010, 0x2011, 0x2012, 0x2013, 0x2014, 0x2015, 0x2212, 0xfe63);
+  const FULLWIDTH_HYPHEN = fromCodes(0xff0d);
+  const IDEOGRAPHIC_SPACE = fromCodes(0x3000);
+  const FULLWIDTH_DIGITS = `${fromCodes(0xff10)}-${fromCodes(0xff19)}`;
+  const DIGIT_DASH_RE = new RegExp(`(?<=[0-9])[${DASHES}](?=[0-9])`, "g");
+  const SPACED_DIGITS_RE = new RegExp(`(?<![0-9${FULLWIDTH_DIGITS}])[0-9${FULLWIDTH_DIGITS}](?:[ ${IDEOGRAPHIC_SPACE}][0-9${FULLWIDTH_DIGITS}])+(?![0-9${FULLWIDTH_DIGITS}])`, "g");
+  const DIGIT_SPACE_DIGIT_RE = new RegExp(`[0-9${FULLWIDTH_DIGITS}][ ${IDEOGRAPHIC_SPACE}][0-9${FULLWIDTH_DIGITS}]`);
+  const DASH_AFTER_RE = new RegExp(`^[-${FULLWIDTH_HYPHEN}${DASHES}]\\s?[0-9${FULLWIDTH_DIGITS}]`);
+  const DASH_BEFORE_RE = new RegExp(`[0-9${FULLWIDTH_DIGITS}]\\s?[-${FULLWIDTH_HYPHEN}${DASHES}]$`);
+
+  // 1 桁の数字が 1 つの空白で並ぶ並びは、3 桁以上か、ハイフン類で次の数字のかたまりにつながるときだけ、空白を落とす
+  // (エンジンの spacedDigitGaps と同じ。「1 2」のような 2 桁までの並びは、そのまま)
+  function dropDigitSpaces(text) {
+    if (!DIGIT_SPACE_DIGIT_RE.test(text)) return text;
+    const drop = new Set();
+    for (const m of text.matchAll(SPACED_DIGITS_RE)) {
+      const end = m.index + m[0].length;
+      const joined = DASH_AFTER_RE.test(text.slice(end, end + 3)) || DASH_BEFORE_RE.test(text.slice(Math.max(0, m.index - 3), m.index));
+      if ((m[0].length + 1) / 2 < 3 && !joined) continue;
+      for (let k = 1; k < m[0].length; k += 2) drop.add(m.index + k); // 数字と数字の間の空白
+    }
+    if (drop.size === 0) return text;
+    let out = "";
+    for (let i = 0; i < text.length; i++) if (!drop.has(i)) out += text[i];
+    return out;
+  }
   const toEngineForm = (s) => s.normalize("NFKC").replace(INVISIBLE_RE, "");
-  const normalizeWord = (word) => toEngineForm(word).trim();
+  const normalizeWord = (word) => toEngineForm(dropDigitSpaces(word)).replace(DIGIT_DASH_RE, "-").trim();
 
   // ---- 検査 ---------------------------------------------------------------------------
   const LABEL_MESSAGE = "伏せ字の名前は英大文字で始め、英大文字・数字・_ だけで 32 文字までにしてください";
   const NFKC_MESSAGE = "本文は NFKC (全角の英数字を半角に直すなど) で整えてから照合するため、全角の英数字・記号、半角のカナ、㈱、見えない文字は、正規表現に入れても当たりません。整えたあとの形で書いてください (ＡＣＭＥ は ACME、㈱ は \\(株\\))";
+  const DASH_MESSAGE = "数字と数字の間のハイフン類 (ー ‐ ― − など) は、本文では - に直されてから照合するため、正規表現に入れても当たりません。数字の間は - と書いてください";
+  const EMPTY_MESSAGE = "空の文字にも当たる形は使えません (x* ・ \\b ・ ^ ・ (?=ID) など)。何かの文字に必ず当たる形にしてください";
   // 空の文字に当たるかを調べる短い文。幅 0 で当たるもの (\b ・ ^ ・ 先読み) も、どれかで長さ 0 の当たりになる
   const EMPTY_SAMPLES = ["", "a", "A", "0", " ", "-", "_", "\n", "あ", "ア", "漢", "aA0 -_\nあア漢"];
 
@@ -55,6 +90,9 @@
       for (const m of sample.matchAll(re)) if (m[0] === "") return true;
     }
     return false;
+  }
+  function parseOrNull(source) {
+    try { return parseSource(source); } catch (_) { return null; }
   }
 
   function checkRegex(input, errors) {
@@ -68,14 +106,17 @@
     } else if (pattern.length > LIMITS.maxPatternLength) {
       errors.push(`正規表現は ${LIMITS.maxPatternLength} 文字までにしてください (今は ${pattern.length} 文字です)`);
     } else {
+      const alts = parseOrNull(pattern);
       // 本文の形に直すと変わる文字があると、その部分は本文に決して当たらない。黙って効かないルールにしない
-      if (toEngineForm(pattern) !== pattern) errors.push(NFKC_MESSAGE);
+      if (alts === null ? toEngineForm(pattern) !== pattern : hasDeadChars(alts)) errors.push(NFKC_MESSAGE);
       let re = null;
       try { re = new RegExp(pattern, ignoreCase === true ? "giu" : "gu"); } catch (_) {
         errors.push("正規表現として正しくありません。括弧や [ ] の閉じ忘れ、不要な \\ (バックスラッシュ) がないか確かめてください");
       }
       if (re) {
-        if (matchesEmpty(re)) errors.push("空の文字にも当たる形は使えません (x* ・ \\b ・ ^ など)。何かの文字に必ず当たる形にしてください");
+        // 見本の文での試しに加えて、構文の上でも見る: 先読み・後読みだけ、後ろが省けるものは、文脈があるときだけ空に当たる
+        if (matchesEmpty(re) || (alts !== null && alts.some(seqNullable))) errors.push(EMPTY_MESSAGE);
+        if (alts !== null && hasDeadDash(alts)) errors.push(DASH_MESSAGE);
         if (isRiskyPattern(pattern)) errors.push("時間がかかりやすい形です。繰り返しの中の繰り返し ((a+)+ など) や、重なる選択肢の繰り返し ((a|aa)* など) は使えません");
       }
     }
@@ -143,11 +184,29 @@
     return { ok: true, rule: { id, label, kind, enabled, ...body } };
   }
 
+  // ---- 見本の文字 ---------------------------------------------------------------------
+  // 1 文字用の正規表現同士が、同じ文字に当たりうるかを見る (重なる選択肢、数字・ハイフン類の見分け) のと、
+  // stressTest で試す文字を、文字の種類 (\p{Script=…} や [ก-๛] など) から選ぶのに使う。文字の種類ごとに 1 字ずつ
+  const SAMPLES = [
+    ...Array.from({ length: 95 }, (_, k) => String.fromCharCode(32 + k)), // 半角の英数字・記号
+    "\t", "\n", "\r", fromCodes(0x00a0), fromCodes(0x2003), IDEOGRAPHIC_SPACE, // 空白の仲間
+    "あ", "い", "ん", "ぁ", "ア", "イ", "ン", "ー", "漢", "字", "一", "龥", "々", "。", "、", "・", "（",
+    "Ａ", "ａ", "０", "ｱ", "㈱", // 全角・半角のかな・英数字 (NFKC で形が変わる)
+    "é", "ü", "ß", "α", "я", // ラテン拡張・ギリシャ・キリル
+    "ա", "א", "ا", "ܐ", "ހ", // アルメニア・ヘブライ・アラビア・シリア・ターナ
+    "क", "ক", "ਕ", "ક", "କ", "க", "క", "ಕ", "ക", "ක", // デーヴァナーガリー・ベンガル・グルムキー・グジャラーティー・オリヤー・タミル・テルグ・カンナダ・マラヤーラム・シンハラ
+    "ก", "ກ", "ཀ", "က", "ა", "한", "አ", "ក", "ᠠ", "Ꭰ", "ㄅ", // タイ・ラオ・チベット・ミャンマー・ジョージア・ハングル・エチオピア・クメール・モンゴル・チェロキー・注音
+    "٣", "३", "３", // アラビア・デーヴァナーガリー・全角の数字
+    "—", "…", "“", "€", "©", "°", "→", "∑", "＋",
+    "😀", "𠮷",
+  ];
+
   // ---- isRiskyPattern: 時間を食いやすい形 -----------------------------------------------
   // 正規表現の元の文字列を小さな構文木にして調べる。文字列の見た目だけで数えると、エスケープした括弧
   // (\(…\)) や、文字クラスの中の + * を、グループや繰り返しと取り違えるため。
   //   項目     { node, min, max }   max が Infinity なら上限なしの繰り返し
-  //   node     { t: "char", src }   1 文字に当たるもの (文字・\d・[A-Z]・. など)。src はその 1 文字だけの正規表現
+  //   node     { t: "char", src, lit? }   1 文字に当たるもの (文字・\d・[A-Z]・. など)。src はその 1 文字だけの正規表現。
+  //                                       lit は、普通に書いた 1 文字のとき、その文字
   //            { t: "zero" }        幅 0 のもの (^ $ \b \B)
   //            { t: "ref" }         後方参照 (中身は分からない)
   //            { t: "group", look, alts }   丸括弧。look は先読み・後読み。alts は選択肢ごとの項目の並び
@@ -178,7 +237,7 @@
       i += cp.length;
       if (c === "^" || c === "$") return { t: "zero" };
       if (c === ".") return { t: "char", src: "." };
-      return { t: "char", src: escapeLiteral(cp) };
+      return { t: "char", src: escapeLiteral(cp), lit: cp };
     }
     function parseClass() {
       let j = i + 1;
@@ -265,24 +324,30 @@
     return { srcs: [], open: false, nullable: true };
   }
 
-  // 2 つの「1 文字用の正規表現」が、同じ文字に当たりうるか。見本の文字で確かめる (大文字小文字は区別しない側に倒す)
-  const SAMPLE_BASE = [..."\t\n\r", ...Array.from({ length: 95 }, (_, k) => String.fromCharCode(32 + k)),
-    "あ", "い", "ん", "ぁ", "ア", "イ", "ン", "ー", "漢", "字", "一", "龥", "々", "é", "ü", "α", "я", "한", "。", "、", "\u3000"];
+  // 2 つの「1 文字用の正規表現」が、同じ文字に当たりうるか。見本の文字で確かめる (大文字小文字は区別しない側に倒す)。
+  // 見本は、決まった一覧と、パターンに書かれた文字 (範囲の端など)
   function makeSharer(source) {
-    const samples = [...new Set([...SAMPLE_BASE, ...source])];
-    const compiled = new Map();
-    const matcher = (src) => {
-      if (!compiled.has(src)) {
-        try { compiled.set(src, new RegExp(`^(?:${src})$`, "iu")); } catch (_) { compiled.set(src, null); }
+    const samples = [...new Set([...SAMPLES, ...source])];
+    const cache = new Map();
+    const hitsOf = (src) => {
+      if (!cache.has(src)) {
+        let hits = null;
+        try {
+          const re = new RegExp(`^(?:${src})$`, "iu");
+          hits = new Set();
+          samples.forEach((c, k) => { if (re.test(c)) hits.add(k); });
+        } catch (_) { hits = null; }
+        cache.set(src, hits);
       }
-      return compiled.get(src);
+      return cache.get(src);
     };
     return (a, b) => {
       if (a === b) return true;
-      const ra = matcher(a);
-      const rb = matcher(b);
-      if (!ra || !rb) return true; // 読めないものは、重なるとみなす
-      return samples.some((c) => ra.test(c) && rb.test(c));
+      const ha = hitsOf(a);
+      const hb = hitsOf(b);
+      if (!ha || !hb) return true; // 読めないものは、重なるとみなす
+      for (const k of ha) if (hb.has(k)) return true;
+      return false;
     };
   }
   function altsOverlap(alts, shares) {
@@ -328,22 +393,121 @@
     }
   }
 
+  // ---- 本文の形に直すと変わる文字 ---------------------------------------------------------
+  // 全角の英数字・半角のカナ・㈱・見えない文字などは、本文では別の文字に直されているので、正規表現に書いても当たらない。
+  // 普通に書いた文字は、直ると変わるものを見つける。文字クラスの中は、変わる文字の直した形 (: など) がそのクラスにも入っていれば、
+  // 差し支えない ([:：] の ： は、本文では : になり、: が入っている)。[Ａ-Ｚ] のように、直した形が入らないクラスは見つける
+  function classHasDeadMember(src) {
+    const re = matcherOf(src);
+    for (const c of src) {
+      const n = toEngineForm(c);
+      if (n !== c && !(re !== null && re.test(n))) return true;
+    }
+    return false;
+  }
+  const hasDeadChars = (alts) => alts.some((seq) => seq.some((it) => {
+    const n = it.node;
+    if (n.t === "group") return hasDeadChars(n.alts);
+    if (n.t !== "char") return false;
+    if (n.lit !== undefined) return toEngineForm(n.lit) !== n.lit;
+    return n.src[0] === "[" ? classHasDeadMember(n.src) : toEngineForm(n.src) !== n.src;
+  }));
+
+  // ---- 数字に挟まれたハイフン類 ---------------------------------------------------------
+  // 数字と数字に挟まれたハイフン類 (ー ‐ ― − など) は、本文では - に直されている。正規表現に書くと、決して当たらない。
+  // 挟む両側が、必ず数字 (\d・[0-9]・数字の 1 文字・それだけでできたグループ) で、ハイフン類のほうも省けないときだけ見つける
+  // (前が数字とは限らない形や、- も含むクラスは、当たりうるので通す)。
+  const matcherOf = (src) => {
+    try { return new RegExp(`^(?:${src})$`, "u"); } catch (_) { return null; }
+  };
+  function onlyDashes(src) {
+    const re = matcherOf(src);
+    return re !== null && [...DASHES].some((c) => re.test(c)) && !SAMPLES.some((c) => !DASHES.includes(c) && re.test(c));
+  }
+  function digitOnly(src) {
+    const re = matcherOf(src);
+    if (re === null) return false;
+    const matched = SAMPLES.filter((c) => re.test(c));
+    return matched.some((c) => c >= "0" && c <= "9") && matched.every((c) => /^\p{Nd}$/u.test(c));
+  }
+  function deadDashNode(node) {
+    if (node.t === "char") return onlyDashes(node.src);
+    if (node.t === "group" && !node.look) return node.alts.every((seq) => seq.length === 1 && seq[0].min >= 1 && deadDashNode(seq[0].node));
+    return false;
+  }
+  // node の最後 (last が true) か最初の 1 文字が、必ず数字か
+  function digitEdge(node, last) {
+    if (node.t === "char") return digitOnly(node.src);
+    if (node.t === "group" && !node.look) {
+      return node.alts.every((seq) => {
+        const it = last ? seq[seq.length - 1] : seq[0];
+        return it !== undefined && it.min >= 1 && digitEdge(it.node, last);
+      });
+    }
+    return false;
+  }
+  const hasDeadDash = (alts) => alts.some((seq) => seq.some((it, i) => {
+    if (it.node.t === "group" && hasDeadDash(it.node.alts)) return true;
+    const prev = seq[i - 1];
+    const next = seq[i + 1];
+    return prev !== undefined && next !== undefined && it.min >= 1 && prev.min >= 1 && next.min >= 1
+      && deadDashNode(it.node) && digitEdge(prev.node, true) && digitEdge(next.node, false);
+  }));
+
   // ---- stressTest -------------------------------------------------------------------
-  // 同じ文字の長い列のあとに当たらない文字を 1 つ置いた文に当て、1 本ごとの所要時間を測る。
-  // 短い列から順に試し、上限を超えたらそこで止める。入れ子や重なりをすり抜けた遅い形 (3 乗の形は、同じ文字
-  // 2000 字で 1 秒弱から数十秒以上かかり、5000 字ではさらに伸びる) でも、長い列で固まる前に止まるように、
-  // 段は 2.5 倍ほどの刻みにする。前の段を上限ぎりぎりで通った 3 乗の形でも、次の段で固まるのは 1 秒ほどに収まる。
-  const STRESS_LENGTHS = [24, 60, 150, 380, 950, 2000];
+  // 同じ文字の長い列のあとに当たらない文字を 1 つ置いた文に当て、所要時間を測って、1 本のルールぶんを合計する。
+  // 短い列から順に試し、合計が上限を超えたらそこで止める。入れ子や重なりをすり抜けた遅い形 (3 乗の形は、同じ文字
+  // 950 字で 0.5 秒から 20 秒かかり、2000 字ではさらに伸びる) でも、長い列で固まる前に止まるように、段は 2.5 倍ほどの
+  // 刻みにする。前の段を上限ぎりぎりで通った 3 乗の形でも、次の段で固まるのは 1 秒ほどに収まる。
+  // 最後の段を 950 字にとどめるのは、ふつうの 2 乗の形 (\S+@\S+ など) を、合計の上限に余裕を持って通すため
+  const STRESS_LENGTHS = [24, 60, 150, 380, 950];
   const STRESS_CHARS = ["a", "A", "1", " ", "あ", "ア", "漢", "-"];
   const STRESS_TAILS = ["!", "\n"]; // \w 系を止める ! と、. 系を止める改行
+  const MAX_PROBE_ATOMS = 200; // 試す文字を選ぶのに見る、パターンの文字の項目の数
+  const MAX_PROBE_LITERALS = 4; // 試す文字に足す、普通に書いた文字の数
 
   function nowMs() {
     return typeof performance !== "undefined" && performance && typeof performance.now === "function" ? performance.now() : Date.now();
   }
-  // パターンの中に書かれた文字 (エスケープ・\p{…} は除く)。数種だけ、試す文字に足す
-  function literalChars(source) {
-    const bare = source.replace(/\\(?:[pP]\{[^}]*\}|u\{[^}]*\}|u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|c[A-Za-z]|k<[^>]*>|[^])/gu, "");
-    return [...new Set(bare.match(/[\p{L}\p{N}]/gu) || [])].slice(0, 4);
+  // 試す文字を選ぶ。パターンが使う文字を、数種だけ足す: 普通に書いた文字 (文字・数字・かな・漢字。区切りの記号は除く) は
+  // そのまま、文字の種類 (\d ・ [A-Z] ・ \p{Script=Hangul} など) は、見本から当たる文字を 1 つ選ぶ。
+  // そのうえで、パターンの文字の項目のどれに当たるかが同じ文字は、同じ動きをするので、1 つだけ試す。
+  // (広い文字の種類に当たる文字を何本も別々に試して足すと、ふつうの 2 乗の形が、合計で上限を超えてしまう)
+  function probeChars(source, ignoreCase) {
+    const nodes = [];
+    const collect = (alts) => alts.forEach((seq) => seq.forEach((it) => {
+      if (it.node.t === "group") collect(it.node.alts);
+      else if (it.node.t === "char" && nodes.length < MAX_PROBE_ATOMS) nodes.push(it.node);
+    }));
+    try {
+      collect(parseSource(source.slice(0, 3000))); // 語の一覧から作った長いものは、先頭だけで足りる
+    } catch (_) { /* 読めない形は、決まった文字だけで試す */ }
+
+    const flags = ignoreCase ? "iu" : "u";
+    const srcs = [...new Set(nodes.map((n) => n.src))];
+    const matchers = srcs.map((src) => { try { return new RegExp(`^(?:${src})$`, flags); } catch (_) { return null; } });
+    const pick = (src) => {
+      const re = matcherOf(src);
+      return re === null ? undefined : SAMPLES.find((c) => re.test(c));
+    };
+    // 普通に書いた文字は、文字・数字・かな・漢字だけ、最初の数種。同じ広い文字の種類に当たる文字を、いくつも別々に試さない
+    const literals = new Set();
+    const derived = nodes.map((n) => {
+      if (n.lit === undefined) return pick(n.src);
+      if (literals.size < MAX_PROBE_LITERALS && /^[\p{L}\p{N}]$/u.test(n.lit)) literals.add(n.lit);
+      return literals.has(n.lit) ? n.lit : undefined;
+    });
+    const usesBoundary = /\\[bB]/.test(source);
+
+    const found = [];
+    const seenKinds = new Set();
+    for (const c of [...derived, ...STRESS_CHARS]) {
+      if (c === undefined) continue;
+      const kind = matchers.map((re, k) => (re !== null && re.test(c) ? k : -1)).filter((k) => k >= 0).join(",")
+        + (usesBoundary ? (/^\w$/.test(c) ? "|w" : "|n") : ""); // \b は、単語を作る文字かどうかで動きが変わる
+      if (!seenKinds.has(kind)) { seenKinds.add(kind); found.push(c); }
+    }
+    return found;
   }
   function timeScan(re, text, clock) {
     re.lastIndex = 0;
@@ -359,24 +523,23 @@
 
   /**
    * @param {RegExp} re 渡した正規表現は書き換えない
-   * @param {number} [budgetMs] 1 本の試しに許す時間。既定は LIMITS.stressMs
+   * @param {number} [budgetMs] 1 本のルールの試し全部の合計に許す時間。既定は LIMITS.stressMs
    * @param {() => number} [clock] ミリ秒の時計。既定は performance.now
-   * @returns {{ ok: boolean, ms: number }} ms は、いちばん遅かった 1 本の時間
+   * @returns {{ ok: boolean, ms: number }} ms は、試しの時間の合計 (上限を超えて止めたときは、そこまでの合計)
    */
   function stressTest(re, budgetMs = LIMITS.stressMs, clock = nowMs) {
     const probe = new RegExp(re.source, re.flags.includes("g") ? re.flags : re.flags + "g");
-    const chars = [...new Set([...STRESS_CHARS, ...literalChars(re.source)])];
-    let worst = 0;
+    const chars = probeChars(re.source, re.flags.includes("i"));
+    let total = 0;
     for (const length of STRESS_LENGTHS) {
       for (const ch of chars) {
         for (const tail of STRESS_TAILS) {
-          const ms = timeScan(probe, ch.repeat(length) + tail, clock);
-          if (ms > worst) worst = ms;
-          if (worst > budgetMs) return { ok: false, ms: worst };
+          total += timeScan(probe, ch.repeat(length) + tail, clock);
+          if (total > budgetMs) return { ok: false, ms: total };
         }
       }
     }
-    return { ok: true, ms: worst };
+    return { ok: true, ms: total };
   }
 
   // ---- 組み立て -----------------------------------------------------------------------
@@ -386,16 +549,11 @@
     .map((src) => ({ src, re: new RegExp(`^${src}$`, "u") }));
   const kindOf = (ch) => (CHAR_KINDS.find((k) => k.re.test(ch)) || {}).src || null;
 
-  function wordAlternative(word, exact) {
-    const body = escapeLiteral(word);
-    if (!exact) return body;
-    const chars = Array.from(word);
-    const before = kindOf(chars[0]);
-    const after = kindOf(chars[chars.length - 1]);
-    return (before ? `(?<!${before})` : "") + body + (after ? `(?!${after})` : "");
-  }
-
-  // 長い語から先に並べる (選択肢は先に書いたものが取られるので、短い語が長い語を食わないように)
+  // 語を、長い順に並べて 1 本の正規表現にする (選択肢は先に書いたものが取られるので、短い語が長い語を食わないように)。
+  // 完全一致は、先頭の文字の種類ごとにまとめて (?<!X)(?:語 1(?!Y1)|語 2(?!Y2)|…) の形にする。
+  // 同じ位置で当たりうる語は、先頭の文字が同じ = 種類も同じなので、同じ組に入る。語ごとに後読みを置くのと当たる所は
+  // 変わらないが、500 語 × 100 字のリストで、後読みを語の数だけ試さずに済む (長い本文で 10 倍ほど速い)。
+  // 先頭が記号など、どの種類でもない語は、後読みの無い組にまとめる
   function wordsPattern(rule) {
     const unique = new Set();
     for (const w of rule.words) {
@@ -403,7 +561,17 @@
       if (n !== "") unique.add(n);
     }
     const sorted = [...unique].sort((a, b) => b.length - a.length || (a < b ? -1 : a > b ? 1 : 0));
-    return new RegExp(sorted.map((w) => wordAlternative(w, rule.match === "exact")).join("|"), "gu");
+    if (rule.match !== "exact") return new RegExp(sorted.map(escapeLiteral).join("|"), "gu");
+    const groups = new Map(); // 先頭の文字の種類 (後読みの中身。どれでもなければ "") → その種類で始まる語の選択肢
+    for (const w of sorted) {
+      const chars = Array.from(w);
+      const before = kindOf(chars[0]) || "";
+      const after = kindOf(chars[chars.length - 1]);
+      if (!groups.has(before)) groups.set(before, []);
+      groups.get(before).push(escapeLiteral(w) + (after ? `(?!${after})` : ""));
+    }
+    const source = [...groups].map(([before, alts]) => (before ? `(?<!${before})` : "") + `(?:${alts.join("|")})`).join("|");
+    return new RegExp(source, "gu");
   }
 
   // 確かめ済みのルールから、エンジンが当てる正規表現を作る。g と u は必須 (エンジンは g で回す)
