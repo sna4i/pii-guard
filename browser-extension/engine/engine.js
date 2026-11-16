@@ -130,14 +130,25 @@
   function isProEnabled() { return proEnabled; }
 
   // Pro のカスタムルール (Pro Phase 2 の設計 (P1))。engine/custom-rules.js の compileRules で組み立てたものを持つ。
-  // 組み立ては上限いっぱいで数十ミリ秒かかるので、送るたびではなく、ルールが変わったときに setCustomRules で 1 回だけ行う。
-  // 持つのは、有効で正しいものを先頭から上限の数まで (オフのもの・正しくないものは持たない)。返すのは持った数。
-  // 当てるのは Pro のときだけ (collectCustom)
+  // 組み立てと温め (下) は上限いっぱいで数百ミリ秒かかるので、送るたびではなく、ルールが変わったときに
+  // setCustomRules で 1 回だけ行う。持つのは、有効で正しいものを先頭から上限の数まで (オフのもの・正しくないものは
+  // 持たない)。返すのは持った数。当てるのは Pro のときだけ (collectCustom)
+  //
+  // 温め: V8 は正規表現を、初めの照合ではバイトコードにして解釈し、次の照合で機械語に組み立てる。どちらも 1 バイトの
+  // 文字列 (ASCII だけ) と 2 バイトの文字列 (日本語を含む) で別々に作る。上限いっぱいでは、この組み立てだけで
+  // 送信の時間の上限 (100 ミリ秒) を超えるので、持つときに済ませる。ASCII で解釈 (日本語の語は 1 バイトの文字列に
+  // 当たりえないので軽い)、日本語で 2 バイトの機械語、ASCII で 1 バイトの機械語の順。送るときは、温めた正規表現を
+  // 作り直さずに使う (作り直すと、GC のあとで組み立て直しになる。matchNormalized の reuse)
+  const WARM_SUBJECTS = ["a", "あ", "a"];
   let customPatterns = [];
   function setCustomRules(rules) {
     const deps = resolveDeps();
     if (!deps.customRules) throw new Error("mask-mcp engine: custom-rules missing");
-    customPatterns = deps.customRules.compileRules(rules);
+    const compiled = deps.customRules.compileRules(rules);
+    for (const { pattern } of compiled) {
+      for (const subject of WARM_SUBJECTS) { pattern.lastIndex = 0; pattern.test(subject); }
+    }
+    customPatterns = compiled;
     return customPatterns.length;
   }
   function getCustomRuleCount() { return customPatterns.length; }
@@ -159,13 +170,15 @@
   }
 
   // matchPatterns の照合の部分。整えた本文 (nfkcWithMap の { norm, map }) を受けるので、整えるのを 1 回にしたまま
-  // パターンを分けて当てられる (カスタムルールは、1 本ごとに時間を見る)
-  function matchNormalized(text, { norm, map }, patternList) {
+  // パターンを分けて当てられる (カスタムルールは、1 本ごとに時間を見る)。reuse が true なら、渡した正規表現を
+  // 作り直さずに使う (エンジンだけが持つカスタムルールの正規表現。setCustomRules で温めた機械語を保つため)
+  function matchNormalized(text, { norm, map }, patternList, reuse) {
     const identity = norm === text;
     const out = [];
     for (const { entity_type, pattern, validate } of patternList) {
       // Clone so module-level regex lastIndex is never mutated.
-      const re = new RegExp(pattern.source, pattern.flags);
+      const re = reuse ? pattern : new RegExp(pattern.source, pattern.flags);
+      if (reuse) re.lastIndex = 0; // 前の照合が途中で止まっていても、頭から当てる
       let m;
       while ((m = re.exec(norm)) !== null) {
         if (m.index === re.lastIndex) { re.lastIndex += 1; continue; }
@@ -304,7 +317,7 @@
     let dets = [];
     for (const rule of rules) {
       if (clock() - start >= budget) return { dets, status: "partial" };
-      dets = dets.concat(matchNormalized(text, normalized, [rule]));
+      dets = dets.concat(matchNormalized(text, normalized, [rule], true));
     }
     return { dets, status: "ok" };
   }

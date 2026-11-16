@@ -67,6 +67,11 @@ test("T-CR-22 Pro のとき: <PROJECT_1> と <ACME_ID_1> で伏せ、custom.stat
     assert.equal(viaMl.sanitized_text, MASKED);
     assert.deepEqual(viaMl.custom, { status: "ok" });
     assert.equal(viaMl.ml.status, "unavailable");
+
+    // 送るときは、setCustomRules で温めた正規表現を作り直さずに使う。温めに使う文字 (a) に当たるルールでも、
+    // 送るたびに文の頭から当たる (前の照合の位置が残っていると、頭の「a1」を取りこぼす)
+    assert.equal(engine.setCustomRules([{ id: "r7", label: "GRADE", kind: "regex", pattern: "a\\d?", enabled: true }]), 1);
+    for (let i = 0; i < 2; i++) assert.equal(await sanitize("a1 と a2"), "<GRADE_1> と <GRADE_2>");
   });
 });
 
