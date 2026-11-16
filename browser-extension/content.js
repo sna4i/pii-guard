@@ -244,7 +244,11 @@
   function refreshPro() {
     try {
       chrome.runtime.sendMessage({ type: "license:get" }, (r) => {
-        if (chrome.runtime.lastError) { resolveProAttempt(); return; }
+        // 届かない・失敗した問い合わせと、ライセンスの確かめに失敗した答え (source: "none"。7 日以内のキャッシュが無いまま、
+        // 通信に失敗したか時間切れ) は、「答えが来ていない」と同じに扱う (Pro でないと分かったわけではない)。Pro かどうかは
+        // 前のまま、proAnswered も立てない。保存したルールがあれば、送信は partial と同じに確認へ回り、聞き直しを続ける
+        // (ルールが無い人は、どちらに扱っても動きは同じ: Pro にならず、待ちも聞き直しも起きない)
+        if (chrome.runtime.lastError || !r || r.source === "none") { resolveProAttempt(); return; }
         const first = !proAnswered;
         proAnswered = true;
         const next = !!(r && r.pro === true);
@@ -268,6 +272,26 @@
   // 起動の読み直しと「Pro に変わった」の読み直しが続くため。組み立ては、このページと同じスレッドで走る)
   const CUSTOM_RULES_KEY = "proCustomRules"; // engine/custom-rules.js の STORAGE_KEY と同じ
   const hasEnabledCustomRule = (v) => !!(v && Array.isArray(v.rules) && v.rules.some((r) => r && typeof r === "object" && r.enabled !== false));
+  // E2E のときだけ (__pii_guard_e2e が true) 上書きできる時間の上限 (時間切れや、Pro の答えを待つあいだを確かめるため):
+  // カスタムルールの時間の上限 (__pii_guard_e2e_custom_budget_ms) と、Pro かどうかの答えを待つ上限 (__pii_guard_e2e_pro_wait_ms)
+  const E2E_FLAG = "__pii_guard_e2e";
+  const E2E_BUDGET_KEY = "__pii_guard_e2e_custom_budget_ms";
+  const E2E_PRO_WAIT_KEY = "__pii_guard_e2e_pro_wait_ms";
+  const e2eNumber = (st, key) => (st && st[E2E_FLAG] === true && Number.isFinite(st[key]) ? st[key] : null);
+  const PRO_ANSWER_WAIT_MS = 3000; // ルールがあるときに、Pro かどうかの答えを待つ上限
+  // 当てているカスタムルールの名前 (compileRules と同じく、有効で正しいもの)。集めた形の結果で、この名前の行に custom の
+  // 印 (真偽値だけ) を付ける。ページの世界は、LLM の検出を混ぜるときにその行を残す (ルールの中身は渡さない)
+  let appliedCustomLabels = new Set();
+  function customLabelsOf(rules, cr) {
+    const out = new Set();
+    if (!cr || typeof cr.validateRule !== "function") return out;
+    for (const r of Array.isArray(rules) ? rules : []) {
+      if (!r || typeof r !== "object" || r.enabled === false) continue;
+      const checked = cr.validateRule(r);
+      if (checked.ok) out.add(checked.rule.label);
+    }
+    return out;
+  }
   let applyingCustomRules = Promise.resolve();
   let customRulesVersion = 0; // proCustomRules が変わるたびに増やす
   let appliedCustomRules = null; // 最後に渡したもの ("off" か "pro:<版>")
@@ -277,11 +301,13 @@
   function syncCustomRules() {
     const version = customRulesVersion;
     applyingCustomRules = applyingCustomRules.then(async () => {
-      let stored = null;
-      try { stored = (await chrome.storage.local.get(CUSTOM_RULES_KEY))[CUSTOM_RULES_KEY]; } catch (_) { stored = null; }
+      let got = {};
+      try { got = await chrome.storage.local.get([CUSTOM_RULES_KEY, E2E_FLAG, E2E_PRO_WAIT_KEY]); } catch (_) { got = {}; }
+      const stored = got[CUSTOM_RULES_KEY];
       const has = hasEnabledCustomRule(stored);
       // ルールがあるのに、Pro かどうかの答えがまだなら待つ (ルールの無い人は待たせない)
-      if (has) await Promise.race([firstProAttempt, new Promise((r) => setTimeout(r, 3000))]);
+      const waitMs = e2eNumber(got, E2E_PRO_WAIT_KEY) ?? PRO_ANSWER_WAIT_MS;
+      if (has) await Promise.race([firstProAttempt, new Promise((r) => setTimeout(r, waitMs))]);
       customRulesUnknown = has && !proAnswered;
       const engine = await waitIsoEngine(3000);
       if (!engine || typeof engine.setCustomRules !== "function") return;
@@ -290,6 +316,7 @@
       if (key === appliedCustomRules) return;
       engine.setCustomRules(on ? stored.rules : []);
       appliedCustomRules = key;
+      appliedCustomLabels = on ? customLabelsOf(stored.rules, engine.customRules) : new Set();
     }).catch((e) => { dlog("error", DL ? DL.errorFields(e, "content") : {}); });
   }
   // 列が空くまで待つ (待っているあいだに次の読み直しが並んだら、それも待つ)。Pro かどうか分からないままなら true を返す。
@@ -349,12 +376,10 @@
   }
   const forceEntryOf = (e) => (typeof e === "string" ? { value: e, category: "OTHER" }
     : e && typeof e.value === "string" ? { value: e.value, category: typeof e.category === "string" ? e.category : "OTHER" } : null);
-  // カスタムルールの時間の上限。ページの送信は、送る前の上限 (custom-rules.js の LIMITS.sendBudgetMs)。
-  // E2E のときだけ (__pii_guard_e2e が true)、__pii_guard_e2e_custom_budget_ms で上書きできる (時間切れを起こして確かめるため)
-  const E2E_FLAG = "__pii_guard_e2e";
-  const E2E_BUDGET_KEY = "__pii_guard_e2e_custom_budget_ms";
+  // カスタムルールの時間の上限。ページの送信は、送る前の上限 (custom-rules.js の LIMITS.sendBudgetMs)。E2E の上書きあり
   function sendBudgetMs(engine, st) {
-    if (st[E2E_FLAG] === true && Number.isFinite(st[E2E_BUDGET_KEY])) return st[E2E_BUDGET_KEY];
+    const e2e = e2eNumber(st, E2E_BUDGET_KEY);
+    if (e2e !== null) return e2e;
     const cr = engine.customRules;
     return cr && cr.LIMITS ? cr.LIMITS.sendBudgetMs : undefined;
   }
@@ -375,6 +400,8 @@
             result = await engine.maskAggregated(text, opts);
             for (const row of (result && Array.isArray(result.aggregated) ? result.aggregated : [])) {
               if (row && allow.has(row.value)) { row.masked = false; row.allowlisted = true; }
+              // Pro のカスタムルールの行の印 (真偽値だけ)。LLM の検出を混ぜるとき、ページの世界はこの行の位置と名前を残す
+              if (row && appliedCustomLabels.has(row.label)) row.custom = true;
             }
           } else if (kind === "lists") {
             const values = (Array.isArray(data.values) ? data.values : []).filter((v) => typeof v === "string").slice(0, 500);

@@ -23,10 +23,11 @@
   const rootEl = document.documentElement;
 
   // proCustomRules: Pro のカスタムルール (キーは engine/custom-rules.js の STORAGE_KEY と同じ)。
-  // customBudgetMs: E2E のときだけ (__pii_guard_e2e が true)、カスタムルールの時間の上限を上書きする値
-  // (__pii_guard_e2e_custom_budget_ms。時間切れを起こして確かめるため)
-  const settings = { enabled: true, maskForceList: [], maskAllowlist: [], mlEnabled: false, piiSendWarning: true, proCustomRules: null, customBudgetMs: null };
-  const SETTING_KEYS = ["enabled", "maskForceList", "maskAllowlist", "mlEnabled", "piiSendWarning", "proCustomRules", "__pii_guard_e2e", "__pii_guard_e2e_custom_budget_ms"];
+  // customBudgetMs・proWaitMs: E2E のときだけ (__pii_guard_e2e が true)、カスタムルールの時間の上限
+  // (__pii_guard_e2e_custom_budget_ms) と、Pro かどうかの答えを待つ上限 (__pii_guard_e2e_pro_wait_ms) を上書きする値
+  // (時間切れや、答えを待つあいだを確かめるため)
+  const settings = { enabled: true, maskForceList: [], maskAllowlist: [], mlEnabled: false, piiSendWarning: true, proCustomRules: null, customBudgetMs: null, proWaitMs: null };
+  const SETTING_KEYS = ["enabled", "maskForceList", "maskAllowlist", "mlEnabled", "piiSendWarning", "proCustomRules", "__pii_guard_e2e", "__pii_guard_e2e_custom_budget_ms", "__pii_guard_e2e_pro_wait_ms"];
   // 動作ログ (docs/diagnostic-log.md)。件数や理由だけで、文章は残さない
   const DLG = window.PiiGuardDiagLog;
   const dl = (code, d) => { if (DLG) DLG.log(code, d); };
@@ -59,6 +60,7 @@
       settings.maskAllowlist = Array.isArray(s.maskAllowlist) ? s.maskAllowlist.filter((v) => typeof v === "string") : [];
       settings.proCustomRules = s.proCustomRules && typeof s.proCustomRules === "object" ? s.proCustomRules : null;
       settings.customBudgetMs = s.__pii_guard_e2e === true && Number.isFinite(s.__pii_guard_e2e_custom_budget_ms) ? s.__pii_guard_e2e_custom_budget_ms : null;
+      settings.proWaitMs = s.__pii_guard_e2e === true && Number.isFinite(s.__pii_guard_e2e_pro_wait_ms) ? s.__pii_guard_e2e_pro_wait_ms : null;
     } catch (_) { /* 既定のまま */ }
   }
   // 読み直すたびに、Pro のカスタムルールをエンジンに渡す (applyCustomRules)。待ち合わせの列 (applyingCustomRules) は
@@ -87,7 +89,11 @@
   function refreshPro() {
     try {
       chrome.runtime.sendMessage({ type: "license:get" }, (r) => {
-        if (chrome.runtime.lastError) { resolveProAttempt(); return; }
+        // 届かない・失敗した問い合わせと、ライセンスの確かめに失敗した答え (source: "none"。7 日以内のキャッシュが無いまま、
+        // 通信に失敗したか時間切れ) は、「答えが来ていない」と同じに扱う (Pro でないと分かったわけではない)。Pro かどうかは
+        // 前のまま、proAnswered も立てない。保存したルールがあれば、送信は partial と同じに確認へ回り、聞き直しを続ける
+        // (ルールが無い人は、どちらに扱っても動きは同じ: Pro にならず、待ちも聞き直しも起きない)
+        if (chrome.runtime.lastError || !r || r.source === "none") { resolveProAttempt(); return; }
         const first = !proAnswered;
         proAnswered = true;
         const next = !!(r && r.pro === true);
@@ -120,8 +126,8 @@
   async function applyCustomRules(version) {
     const stored = settings.proCustomRules;
     const has = hasEnabledCustomRule(stored);
-    // ルールがあるのに、Pro かどうかの答えがまだなら待つ (ルールの無い人は待たせない)
-    if (has) await Promise.race([firstProAttempt, new Promise((r) => setTimeout(r, 3000))]);
+    // ルールがあるのに、Pro かどうかの答えがまだなら待つ (ルールの無い人は待たせない)。上限は 3 秒 (E2E の上書きあり)
+    if (has) await Promise.race([firstProAttempt, new Promise((r) => setTimeout(r, settings.proWaitMs ?? 3000))]);
     customRulesUnknown = has && !proAnswered;
     const e = NS.engine;
     if (!e || typeof e.setCustomRules !== "function") return;
