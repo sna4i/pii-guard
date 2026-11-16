@@ -189,6 +189,9 @@
     // 確認画面は、この ISOLATED world のエンジンに "local-mask" で頼み、渡された文についての
     // 結果だけを受け取る (handleLocalMask)。配るのは「リストがあるか」と変わった合図だけ。
     let hasSecretLists = false;
+    // customRulesActive: Pro のカスタムルールが効いているか (真偽値だけ。ルールの中身は配らない)。ページの世界は、
+    // これが true のあいだ LLM の置き換えモードを使わない (LLM はルールを知らないので、ルールの語を残して書き換えうる)
+    let customRulesActive = false;
     const secureComposerHost = /(^|\.)(chatgpt\.com|openai\.com)$/.test(location.hostname);
     try {
       const stored = await chrome.storage.local.get([
@@ -210,10 +213,12 @@
       scOwnsComposer = scEnabled && scOverlayLive;
       // リストの値は配らない (maskAllowlist / maskForceList は空のまま)。有無だけ知らせる:
       // ISOLATED に頼めないときに、MAIN world のエンジン (リスト無し) で黙って続けず止めるため。
-      // Pro のカスタムルールも同じ。組み立てを待たずに、読んだ中身で決める (ページの世界が早く止める側に倒れるように)
+      // Pro のカスタムルールも同じ。組み立てを待たずに、読んだ中身で決める (ページの世界が早く止める側に倒れるように)。
+      // ルールがあって Pro かどうかがまだ分からないあいだも、効いているものとして扱う (分からないときは伏せる側に倒す)
+      customRulesActive = hasEnabledCustomRule(stored[CUSTOM_RULES_KEY]) && (proEnabled || !proAnswered);
       hasSecretLists = (Array.isArray(stored.maskAllowlist) && stored.maskAllowlist.length > 0) ||
         (Array.isArray(stored.maskForceList) && stored.maskForceList.length > 0) ||
-        (proEnabled && hasEnabledCustomRule(stored[CUSTOM_RULES_KEY]));
+        customRulesActive;
     } catch (_) {
       interactive = true;
       uiMode = "sidebar";
@@ -223,7 +228,7 @@
       {
         source: TAG_OUT,
         type: "settings",
-        settings: { interactive, uiMode, maskAllowlist, maskForceList, mlEnabled, enabled, scOwnsComposer, hasSecretLists, listsVersion, pro: proEnabled },
+        settings: { interactive, uiMode, maskAllowlist, maskForceList, mlEnabled, enabled, scOwnsComposer, hasSecretLists, customRulesActive, listsVersion, pro: proEnabled },
       },
       "*"
     );
@@ -231,21 +236,26 @@
   // Pro かどうか (docs/pro-license.md の D-PRO-06)。Service Worker のライセンス管理に聞き、この ISOLATED world の
   // エンジンに渡し、ページの世界 (injected.js) へは設定と一緒に配る。答えが来るまでは無料版のルールで動く
   let proEnabled = false;
-  // 最初の答え (届かない・失敗したときも、来たものとする)。保存したカスタムルールがあるときだけ、渡す前に待つ
-  let resolveProAnswer = () => {};
-  const firstProAnswer = new Promise((resolve) => { resolveProAnswer = resolve; });
+  // proAnswered: Pro かどうかの答えを受け取ったか (届かない・失敗したあいだは false = 分からない)。
+  // firstProAttempt: 最初の問い合わせが終わったこと (答えでも失敗でも)。保存したカスタムルールがあるときだけ、渡す前に待つ
+  let proAnswered = false;
+  let resolveProAttempt = () => {};
+  const firstProAttempt = new Promise((resolve) => { resolveProAttempt = resolve; });
   function refreshPro() {
     try {
       chrome.runtime.sendMessage({ type: "license:get" }, (r) => {
-        if (chrome.runtime.lastError) { resolveProAnswer(); return; }
+        if (chrome.runtime.lastError) { resolveProAttempt(); return; }
+        const first = !proAnswered;
+        proAnswered = true;
         const next = !!(r && r.pro === true);
         const e = window.__localMaskMCP && window.__localMaskMCP.engine;
         if (e && typeof e.setProEnabled === "function") e.setProEnabled(next);
-        // Pro の状態が変わったら、どちらの向きでも、カスタムルールを渡し直して配り直す
-        if (next !== proEnabled) { proEnabled = next; syncCustomRules(); broadcastSettings(); }
-        resolveProAnswer();
+        // Pro の状態が変わったら (どちらの向きでも)、または最初の答えが来たら (分からなかったあいだの扱いを外す)、
+        // カスタムルールを渡し直して配り直す
+        if (next !== proEnabled || first) { proEnabled = next; syncCustomRules(); broadcastSettings(); }
+        resolveProAttempt();
       });
-    } catch (_) { resolveProAnswer(); /* 拡張機能が入れ替わった直後など、Service Worker に届かないとき */ }
+    } catch (_) { resolveProAttempt(); /* 拡張機能が入れ替わった直後など、Service Worker に届かないとき */ }
   }
 
   // ---- Pro のカスタムルール (Pro Phase 2 の設計 (P1)) ----------------------------------------------
@@ -261,26 +271,35 @@
   let applyingCustomRules = Promise.resolve();
   let customRulesVersion = 0; // proCustomRules が変わるたびに増やす
   let appliedCustomRules = null; // 最後に渡したもの ("off" か "pro:<版>")
+  // ルールがあるのに、待っても Pro かどうか分からない (答えが待つ上限までに来ない・問い合わせに失敗した)。
+  // ルールを当てられないので、伏せる道は時間切れ (custom.status の partial) と同じに扱う
+  let customRulesUnknown = false;
   function syncCustomRules() {
     const version = customRulesVersion;
     applyingCustomRules = applyingCustomRules.then(async () => {
       let stored = null;
       try { stored = (await chrome.storage.local.get(CUSTOM_RULES_KEY))[CUSTOM_RULES_KEY]; } catch (_) { stored = null; }
+      const has = hasEnabledCustomRule(stored);
       // ルールがあるのに、Pro かどうかの答えがまだなら待つ (ルールの無い人は待たせない)
-      if (hasEnabledCustomRule(stored)) await Promise.race([firstProAnswer, new Promise((r) => setTimeout(r, 3000))]);
+      if (has) await Promise.race([firstProAttempt, new Promise((r) => setTimeout(r, 3000))]);
+      customRulesUnknown = has && !proAnswered;
       const engine = await waitIsoEngine(3000);
       if (!engine || typeof engine.setCustomRules !== "function") return;
-      const on = proEnabled && hasEnabledCustomRule(stored);
+      const on = proEnabled && has;
       const key = on ? `pro:${version}` : "off";
       if (key === appliedCustomRules) return;
       engine.setCustomRules(on ? stored.rules : []);
       appliedCustomRules = key;
     }).catch((e) => { dlog("error", DL ? DL.errorFields(e, "content") : {}); });
   }
-  // 列が空くまで待つ (待っているあいだに次の読み直しが並んだら、それも待つ)
+  // 列が空くまで待つ (待っているあいだに次の読み直しが並んだら、それも待つ)。Pro かどうか分からないままなら true を返す。
+  // そのときは、答えが来るよう聞き直す (5 秒に 1 回まで。届かなかった問い合わせのあとも、いつかは今どおりに戻るように)
+  let lastProRetry = 0;
   async function customRulesReady() {
     let last;
     do { last = applyingCustomRules; await last; } while (last !== applyingCustomRules);
+    if (customRulesUnknown && Date.now() - lastProRetry > 5000) { lastProRetry = Date.now(); refreshPro(); }
+    return customRulesUnknown;
   }
 
   // adapter (同じ isolated world) が overlay の生死を知らせる口。live が変わるたびに再配布し、
@@ -351,7 +370,7 @@
           const force = (Array.isArray(st.maskForceList) ? st.maskForceList : []).map(forceEntryOf).filter(Boolean);
           const opts = { userForceMaskEntries: force, mlEnabled: st.mlEnabled === true, customBudgetMs: sendBudgetMs(engine, st) };
           // 保存したカスタムルールを渡し終えてから伏せる (読んだのにまだ渡していない状態で、伏せない)
-          await customRulesReady();
+          const customUnknown = await customRulesReady();
           if (kind === "aggregated") {
             result = await engine.maskAggregated(text, opts);
             for (const row of (result && Array.isArray(result.aggregated) ? result.aggregated : [])) {
@@ -367,6 +386,8 @@
           } else {
             result = await engine.maskSanitize(text, opts);
           }
+          // ルールがあるのに Pro かどうか分からず、ルールを当てられなかった: 時間切れと同じに扱う (ページの世界が確認に回す)
+          if (customUnknown && kind !== "lists" && result) result.custom = { status: "partial" };
         }
       }
     } catch (_) { result = null; }

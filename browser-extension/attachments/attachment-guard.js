@@ -144,12 +144,16 @@
     const unmasked = [];
     const unmaskable = [];
     let maskedCount = 0;
-    // 保存した Pro のカスタムルールを content.js がエンジンに渡し終えてから伏せる (読んだのにまだ渡していない状態で、伏せない)
-    if (settings.enabled && typeof NS.__customRulesReady === "function") await NS.__customRulesReady();
+    // 保存した Pro のカスタムルールを content.js がエンジンに渡し終えてから伏せる (読んだのにまだ渡していない状態で、伏せない)。
+    // ルールがあるのに Pro かどうか分からないと true (ルールを当てられないので、時間切れと同じに扱う)
+    const customUnknown = settings.enabled && typeof NS.__customRulesReady === "function" ? await NS.__customRulesReady() : false;
     for (const f of files) {
       if (!settings.enabled) {
         // マスキング OFF: 中身はそのまま通す (利用者の選択)。未マスクであることだけ知らせる。
         masked.push(f); unmasked.push(f.name);
+      } else if (isText(f) && f.size <= MAX_TEXT_BYTES && engineReady() && customUnknown) {
+        dlog("custom.partial", { via: "attachment" });
+        unmaskable.push(f); // 伏せられない添付として確認に回す
       } else if (isText(f) && f.size <= MAX_TEXT_BYTES && engineReady()) {
         try { const m = await maskOneFile(f); masked.push(m.file); maskedCount += m.count; }
         catch (_) { unmaskable.push(f); } // 読めない文字コード/マスクの失敗

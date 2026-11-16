@@ -77,7 +77,7 @@
     "llm.detect": { lv: (d) => (d.status === "failed" || d.status === "invalid-response" || d.status === "no-response" ? "warn" : "info"),
       fields: { status: E({ found: "結果あり", empty: "結果なし", "all-filtered": "すべて誤検出として除外", failed: "失敗", "invalid-response": "応答の形式が違う", "no-response": "応答なし" }), added: "int", filtered: "int" },
       text: (d, L) => `LLM の判定: ${L.status || "終了"}${paren([d.added != null ? `追加 ${d.added} 件` : "", d.filtered ? `除外 ${d.filtered} 件` : ""])}` },
-    "llm.replace": { lv: (d) => (d.status === "ok" ? "info" : "warn"), fields: { status: E({ ok: "書き換えた", fallback: "使えず、通常の検出に戻した", failed: "失敗" }) },
+    "llm.replace": { lv: (d) => (d.status === "ok" || d.status === "skipped" ? "info" : "warn"), fields: { status: E({ ok: "書き換えた", fallback: "使えず、通常の検出に戻した", failed: "失敗", skipped: "カスタムルールが有効なので使わず、通常の検出で伏せた" }) },
       text: (d, L) => `LLM の書き換え: ${L.status || "終了"}` },
     "llm.http": { lv: "warn", fields: { status: "int" },
       text: (d) => (d.status === 403

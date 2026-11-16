@@ -1097,7 +1097,12 @@
         const sidebarNS = NS.sidebar;
         const wantReview =
           NS.settings && NS.settings.interactive !== false;
-        if (wantReview && sidebarNS && inputs.length > 0) {
+        // Pro のカスタムルールが効いているあいだは、置き換えモードを使わない (LLM はルールを知らないので、ルールの語を
+        // 残して書き換えうる)。置き換えに失敗したときと同じく、下のいつもの道 (ISOLATED world のエンジン、カスタムルール
+        // あり) で伏せる。ページの世界には、効いているかどうかだけが届く (content.js の customRulesActive)
+        if (wantReview && sidebarNS && inputs.length > 0 && NS.settings.customRulesActive === true) {
+          plog("llm.replace", { status: "skipped" });
+        } else if (wantReview && sidebarNS && inputs.length > 0) {
           const LBL2CAT = {
             PERSON: "PERSON",
             COMPANY: "ORGANIZATION",

@@ -198,16 +198,22 @@ export async function startMockChatGPT(opts = {}) {
   };
 }
 
-/** ローカル LLM (Ollama) を名乗る HTTP サーバ。届いた要求をすべて記録する。 */
-export async function startMockLlm() {
+/**
+ * ローカル LLM (Ollama) を名乗る HTTP サーバ。届いた要求をすべて記録する。
+ * reply: 要求の本文 (JSON) を受けて、LLM の答えの中身 (文字列) を返す関数。省くと、検出の答え {"entities":[]} を返す
+ */
+export async function startMockLlm({ reply } = {}) {
   const requests = [];
   const server = http.createServer((req, res) => {
     const chunks = [];
     req.on("data", (c) => chunks.push(c));
     req.on("end", () => {
-      requests.push({ t: Date.now(), method: req.method, url: req.url, body: Buffer.concat(chunks).toString("utf8") });
+      const body = Buffer.concat(chunks).toString("utf8");
+      requests.push({ t: Date.now(), method: req.method, url: req.url, body });
+      let content = '{"entities":[]}';
+      if (typeof reply === "function") { try { content = reply(JSON.parse(body)); } catch (_) { /* 読めない要求は、検出の答えのまま */ } }
       res.writeHead(200, { "content-type": "application/json", "access-control-allow-origin": "*" });
-      res.end(JSON.stringify({ message: { role: "assistant", content: '{"entities":[]}' } }));
+      res.end(JSON.stringify({ message: { role: "assistant", content } }));
     });
   });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));

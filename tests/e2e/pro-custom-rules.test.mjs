@@ -1,5 +1,5 @@
 // tests/e2e/pro-custom-rules.test.mjs — Pro のカスタムルールが、送る経路のすべて (ページの送信・ChatGPT の保護入力欄・
-// 添付) で効き、時間内に調べきれなかったときは必ず確認に回る (Pro Phase 2 の設計 (P1)、T-CR-31〜38)
+// 添付) で効き、時間内に調べきれなかったときは必ず確認に回る (Pro Phase 2 の設計 (P1)、T-CR-31〜40)
 //
 // 土台は tests/fixtures/pro-ext.mjs の launchPro (拡張機能の写し + 模擬の ExtensionPay。入れた直後はお試しの Pro)。
 // 模擬の ChatGPT と、模擬の Claude・Gemini (mock-sites/server.mjs) に向ける。ルールの値は架空のものだけ。
@@ -8,6 +8,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { launchPro, API_KEY } from "../fixtures/pro-ext.mjs";
+import { startMockLlm } from "../fixtures/mock-chatgpt/server.mjs";
 
 const RULES = [{ id: "r1", label: "PROJECT", kind: "words", words: ["アルファ計画"], match: "exact", enabled: true },
                { id: "r2", label: "ACME_ID", kind: "regex", pattern: "ACME-\\d{4}", enabled: true }];
@@ -147,6 +148,21 @@ async function waitLogAbove(code, want, before, ms = 5000) {
   return false;
 }
 const removeBudget = () => h.ext.evaluate((k) => chrome.storage.local.remove(k), BUDGET_KEY);
+// サイドバーで、LLM の答えが出そろってから (伏せる候補が並び、LLM の待ちの表示が消えてから) 送るを押す
+async function confirmAfterLlm(p) {
+  const end = Date.now() + 10000;
+  while (Date.now() < end) {
+    const ready = await p.evaluate((sel) => {
+      const sr = document.querySelector(sel) && document.querySelector(sel).shadowRoot;
+      return !!(sr && sr.querySelectorAll(".row").length > 0 && !sr.querySelector(".llm-overlay"));
+    }, SIDEBAR);
+    if (ready) break;
+    await S.sleep(100);
+  }
+  assert.ok(await S.clickInShadow(p, SIDEBAR, /マスクして送信/), "LLM の答えが出てから、送るを押せる");
+}
+// 答えを止めたまま、渡し終えるのを待つ上限 (3 秒) を過ぎるまで待つ
+const PAST_WAIT_MS = 3500;
 
 test("T-CR-31 Claude と Gemini (模擬): 本文の アルファ計画 と ACME-1234 が、届いた文で <PROJECT_1> と <ACME_ID_1> になる", async () => {
   // Claude は、ページを開いた直後 (ルールは読んだが、Pro かどうかの答えがまだで、エンジンに渡せていないあいだ) に送る。
@@ -376,5 +392,133 @@ test("T-CR-38 時間切れの添付: 今の「伏せられない添付」の確�
     } finally { await q.close(); }
   } finally {
     await removeBudget();
+  }
+});
+
+test("T-CR-39 LLM の置き換えモードを入れていても、カスタムルールが効いているあいだは置き換えを使わず、カスタムの語が伏せ字で届く", async () => {
+  // 模擬の LLM (今の E2E の startMockLlm)。置き換えを頼まれると ACME-1234 だけを書き換え、アルファ計画 は残す
+  // (ルールを知らない LLM の取りこぼし)。検出を頼まれたときは、足す検出なし
+  const llm = await startMockLlm({
+    reply: (body) => {
+      const system = String((body && Array.isArray(body.messages) && body.messages[0] && body.messages[0].content) || "");
+      return system.includes("rewritten_text")
+        ? JSON.stringify({ rewritten_text: "(rewritten)", replacements: [{ original: "ACME-1234", replacement: "<code_1>", entity_type: "PROJECT_CODE" }] })
+        : '{"entities":[]}';
+    },
+  });
+  // 置き換えモードは、確認を出す設定のときだけ使われる
+  const LLM = { interactive: true, localLlmEnabled: true, localLlmUrl: llm.url, localLlmModel: "qwen3:1.7b", localLlmKind: "ollama", localLlmMode: "replace" };
+  try {
+    // カスタムルールが効いている (Pro で、ルールがある): 置き換えを使わず、いつもの道 (カスタムルールあり) で伏せる
+    const p = await openSite("claude", LLM);
+    try {
+      await waitSettings(p, { pro: true, hasSecretLists: true });
+      const skipped = await logCount("llm.replace", { status: "skipped" });
+      const t0 = Date.now();
+      await send(p, "claude", TEXT);
+      await confirmAfterLlm(p);
+      assert.deepEqual(await waitSent("claude", t0), [MASKED], "カスタムの語も伏せ字で届く");
+      assert.ok(await waitLogAbove("llm.replace", { status: "skipped" }, skipped), "置き換えを使わなかったことが動作ログに残る");
+      assert.equal(await p.evaluate(() => window.__localMaskMCP.settings.customRulesActive), true, "ページの世界には、効いているかどうかだけが届く");
+    } finally { await p.close(); }
+
+    // 効いていない (ルールが無い): 置き換えモードは今どおり使う (LLM の書き換えがそのまま届く)
+    const q = await openSite("claude", { ...LLM, proCustomRules: { version: 1, rules: [] } });
+    try {
+      await waitSettings(q, { pro: true, hasSecretLists: false });
+      const t0 = Date.now();
+      await send(q, "claude", TEXT);
+      await confirmAfterLlm(q);
+      assert.deepEqual(await waitSent("claude", t0), ["アルファ計画は <code_1> で管理しています"], "置き換えの結果が届く");
+    } finally { await q.close(); }
+  } finally {
+    await h.ext.evaluate(() => chrome.storage.local.remove(["localLlmEnabled", "localLlmUrl", "localLlmModel", "localLlmKind", "localLlmMode"]));
+    await llm.close();
+  }
+});
+
+test("T-CR-40 ルールがあるのに Pro かどうか分からない (待つ上限を過ぎても答えが来ない) ときは、時間切れと同じく確認に回り、一文が出る。ルールが無ければ確認は出ない", async () => {
+  const release = await holdProAnswer();
+  try {
+    // ページの送信 (確認を出さない設定): サイドバーが開き、一文が出る
+    const p = await openSite("claude", {}, { pill: false });
+    try {
+      await S.sleep(PAST_WAIT_MS);
+      const logged = await logCount("custom.partial", { via: "page" });
+      const t0 = Date.now();
+      await sendNow(p, "claude", TEXT);
+      assert.ok(await S.waitSidebar(p), "ページの送信: サイドバーが開く");
+      assert.match(String(await sidebarNotice(p)), NOTICE);
+      assert.equal(SITES.claude.sent(t0).length, 0, "確かめる前は届かない");
+      assert.ok(await waitLogAbove("custom.partial", { via: "page" }, logged), "動作ログに残る (page)");
+      assert.ok(await S.clickInShadow(p, SIDEBAR, /キャンセル/), "キャンセルを押せる");
+    } finally { await p.close(); }
+
+    // 保護入力欄 (確認を出さない設定でも): 確認が出て、一文が見える
+    await h.setStorage({ ...BASE, piiSendWarning: false });
+    h.server.clear();
+    const page = await h.openChat("/");
+    try {
+      const frame = await h.waitSecureReady(page, 10000);
+      assert.ok(frame, "保護入力欄が立ち上がる");
+      await S.sleep(PAST_WAIT_MS);
+      const logged = await logCount("custom.partial", { via: "secure-composer" });
+      await h.type(page, frame, TEXT);
+      await h.enterNoConfirm(page, frame);
+      await frame.waitForSelector('#confirm[data-show="1"]', { timeout: 5000 });
+      assert.match(await frame.textContent("#confirm-msg"), NOTICE);
+      assert.equal(h.server.byKind("conversation").length, 0, "確かめる前は届かない");
+      assert.ok(await waitLogAbove("custom.partial", { via: "secure-composer" }, logged), "動作ログに残る (secure-composer)");
+      await frame.click("#confirm-cancel");
+    } finally { await page.close(); }
+
+    // 添付: 伏せられない添付の確認が出る
+    const a = await openSite("claude", {}, { pill: false });
+    try {
+      const dialogs = [];
+      a.on("dialog", (d) => { dialogs.push(d.message()); d.dismiss().catch(() => {}); });
+      await S.sleep(PAST_WAIT_MS);
+      const logged = await logCount("custom.partial", { via: "attachment" });
+      await a.setInputFiles(SITES.claude.file, { name: FILE_NAME, mimeType: "text/plain", buffer: Buffer.from(FILE_TEXT, "utf8") });
+      for (let i = 0; i < 50 && !dialogs.length; i++) await S.sleep(100);
+      assert.equal(dialogs.length, 1, "添付: 確認が出る");
+      assert.match(dialogs[0], /伏せられません/);
+      await S.sleep(300);
+      assert.equal((await attached(a)).reduce((n, e) => n + e.names.length, 0), 0, "キャンセルすると、ページにファイルが渡らない");
+      assert.ok(await waitLogAbove("custom.partial", { via: "attachment" }, logged), "動作ログに残る (attachment)");
+    } finally { await a.close(); }
+
+    // ルールが無ければ、答えが来なくても今と同じ (確認は出ず、そのまま届く)
+    const n = await openSite("claude", { proCustomRules: { version: 1, rules: [] } }, { pill: false });
+    try {
+      await S.sleep(PAST_WAIT_MS);
+      const t0 = Date.now();
+      await sendNow(n, "claude", TEXT);
+      assert.deepEqual(await waitSent("claude", t0), [TEXT], "ルールが無ければ、確認なしでそのまま届く");
+      assert.equal(await S.sidebarState(n), null, "サイドバーは出ない");
+    } finally { await n.close(); }
+
+    // 答えが来たあとは今どおり: 分からないあいだのタブに、遅れて「Pro でない」(お試しが終わっていた) が届くと、
+    // ルールは効かず (off)、確認は出ない。ExtPay は問い合わせを始めるときにインストールの日時を読むので、いったん止めを
+    // 外し、お試しが終わった日時にしてから、もう一度止める
+    await release();
+    await h.ext.evaluate((t) => chrome.storage.sync.set({ extensionpay_installed_at: new Date(t).toISOString() }), Date.now() - 8 * DAY);
+    const releaseLate = await holdProAnswer();
+    try {
+      const late = await openSite("claude", {}, { pill: false });
+      try {
+        await S.sleep(PAST_WAIT_MS);
+        await waitSettings(late, { hasSecretLists: true }); // 分からないあいだは、伏せる側に倒している
+        await releaseLate(); // 止めていた問い合わせが、無料版の答えで返る
+        await waitSettings(late, { pro: false, hasSecretLists: false });
+        const t0 = Date.now();
+        await sendNow(late, "claude", TEXT);
+        assert.deepEqual(await waitSent("claude", t0), [TEXT], "答えが来たあと (Pro でない): 確認なしで、そのまま届く");
+        assert.equal(await S.sidebarState(late), null, "サイドバーは出ない");
+      } finally { await late.close(); }
+    } finally { await releaseLate(); }
+  } finally {
+    await release();
+    await setInstalledAt(Date.now()); // お試しに戻す
   }
 });

@@ -79,25 +79,30 @@
   });
   // Pro かどうか (docs/pro-license.md の D-PRO-06)。Service Worker のライセンス管理に聞き、この iframe の
   // エンジンに渡す。答えが来るまでは無料版のルールで動く
-  // 最初の答え (届かない・失敗したときも、来たものとする)。保存したカスタムルールがあるときだけ、渡す前に待つ
-  let resolveProAnswer = () => {};
-  const firstProAnswer = new Promise((resolve) => { resolveProAnswer = resolve; });
+  // proAnswered: Pro かどうかの答えを受け取ったか (届かない・失敗したあいだは false = 分からない)。
+  // firstProAttempt: 最初の問い合わせが終わったこと (答えでも失敗でも)。保存したカスタムルールがあるときだけ、渡す前に待つ
+  let proAnswered = false;
+  let resolveProAttempt = () => {};
+  const firstProAttempt = new Promise((resolve) => { resolveProAttempt = resolve; });
   function refreshPro() {
     try {
       chrome.runtime.sendMessage({ type: "license:get" }, (r) => {
-        if (chrome.runtime.lastError) { resolveProAnswer(); return; }
+        if (chrome.runtime.lastError) { resolveProAttempt(); return; }
+        const first = !proAnswered;
+        proAnswered = true;
         const next = !!(r && r.pro === true);
         const e = NS.engine;
         if (e && typeof e.setProEnabled === "function") {
           const changed = e.isProEnabled() !== next;
           e.setProEnabled(next);
-          // Pro の状態が変わったら、どちらの向きでも、カスタムルールを渡し直す
+          // Pro の状態が変わったら (どちらの向きでも)、または最初の答えが来たら (分からなかったあいだの扱いを外す)、
+          // カスタムルールを渡し直す
           const version = customRulesVersion;
-          if (changed) applyingCustomRules = applyingCustomRules.then(() => applyCustomRules(version)).catch((err) => { dl("error", errorFields(err)); });
+          if (changed || first) applyingCustomRules = applyingCustomRules.then(() => applyCustomRules(version)).catch((err) => { dl("error", errorFields(err)); });
         }
-        resolveProAnswer();
+        resolveProAttempt();
       });
-    } catch (_) { resolveProAnswer(); /* 拡張機能が入れ替わった直後など */ }
+    } catch (_) { resolveProAttempt(); /* 拡張機能が入れ替わった直後など */ }
   }
 
   // ---- Pro のカスタムルール (Pro Phase 2 の設計 (P1)) ------------------------------------
@@ -108,23 +113,32 @@
   let applyingCustomRules = Promise.resolve();
   let customRulesVersion = 0; // proCustomRules が変わるたびに増やす
   let appliedCustomRules = null; // 最後に渡したもの ("off" か "pro:<版>")
+  // ルールがあるのに、待っても Pro かどうか分からない (答えが待つ上限までに来ない・問い合わせに失敗した)。
+  // ルールを当てられないので、maskText は時間切れ (custom.status の partial) と同じに扱う
+  let customRulesUnknown = false;
   const hasEnabledCustomRule = (v) => !!(v && Array.isArray(v.rules) && v.rules.some((r) => r && typeof r === "object" && r.enabled !== false));
   async function applyCustomRules(version) {
     const stored = settings.proCustomRules;
+    const has = hasEnabledCustomRule(stored);
     // ルールがあるのに、Pro かどうかの答えがまだなら待つ (ルールの無い人は待たせない)
-    if (hasEnabledCustomRule(stored)) await Promise.race([firstProAnswer, new Promise((r) => setTimeout(r, 3000))]);
+    if (has) await Promise.race([firstProAttempt, new Promise((r) => setTimeout(r, 3000))]);
+    customRulesUnknown = has && !proAnswered;
     const e = NS.engine;
     if (!e || typeof e.setCustomRules !== "function") return;
-    const on = e.isProEnabled() && hasEnabledCustomRule(stored);
+    const on = e.isProEnabled() && has;
     const key = on ? `pro:${version}` : "off";
     if (key === appliedCustomRules) return;
     e.setCustomRules(on ? stored.rules : []);
     appliedCustomRules = key;
   }
-  // 列が空くまで待つ (待っているあいだに次の読み直しが並んだら、それも待つ)
+  // 列が空くまで待つ (待っているあいだに次の読み直しが並んだら、それも待つ)。Pro かどうか分からないままなら true を返す。
+  // そのときは、答えが来るよう聞き直す (5 秒に 1 回まで。届かなかった問い合わせのあとも、いつかは今どおりに戻るように)
+  let lastProRetry = 0;
   async function customRulesReady() {
     let last;
     do { last = applyingCustomRules; await last; } while (last !== applyingCustomRules);
+    if (customRulesUnknown && Date.now() - lastProRetry > 5000) { lastProRetry = Date.now(); refreshPro(); }
+    return customRulesUnknown;
   }
   // カスタムルールの時間の上限 (送る前の上限 LIMITS.sendBudgetMs。E2E のときだけ上書きできる)
   function customBudgetMs() {
@@ -241,7 +255,7 @@
   async function maskText(text) {
     if (!engineReady()) throw new Error("engine not ready");
     // 保存したカスタムルールを渡し終えてから伏せる (読んだのにまだ渡していない状態で、伏せない)
-    await customRulesReady();
+    const customUnknown = await customRulesReady();
     const res = await NS.engine.maskSanitize(text, {
       userForceMaskEntries: settings.maskForceList,
       mlEnabled: settings.mlEnabled,
@@ -251,8 +265,9 @@
     const all = Array.isArray(res.detections) ? res.detections : [];
     // ML の判定を使えたか (off / ok / timeout / error / unavailable)。時間切れと失敗は呼び手が知らせる (D-SC-10)
     const ml = res.ml && typeof res.ml.status === "string" ? res.ml.status : "off";
-    // Pro のカスタムルール (off / ok / partial)。partial (時間切れ) なら、呼び手は必ず確認を出す
-    const custom = res.custom && typeof res.custom.status === "string" ? res.custom.status : "off";
+    // Pro のカスタムルール (off / ok / partial)。partial (時間切れ) なら、呼び手は必ず確認を出す。
+    // ルールがあるのに Pro かどうか分からず、ルールを当てられなかったときも partial と同じに扱う
+    const custom = customUnknown ? "partial" : res.custom && typeof res.custom.status === "string" ? res.custom.status : "off";
     // 除外リストの値は伏せない (F-SC-18)。除いたときは、残りの検出だけで伏せ字を作り直す
     const allowed = allowedMatcher();
     const kept = all.filter((d) => !(d && (allowed(String(d.text)) || allowed(text.slice(d.start, d.end)))));
