@@ -79,8 +79,8 @@
 
   // ---- 検査 ---------------------------------------------------------------------------
   const LABEL_MESSAGE = "伏せ字の名前は英大文字で始め、英大文字・数字・_ だけで 32 文字までにしてください";
-  const NFKC_MESSAGE = "本文は NFKC (全角の英数字を半角に直すなど) で整えてから照合するため、全角の英数字・記号、半角のカナ、㈱、見えない文字は、正規表現に入れても当たりません。整えたあとの形で書いてください (ＡＣＭＥ は ACME、㈱ は \\(株\\))";
-  const DASH_MESSAGE = "数字と数字の間のハイフン類 (ー ‐ ― − など) は、本文では - に直されてから照合するため、正規表現に入れても当たりません。数字の間は - と書いてください";
+  const NFKC_MESSAGE = "本文は NFKC (全角の英数字を半角に直す、「テ」と濁点を「デ」にまとめる、など) で整えてから照合するため、全角の英数字・記号、半角のカナ、㈱、見えない文字、分解された形 (「e」とアクセントなど) は、正規表現に入れても当たりません。整えたあとの形で書いてください (ＡＣＭＥ は ACME、㈱ は \\(株\\)、「e」とアクセントは é)。結合文字は、直前の文字とまとめた形にしてください";
+  const DASH_MESSAGE = "ハイフン類 (ー ‐ ― − など) が、数字に当たりうる文字の間にあります (パターンの先頭と末尾の前後も、数字でありうるとみなします)。本文では、数字に挟まれたハイフン類は - に直されてから照合するため、当たりません。数字の間は - と書くか、[ー-] のように - も入れたクラスで書いてください";
   const EMPTY_MESSAGE = "空の文字にも当たる形は使えません (x* ・ \\b ・ ^ ・ (?=ID) など)。何かの文字に必ず当たる形にしてください";
   // 空の文字に当たるかを調べる短い文。幅 0 で当たるもの (\b ・ ^ ・ 先読み) も、どれかで長さ 0 の当たりになる
   const EMPTY_SAMPLES = ["", "a", "A", "0", " ", "-", "_", "\n", "あ", "ア", "漢", "aA0 -_\nあア漢"];
@@ -257,6 +257,11 @@
       if (c === undefined) return { t: "char", src: "\\\\" };
       if (c === "b" || c === "B") return { t: "zero" };
       if ((c === "k" && text.length > 2) || (c >= "1" && c <= "9")) return { t: "ref" };
+      // u か x と 16 進数で書いた 1 文字は、その文字として見る (本文の形に直すと変わる文字の検査のため)
+      if (c === "u" || c === "x") {
+        const codePoint = parseInt(text.slice(2).replace(/[{}]/g, ""), 16);
+        if (codePoint <= 0x10ffff) return { t: "char", src: text, lit: String.fromCodePoint(codePoint) };
+      }
       return { t: "char", src: text };
     }
     function parseGroup() {
@@ -395,8 +400,11 @@
 
   // ---- 本文の形に直すと変わる文字 ---------------------------------------------------------
   // 全角の英数字・半角のカナ・㈱・見えない文字などは、本文では別の文字に直されているので、正規表現に書いても当たらない。
-  // 普通に書いた文字は、直ると変わるものを見つける。文字クラスの中は、変わる文字の直した形 (: など) がそのクラスにも入っていれば、
-  // 差し支えない ([:：] の ： は、本文では : になり、: が入っている)。[Ａ-Ｚ] のように、直した形が入らないクラスは見つける
+  // 分解された形 (「テ」+ 濁点、「e」+ アクセント) も、本文では 1 文字 (「デ」「é」) にまとめられるので、当たらない。
+  // 1 文字ずつ見ると、単独では変わらない結合文字が通ってしまうので、続いた普通の文字をまとめて、NFKC と比べる。
+  // 結合文字が、グループやクラスの直後など、まとめる相手が無い所にあるときも見つける (どの文字ともまとまらない結合文字は、差し支えない)。
+  // 文字クラスの中は、変わる文字の直した形 (: など) がそのクラスにも入っていれば、差し支えない
+  // ([:：] の ： は、本文では : になり、: が入っている)。[Ａ-Ｚ] のように、直した形が入らないクラスは見つける
   function classHasDeadMember(src) {
     const re = matcherOf(src);
     for (const c of src) {
@@ -405,54 +413,136 @@
     }
     return false;
   }
-  const hasDeadChars = (alts) => alts.some((seq) => seq.some((it) => {
-    const n = it.node;
-    if (n.t === "group") return hasDeadChars(n.alts);
-    if (n.t !== "char") return false;
-    if (n.lit !== undefined) return toEngineForm(n.lit) !== n.lit;
-    return n.src[0] === "[" ? classHasDeadMember(n.src) : toEngineForm(n.src) !== n.src;
-  }));
+  const isMark = (c) => /^\p{M}$/u.test(c);
+  // 結合文字が、直前のどれかの文字とまとまって別の 1 文字になるか (濁点・アクセントなどは true、タイ文字の母音記号などは false)
+  const composeCache = new Map();
+  function composesWithBase(mark) {
+    if (!composeCache.has(mark)) {
+      let found = false;
+      for (let cp = 0x20; cp <= 0x30ff && !found; cp++) {
+        const base = String.fromCodePoint(cp);
+        found = (base + mark).normalize("NFC") !== base.normalize("NFC") + mark;
+      }
+      composeCache.set(mark, found);
+    }
+    return composeCache.get(mark);
+  }
+  // 回数の指定が無い、普通に書いた 1 文字
+  const isPlainLiteral = (it) => it.node.t === "char" && it.node.lit !== undefined && it.min === 1 && it.max === 1;
+  function seqHasDeadChars(seq) {
+    let run = ""; // 続いた普通の文字
+    const runIsDead = () => run !== "" && toEngineForm(run) !== run;
+    for (const it of seq) {
+      const n = it.node;
+      if (isPlainLiteral(it)) {
+        if (run === "" && isMark(n.lit) && composesWithBase(n.lit)) return true; // まとめる相手が無い結合文字
+        run += n.lit;
+        continue;
+      }
+      if (runIsDead()) return true;
+      run = "";
+      if (n.t === "group") {
+        if (n.alts.some(seqHasDeadChars)) return true;
+      } else if (n.t === "char") {
+        if (n.lit !== undefined) {
+          if (toEngineForm(n.lit) !== n.lit || (isMark(n.lit) && composesWithBase(n.lit))) return true;
+        } else if (n.src[0] === "[" ? classHasDeadMember(n.src) : toEngineForm(n.src) !== n.src) {
+          return true;
+        }
+      }
+    }
+    return runIsDead();
+  }
+  const hasDeadChars = (alts) => alts.some(seqHasDeadChars);
 
   // ---- 数字に挟まれたハイフン類 ---------------------------------------------------------
-  // 数字と数字に挟まれたハイフン類 (ー ‐ ― − など) は、本文では - に直されている。正規表現に書くと、決して当たらない。
-  // 挟む両側が、必ず数字 (\d・[0-9]・数字の 1 文字・それだけでできたグループ) で、ハイフン類のほうも省けないときだけ見つける
-  // (前が数字とは限らない形や、- も含むクラスは、当たりうるので通す)。
+  // 数字と数字に挟まれたハイフン類 (ー ‐ ― − など) は、本文では - に直されている。正規表現に書くと、その形には決して当たらない。
+  // 「ハイフン類の項目」は、ハイフン類のどれかに当たり、- には当たらない 1 文字の項目 (そのままの ー や [ーa])。
+  // - にも当たる項目 ([ー-] など) は、- に直された本文にも当たるので、通す。
+  // 前に来うる項目と後ろに来うる項目の、どちらにも、数字に当たりうるもの (\d ・ [0-9A-Z] ・ \w ・ . など) があれば、断る。
+  // 必ず数字のときだけではない。パターンの先頭と末尾 (先読み・後読みの中の先頭と末尾も) は、前後に何が来るか分からないので、
+  // 数字でありうるとする。先読み・後読みで隣が数字でないと言えても、通さない。後方参照は、何にでも当たりうる。
+  // 前後に来うる項目は、正規表現の Glushkov 構成と同じ考え方で、最初・最後・次に来る項目の集まりを求めて、
+  // 省ける項目・グループの境目・繰り返しの継ぎ目 (最後の項目のあとに、最初の項目が来る) をまたいで見る
   const matcherOf = (src) => {
     try { return new RegExp(`^(?:${src})$`, "u"); } catch (_) { return null; }
   };
-  function onlyDashes(src) {
-    const re = matcherOf(src);
-    return re !== null && [...DASHES].some((c) => re.test(c)) && !SAMPLES.some((c) => !DASHES.includes(c) && re.test(c));
-  }
-  function digitOnly(src) {
-    const re = matcherOf(src);
-    if (re === null) return false;
-    const matched = SAMPLES.filter((c) => re.test(c));
-    return matched.some((c) => c >= "0" && c <= "9") && matched.every((c) => /^\p{Nd}$/u.test(c));
-  }
-  function deadDashNode(node) {
-    if (node.t === "char") return onlyDashes(node.src);
-    if (node.t === "group" && !node.look) return node.alts.every((seq) => seq.length === 1 && seq[0].min >= 1 && deadDashNode(seq[0].node));
-    return false;
-  }
-  // node の最後 (last が true) か最初の 1 文字が、必ず数字か
-  function digitEdge(node, last) {
-    if (node.t === "char") return digitOnly(node.src);
-    if (node.t === "group" && !node.look) {
-      return node.alts.every((seq) => {
-        const it = last ? seq[seq.length - 1] : seq[0];
-        return it !== undefined && it.min >= 1 && digitEdge(it.node, last);
-      });
+  const ASCII_DIGITS = [..."0123456789"];
+
+  function neighbourGraph(alts) {
+    const atoms = []; // 文字の項目と後方参照 (出てきた順)。{ src } か { any: true }
+    const follow = []; // follow[p] = p の直後に来うる項目の番号の集まり
+    const starts = new Set(); // 前に何が来るか分からない項目 (パターンと、先読み・後読みの中の、最初になりうる項目)
+    const ends = new Set(); // 後ろに何が来るか分からない項目
+    const link = (froms, tos) => froms.forEach((p) => tos.forEach((q) => follow[p].add(q)));
+    const union = (...sets) => new Set(sets.flatMap((s) => [...s]));
+
+    function item(it) {
+      const node = it.node;
+      let r;
+      if (node.t === "char" || node.t === "ref") {
+        atoms.push(node.t === "ref" ? { any: true } : { src: node.src });
+        follow.push(new Set());
+        const p = atoms.length - 1;
+        r = { first: new Set([p]), last: new Set([p]), nullable: false };
+      } else if (node.t === "group" && !node.look) {
+        r = alternatives(node.alts);
+      } else {
+        if (node.t === "group") standalone(node.alts); // 先読み・後読みの中は、前後が分からない別のパターンとして見る
+        r = { first: new Set(), last: new Set(), nullable: true }; // 幅 0 のもの・先読み・後読みは、素通しにする
+      }
+      if (it.max >= 2) link(r.last, r.first); // 繰り返しの継ぎ目
+      if (it.min === 0) r.nullable = true;
+      return r;
     }
-    return false;
+    function sequence(items) {
+      let first = new Set();
+      let last = new Set();
+      let nullable = true;
+      for (const it of items) {
+        const x = item(it);
+        link(last, x.first);
+        if (nullable) first = union(first, x.first);
+        last = x.nullable ? union(last, x.last) : x.last;
+        nullable = nullable && x.nullable;
+      }
+      return { first, last, nullable };
+    }
+    function alternatives(list) {
+      const parts = list.map(sequence);
+      return { first: union(...parts.map((p) => p.first)), last: union(...parts.map((p) => p.last)), nullable: parts.some((p) => p.nullable) };
+    }
+    function standalone(list) {
+      const r = alternatives(list);
+      r.first.forEach((p) => starts.add(p));
+      r.last.forEach((p) => ends.add(p));
+    }
+    standalone(alts);
+    return { atoms, follow, starts, ends };
   }
-  const hasDeadDash = (alts) => alts.some((seq) => seq.some((it, i) => {
-    if (it.node.t === "group" && hasDeadDash(it.node.alts)) return true;
-    const prev = seq[i - 1];
-    const next = seq[i + 1];
-    return prev !== undefined && next !== undefined && it.min >= 1 && prev.min >= 1 && next.min >= 1
-      && deadDashNode(it.node) && digitEdge(prev.node, true) && digitEdge(next.node, false);
-  }));
+
+  function hasDeadDash(alts) {
+    const { atoms, follow, starts, ends } = neighbourGraph(alts);
+    const kinds = new Map();
+    const kindOf = (atom) => {
+      if (atom.any) return { digit: true, dash: false };
+      if (!kinds.has(atom.src)) {
+        const re = matcherOf(atom.src);
+        kinds.set(atom.src, re === null
+          ? { digit: false, dash: false }
+          : { digit: ASCII_DIGITS.some((c) => re.test(c)), dash: [...DASHES].some((c) => re.test(c)) && !re.test("-") });
+      }
+      return kinds.get(atom.src);
+    };
+    const before = atoms.map(() => []); // before[p] = p の直前に来うる項目の番号
+    follow.forEach((set, p) => set.forEach((q) => before[q].push(p)));
+    return atoms.some((atom, p) => {
+      if (!kindOf(atom).dash) return false;
+      const left = starts.has(p) || before[p].some((q) => kindOf(atoms[q]).digit);
+      const right = ends.has(p) || [...follow[p]].some((q) => kindOf(atoms[q]).digit);
+      return left && right;
+    });
+  }
 
   // ---- stressTest -------------------------------------------------------------------
   // 同じ文字の長い列のあとに当たらない文字を 1 つ置いた文に当て、所要時間を測って、1 本のルールぶんを合計する。

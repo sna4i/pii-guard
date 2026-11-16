@@ -24,6 +24,15 @@ const SOFT_HYPHEN = fromCodes(0x00ad);
 const IDEOGRAPHIC_SPACE = fromCodes(0x3000);
 // エンジンが、数字に挟まれたときに - に直すハイフン類: ー・U+2010〜U+2015・U+2212・U+FE63 (U+2011 と U+FE63 は NFKC で先に変わる)
 const DASHES = [0x30fc, 0x2010, 0x2011, 0x2012, 0x2013, 0x2014, 0x2015, 0x2212, 0xfe63].map((c) => fromCodes(c));
+// 結合文字 (濁点・アクセント) と、まとめた形 (「デ」・「é」)
+const DAKUTEN = fromCodes(0x3099);
+const ACUTE = fromCodes(0x0301);
+const DE = fromCodes(0x30c7);
+const E_ACUTE = fromCodes(0x00e9);
+const GA = fromCodes(0x304c);
+const PA = fromCodes(0x30d1);
+const HANDAKUTEN = fromCodes(0x309a);
+const BACKSLASH = fromCodes(92); // バックスラッシュ。エスケープ (u と 16 進数) を、ファイルに書かずに組み立てるため
 const LABEL = "NORM_TEST";
 
 const exact = (...words) => ({ kind: "words", words, match: "exact", label: LABEL });
@@ -46,7 +55,7 @@ function detect(rule, text) {
 }
 const codes = (s) => [...s].map((c) => c.codePointAt(0).toString(16)).join(" ");
 
-test("T-CR-14 語と正規表現が、エンジンが照合する本文の形 (NFKC・見えない文字・数字に挟まれたハイフン類・1 桁ずつ空白で区切った数字) と合っている", () => {
+test("T-CR-14 語と正規表現が、エンジンが照合する本文の形 (NFKC・見えない文字・数字に挟まれたハイフン類・分解された形・1 桁ずつ空白で区切った数字) と合っている。検査を通した正規表現は、同じ本文に当たる", () => {
   // 全角の本文 (Pro Phase 2 の設計 (P1) の例)
   assert.deepEqual(detect(exact("ACME-1234"), "コードはＡＣＭＥ－１２３４です"), ["ＡＣＭＥ－１２３４"]);
   assert.deepEqual(detect(regex("ACME-\\d{4}"), "コードはＡＣＭＥ－１２３４です"), ["ＡＣＭＥ－１２３４"]);
@@ -87,6 +96,115 @@ test("T-CR-14 語と正規表現が、エンジンが照合する本文の形 (N
   assert.deepEqual(detect(partial("12"), "前1 2後"), []);
   assert.deepEqual(detect(partial("1 2-3 4"), "前1 2-3 4後"), ["1 2-3 4"]);
   assert.deepEqual(detect(partial("12-34"), "前1 2-3 4後"), ["1 2-3 4"]);
+
+  // 検査を通した正規表現は、まったく同じ本文に当たる (通したのに、黙って効かない形を作らない)。組ごとに、
+  // 「validateRule が断る」か「エンジンがその本文で検出する」のどちらか。断ってばかりで空回りしないよう、通すべき形が通り、当たることも確かめる
+  const settle = (pattern, text) => {
+    if (!validateRule(regex(pattern)).ok) return "断った";
+    assert.ok(detect(regex(pattern), text).length >= 1, `通したのに、エンジンの本文に当たらない: ${JSON.stringify(pattern)} (${codes(pattern)}) / ${JSON.stringify(text)} (${codes(text)})`);
+    return "当たった";
+  };
+  const D = DASHES[0];
+  const tel = `TEL 090${D}1234${D}5678 desu`;
+  // グループの端や繰り返しの継ぎ目にあるハイフン類
+  for (const p of [`\\d{3}(${D}\\d{4})`, `\\d{2,4}(${D}\\d{2,4}){2}`, `(\\d{3}${D})\\d{4}`, `(?:\\d{3}${D}){2}\\d{4}`, `0\\d{1,4}(?:${D}\\d{1,4}){2}`]) {
+    assert.equal(settle(p, tel), "断った", p);
+  }
+  // 前後が数字に当たりうる・パターンの先頭と末尾
+  assert.equal(settle(`[0-9A-Z]${D}[0-9A-Z]`, `1${D}2`), "断った");
+  assert.equal(settle(`\\w+${D}\\d+`, `A123${D}456`), "断った");
+  assert.equal(settle(`${D}\\d{4}`, `123${D}4567`), "断った");
+  assert.equal(settle(`\\d{4}${D}`, `1234${D}567`), "断った");
+  // 分解された形 (NFD) は、NFC の本文にも NFD の本文にも当たらない
+  const nfdDe = `テ${DAKUTEN}ータ\\d{4}`;
+  assert.equal(settle(nfdDe, `${DE}ータ1234`), "断った");
+  assert.equal(settle(nfdDe, `テ${DAKUTEN}ータ1234`), "断った");
+  const nfdCafe = `cafe${ACUTE}-\\d{2}`;
+  assert.equal(settle(nfdCafe, `caf${E_ACUTE}-12`), "断った");
+  assert.equal(settle(nfdCafe, `cafe${ACUTE}-12`), "断った");
+  // 通すべき形は通り、当たる
+  assert.equal(settle(`${DE}ータ\\d{4}`, `${DE}ータ1234`), "当たった");
+  assert.equal(settle(`${DE}ータ\\d{4}`, `テ${DAKUTEN}ータ1234`), "当たった", "NFD の本文も、エンジンが NFC に直す");
+  assert.equal(settle(`caf${E_ACUTE}-\\d{2}`, `cafe${ACUTE}-12`), "当たった");
+  assert.equal(settle(`x${ACUTE}\\d`, `x${ACUTE}1`), "当たった", "どの文字ともまとまらない結合文字は、そのまま残る");
+  assert.equal(settle(`\\d{3}[${D}-]\\d{4}`, `123${D}4567`), "当たった");
+  assert.equal(settle("\\d{3}-\\d{4}", `123${D}4567`), "当たった");
+  assert.equal(settle(`\\d+${D}${D}\\d+`, `1${D}${D}2`), "当たった", "ハイフン類が 2 つ続くものは、エンジンも - に直さない");
+  // 乱数 (決めた種) で作った正規表現と本文の組も同じ。生の本文に当たる正規表現を検査が通したなら、エンジンの本文にも当たる。
+  // 数字・ハイフン類・かな・英字だけの短い本文と、グループ・繰り返し・選択肢・先読み・後読みを含む正規表現
+  let seedB = 20261117;
+  const rand = () => { seedB = (Math.imul(seedB, 1664525) + 1013904223) >>> 0; return seedB / 4294967296; };
+  const from = (list) => list[Math.floor(rand() * list.length)];
+  const atoms = ["\\d", "[0-9]", "[0-9A]", "\\w", ".", "1", "2", DASHES[0], DASHES[1], `[${DASHES[0]}-]`, "-", "あ", "A", "[あA]", `[${DASHES[0]}あ]`, "\\D", "[^a]"];
+  const quants = ["", "", "", "?", "*", "+", "{2}", "{1,2}"];
+  const sequence = (depth) => {
+    let s = "";
+    for (let i = 0, count = 1 + Math.floor(rand() * 4); i < count; i++) {
+      const r = rand();
+      if (depth > 0 && r < 0.3) s += from(["(", "(?:"]) + sequence(depth - 1) + (rand() < 0.3 ? "|" + sequence(depth - 1) : "") + ")" + from(quants);
+      else if (r < 0.36) s += from(["(?=\\d)", "(?<!x)", "\\b", "(?<=\\d)"]);
+      else s += from(atoms) + from(quants);
+    }
+    return s;
+  };
+  const textChars = ["1", "2", "7", DASHES[0], DASHES[1], "-", "あ", "A"];
+  let accepted = 0;
+  let compared = 0;
+  for (let n = 0; n < 400; n++) {
+    const pattern = sequence(2);
+    if (pattern.length > 60 || !validateRule(regex(pattern)).ok) continue;
+    accepted++;
+    const rawRe = new RegExp(pattern, "u");
+    for (let k = 0; k < 20; k++) {
+      const text = Array.from({ length: 1 + Math.floor(rand() * 7) }, () => from(textChars)).join("");
+      if (!rawRe.test(text)) continue;
+      compared++;
+      assert.ok(detect(regex(pattern), text).length >= 1, `検査を通した正規表現が、同じ本文に当たらない: ${JSON.stringify(pattern)} / ${JSON.stringify(text)} (${codes(text)})`);
+    }
+  }
+  assert.ok(accepted > 100 && compared > 500, `受け付けた正規表現 ${accepted} 個、比べた組 ${compared}`);
+
+  // 結合文字・全角・エスケープを含む正規表現も同じ。パターンと、そのパターンに必ず当たる例の本文を、同じ乱数から作る。
+  // 分解された形など、本文では別の形に直される文字を含むものは、例の本文 (生の字のまま) には当たっても、エンジンの本文には当たらない。
+  // 検査を通したものは、エンジンでも例に当たる (ここで断られたものがあることも確かめる)
+  const lits = ["テ", DE, "か", GA, "ハ", PA, DAKUTEN, HANDAKUTEN, "e", E_ACUTE, ACUTE, "x", "a", "1", "-", "ー", "c", "ＡＢ"];
+  const kinds = [["[あ-ん]", "あ"], ["[a-z]", "a"], ["\\w", "a"], [".", "x"], ["\\S", "x"], [`[${DE}か]`, "か"]];
+  const escapes = [[`${BACKSLASH}u0301`, ACUTE], [`${BACKSLASH}u3099`, DAKUTEN], [`${BACKSLASH}u00e9`, E_ACUTE], [`${BACKSLASH}uFF21`, fromCodes(0xff21)]];
+  const counts = [["", [1]], ["", [1]], ["?", [0, 1]], ["+", [1, 2]], ["{2}", [2]]];
+  const build = (depth) => {
+    let pat = "";
+    let inst = "";
+    for (let i = 0, count = 1 + Math.floor(rand() * 5); i < count; i++) {
+      const r = rand();
+      const [quant, times] = from(counts);
+      const repeat = from(times);
+      let p;
+      let s;
+      if (depth > 0 && r < 0.18) {
+        const a = build(depth - 1);
+        const b = rand() < 0.3 ? build(depth - 1) : null;
+        p = from(["(", "(?:"]) + a.pat + (b ? `|${b.pat}` : "") + ")";
+        s = (b && rand() < 0.5 ? b : a).inst;
+      } else if (r < 0.3) [p, s] = from(kinds);
+      else if (r < 0.35) [p, s] = from(escapes);
+      else { p = from(lits); s = p; }
+      pat += p + quant;
+      inst += s.repeat(repeat);
+    }
+    return { pat, inst };
+  };
+  let acceptedLive = 0;
+  let rejectedLive = 0;
+  for (let n = 0; n < 500; n++) {
+    const { pat, inst } = build(2);
+    let rawRe;
+    try { rawRe = new RegExp(pat, "u"); } catch { continue; }
+    if (pat.length > 70 || inst === "" || !rawRe.test(inst)) continue;
+    if (!validateRule(regex(pat)).ok) { rejectedLive++; continue; }
+    acceptedLive++;
+    assert.ok(detect(regex(pat), inst).length >= 1, `検査を通した正規表現が、必ず当たるはずの例に当たらない: ${JSON.stringify(pat)} (${codes(pat)}) / ${codes(inst)}`);
+  }
+  assert.ok(acceptedLive > 100 && rejectedLive > 30, `通した ${acceptedLive} 個、断った ${rejectedLive} 個`);
 
   // 語の組み立てが、本文の形とずれていないかを、決めた種のランダムな語で確かめる。
   // 数字・ハイフン類・空白・全角と半角・見えない文字を混ぜた語は、その語が入った本文に必ず当たる
