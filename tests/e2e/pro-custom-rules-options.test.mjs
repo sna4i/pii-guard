@@ -15,6 +15,8 @@ const EXPORT_FILE = "pii-guard-custom-rules.json";
 const NOTE_NOT_PRO = "カスタムルールは Pro の機能です";
 const NOTE_EXPORT = "書き出したファイルには、顧客名などが入ることがあります。扱いに気を付けてください";
 const NOTE_LLM = "カスタムルールを使っているあいだは、LLM の置き換えモードは使わず、いつもの伏せ方で送ります";
+// 単語リストは大文字と小文字を区別する (区別しない選択は作らない。正規表現の ignoreCase を案内する)
+const NOTE_CASE = "大文字と小文字は区別します (区別しないときは正規表現で ignoreCase を使ってください)";
 const TIMEOUT_REASON = "時間がかかりすぎる正規表現です";
 // validateRule を通り、stressTest が 60 字で止まらない形 (Pro Phase 2 の設計 (P1) の実測)。画面のスレッドで試すと画面ごと固まる
 const HANG_PATTERN = String.raw`(?:[a-z][a-z]?)*(?<!x)\s+\d`;
@@ -119,6 +121,7 @@ test("T-CR-41 Pro (お試し) のとき: フォームから単語リストのル
     assert.equal(await p.isVisible("#cr-pro-note"), false, "Pro のあいだは、Pro の機能という案内を出さない");
     assert.equal(await p.isDisabled("#cr-save"), false, "Pro のあいだは、保存を押せる");
     assert.ok((await p.textContent("#custom-rules-card")).includes(NOTE_LLM), "置き換えモードを入れている人が気づける一文");
+    assert.ok((await p.textContent("#cr-words-fields")).includes(NOTE_CASE), "語の欄に、大文字と小文字を区別することと、区別しないときの書き方がある");
     await waitRows(p, 0);
 
     await fillWords(p, { label: "PROJECT", words: ["アルファ計画", "ベータ計画", ""], match: "exact" });
