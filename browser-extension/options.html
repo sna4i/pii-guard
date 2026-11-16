@@ -37,9 +37,10 @@
         </div>
       </section>
 
-      <!-- Pro のカスタムルール (Pro Phase 2 の設計 (P1))。出し方は #pro-card と同じ (options.js の renderProLicense から):
-           ExtensionPay に登録する前 (ID が仮) は、まるごと出さない。Pro でないときは案内を出して、操作を止める。
-           一覧・エラー・結果は options.js が textContent だけで組む。確かめは options-rules-worker.js (Worker) で走る -->
+      <!-- Pro のカスタムルール (Pro Phase 2 の設計 (P1))。動きは options-custom-rules.js。出し方は #pro-card と同じ
+           (options.js の renderProLicense から渡す): ExtensionPay に登録する前 (ID が仮) は、まるごと出さない。
+           Pro でないときは案内を出して、操作を止める。一覧・エラー・結果は textContent だけで組む。
+           確かめは options-rules-worker.js (Worker) で走る -->
       <section class="card" id="custom-rules-card" hidden>
         <h2>カスタムルール</h2>
         <p class="hint">自社の ID・プロジェクト名・顧客名など、ふつうの検出では拾えない語を、単語リストか正規表現で足せます。当たった部分は、伏せ字の名前が PROJECT なら &lt;PROJECT_1&gt; のように置き換わります。ルールはこの端末の中だけに保存し、外には送りません。</p>
@@ -346,6 +347,7 @@
     <script src="tint.js"></script>
     <script src="license/license-view.js"></script>
     <script src="engine/custom-rules.js"></script>
+    <script src="options-custom-rules.js"></script>
     <script src="options.js"></script>
   </body>
 </html>
