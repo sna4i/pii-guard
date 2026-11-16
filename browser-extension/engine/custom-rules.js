@@ -79,6 +79,10 @@
 
   // ---- 検査 ---------------------------------------------------------------------------
   const LABEL_MESSAGE = "伏せ字の名前は英大文字で始め、英大文字・数字・_ だけで 32 文字までにしてください";
+  // USER_DEFINED_ で始まる名前は、「常に伏せる語」(サイドバーから足す語) の行の名前の形。開いたサイドバーは、語が変わると
+  // その形の行を捨てて組み直すので、カスタムの行も黙って消える
+  const RESERVED_LABEL_PREFIX = "USER_DEFINED_";
+  const RESERVED_LABEL_MESSAGE = `伏せ字の名前は ${RESERVED_LABEL_PREFIX} で始められません (「常に伏せる語」の伏せ字が使う名前です)。別の名前にしてください`;
   const NFKC_MESSAGE = "本文は NFKC (全角の英数字を半角に直す、「テ」と濁点を「デ」にまとめる、など) で整えてから照合するため、全角の英数字・記号、半角のカナ、㈱、見えない文字、分解された形 (「e」とアクセントなど) は、正規表現に入れても当たりません。整えたあとの形で書いてください (ＡＣＭＥ は ACME、㈱ は \\(株\\)、「e」とアクセントは é)。結合文字は、直前の文字とまとめた形にしてください";
   const DASH_MESSAGE = "ハイフン類 (ー ‐ ― − など) が、数字に当たりうる文字の間にあります (パターンの先頭と末尾の前後も、数字でありうるとみなします)。本文では、数字に挟まれたハイフン類は - に直されてから照合するため、当たりません。数字の間は - と書くか、[ー-] のように - も入れたクラスで書いてください";
   const EMPTY_MESSAGE = "空の文字にも当たる形は使えません (x* ・ \\b ・ ^ ・ (?=ID) など)。何かの文字に必ず当たる形にしてください";
@@ -169,6 +173,7 @@
     let label = input.label;
     if (label === undefined || label === null || label === "") label = DEFAULT_LABEL;
     else if (typeof label !== "string" || !LABEL_RE.test(label)) errors.push(LABEL_MESSAGE);
+    else if (label.startsWith(RESERVED_LABEL_PREFIX)) errors.push(RESERVED_LABEL_MESSAGE);
 
     let enabled = input.enabled;
     if (enabled === undefined) enabled = true;

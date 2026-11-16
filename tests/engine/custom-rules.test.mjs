@@ -1,5 +1,5 @@
 // tests/engine/custom-rules.test.mjs — Pro のカスタムルールの部品 engine/custom-rules.js
-// (Pro Phase 2 の設計 (P1)、T-CR-01〜13)
+// (Pro Phase 2 の設計 (P1)、T-CR-01〜13・54)
 //
 // ルールの検査 (validateRule・isRiskyPattern・stressTest)、組み立て (compileRule・compileRules)、
 // 書き出しと読み込み (exportRules・importRules) を、部品だけで確かめる。エンジンへの組み込みは別のテスト。
@@ -527,4 +527,20 @@ test("T-CR-13 読み込み: 正しいもの・正しくないもの・同じも�
   assert.deepEqual(slow.rules, []);
   assert.equal(slow.rejected.length, 1);
   assert.equal(slow.rejected[0].index, 0);
+});
+
+test("T-CR-54 名前が USER_DEFINED_ で始まるルールは断る (「常に伏せる語」の行の名前の形で、開いたサイドバーの組み直しがその名前の行を捨てるため)。読み込みも同じ理由で断る", () => {
+  for (const label of ["USER_DEFINED_", "USER_DEFINED_OTHER", "USER_DEFINED_PERSON", "USER_DEFINED_X1"]) {
+    const errors = errorsOf(regex("a1", { label }));
+    assert.ok(errors.some((m) => m.includes("USER_DEFINED_")), `名前 ${label} は断る (${errors.join(" / ")})`);
+    assert.ok(errorsOf({ ...exact("アルファ計画"), label }).some((m) => m.includes("USER_DEFINED_")), `単語リストも同じ (${label})`);
+    assert.equal(compileRule({ ...exact("アルファ計画"), label }), null, `エンジンも組み立てない: 保存済みのルールでも効かない (${label})`);
+  }
+  // 似ているだけの名前は、これまでどおり通る
+  for (const label of ["USER_DEFINED", "USER_DEFINEDX", "USERDEFINED_OTHER", "MY_USER_DEFINED_OTHER"]) assert.equal(ruleOf(regex("a1", { label })).label, label);
+
+  const imported = importRules(fileOf([{ id: "u1", label: "USER_DEFINED_OTHER", kind: "words", words: ["アルファ計画"], match: "exact" }]), [], noStress);
+  assert.equal(imported.added, 0);
+  assert.deepEqual(imported.rejected.map((r) => r.index), [0]);
+  assert.ok(imported.rejected[0].errors.some((m) => m.includes("USER_DEFINED_")), "読み込みでも、理由つきで断る");
 });
