@@ -1,5 +1,5 @@
 // tests/e2e/pro-custom-rules-options.test.mjs — 設定画面の Pro のカスタムルールのカード
-// (Pro Phase 2 の設計 (P1)、T-CR-41〜45・47〜51。T-CR-46 は ID が仮の版が要るので別のファイル)
+// (Pro Phase 2 の設計 (P1)、T-CR-41〜45・47〜51・56。T-CR-46 は ID が仮の版が要るので別のファイル)
 //
 // 土台は tests/fixtures/pro-ext.mjs の launchPro (拡張機能の写し + 模擬の ExtensionPay。入れた直後はお試しの Pro)。
 // 設定画面 (options.html) を開き、フォームの入力・一覧・読み込み・書き出しを、ふつうの利用者と同じように操作する。
@@ -544,6 +544,42 @@ test("T-CR-50 完全一致で語の端がひらがなのとき: 「この語は�
     await save(p);
     await waitRows(p, 1);
     assert.deepEqual((await savedRules()).rules[0].words, ["山田さん"]);
+    assert.deepEqual(p.__errors, [], "ページのエラーは無い");
+  } finally { await p.close(); }
+});
+
+test("T-CR-56 編集の保存: 確かめ (Worker) を待つあいだに別の画面がそのルールを変えたら、新しいルールとして足さずに断る (追加か編集かは、確かめに出す前に決める)", async () => {
+  await setRules([WORDS_RULE, REGEX_RULE]);
+  const p = await openCard();
+  try {
+    await waitRows(p, 2);
+    await row(p, 1).locator(".cr-edit").click();
+    await p.fill("#cr-pattern", "ACME-\\d{6}");
+    // 確かめの頼み (check) を Worker に渡す前に、別の画面がこのルールを変える (storage の書き換え)。開いている一覧が
+    // 出し直されて編集が終わる (「編集をやめました」) のを待ってから、頼みを渡す
+    const changed = [WORDS_RULE, { ...REGEX_RULE, pattern: "ACME-\\d{5}" }];
+    await p.evaluate((rules) => {
+      const RealWorker = window.Worker;
+      window.Worker = class extends RealWorker {
+        postMessage(message) {
+          if (!message || message.op !== "check") return super.postMessage(message);
+          chrome.storage.local.set({ proCustomRules: { version: 1, rules } }).then(async () => {
+            for (let i = 0; i < 50 && !document.getElementById("cr-status").textContent.includes("編集をやめました"); i++) {
+              await new Promise((r) => setTimeout(r, 10));
+            }
+            super.postMessage(message);
+          });
+          return undefined;
+        }
+      };
+    }, changed);
+    await save(p);
+    const outcome = await p.waitForFunction(() => {
+      if (document.getElementById("cr-errors").textContent.includes("ほかの画面でルールが変わっていたため")) return "refused";
+      return document.getElementById("cr-status").textContent === "保存しました" ? "saved" : null;
+    }, null, { timeout: 8000 });
+    assert.equal(await outcome.jsonValue(), "refused", "編集していたルールが変わっていたら、保存せずに断る");
+    assert.deepEqual((await savedRules()).rules, changed, "別の画面の変更が残り、同じ id のルールが新しく足されない");
     assert.deepEqual(p.__errors, [], "ページのエラーは無い");
   } finally { await p.close(); }
 });

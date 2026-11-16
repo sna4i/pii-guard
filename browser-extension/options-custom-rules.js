@@ -342,6 +342,10 @@
       return;
     }
     status.textContent = "確認しています…";
+    // 追加か編集か (と、編集ならどのルールのどの形か) は、Worker を待つ前に決める。待つあいだに別の画面がそのルールを
+    // 変えると、一覧の出し直しで編集が終わる (crEditing が null になる) が、ここで持った snapshot の照合 (crChangeRule) が断る。
+    // 待ったあとに決めると、同じ id のまま新しいルールとして足してしまう
+    const editing = crEditing;
     const worker = crWorker();
     let answer;
     try { answer = await worker.ask({ op: "check", rule: crFormRule() }); } finally { worker.stop(); }
@@ -350,7 +354,6 @@
       crShowErrors(crReasons(answer, CR_TIMEOUT_REASON));
       return;
     }
-    const editing = crEditing;
     const saved = editing
       ? await crChangeRule(editing.index, editing.snapshot, (rules) => { rules[editing.index] = answer.rule; })
       : await crAppendRule(answer.rule);
