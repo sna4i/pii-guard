@@ -22,8 +22,11 @@
   const confirmCancelBtn = document.getElementById("confirm-cancel");
   const rootEl = document.documentElement;
 
-  const settings = { enabled: true, maskForceList: [], maskAllowlist: [], mlEnabled: false, piiSendWarning: true };
-  const SETTING_KEYS = ["enabled", "maskForceList", "maskAllowlist", "mlEnabled", "piiSendWarning"];
+  // proCustomRules: Pro のカスタムルール (キーは engine/custom-rules.js の STORAGE_KEY と同じ)。
+  // customBudgetMs: E2E のときだけ (__pii_guard_e2e が true)、カスタムルールの時間の上限を上書きする値
+  // (__pii_guard_e2e_custom_budget_ms。時間切れを起こして確かめるため)
+  const settings = { enabled: true, maskForceList: [], maskAllowlist: [], mlEnabled: false, piiSendWarning: true, proCustomRules: null, customBudgetMs: null };
+  const SETTING_KEYS = ["enabled", "maskForceList", "maskAllowlist", "mlEnabled", "piiSendWarning", "proCustomRules", "__pii_guard_e2e", "__pii_guard_e2e_custom_budget_ms"];
   // 動作ログ (docs/diagnostic-log.md)。件数や理由だけで、文章は残さない
   const DLG = window.PiiGuardDiagLog;
   const dl = (code, d) => { if (DLG) DLG.log(code, d); };
@@ -43,7 +46,7 @@
   function setStatus(msg) { statusEl.textContent = msg || ""; statusEl.classList.remove("busy"); }
 
   // ---- 設定 (chrome.storage から直接。ページを経由しない) ----------------------
-  async function loadSettings() {
+  async function readSettings() {
     try {
       const s = await chrome.storage.local.get(SETTING_KEYS);
       settings.enabled = s.enabled !== false;
@@ -54,24 +57,80 @@
             : e && typeof e.value === "string" ? { value: e.value, category: typeof e.category === "string" ? e.category : "OTHER" } : null)).filter(Boolean)
         : [];
       settings.maskAllowlist = Array.isArray(s.maskAllowlist) ? s.maskAllowlist.filter((v) => typeof v === "string") : [];
+      settings.proCustomRules = s.proCustomRules && typeof s.proCustomRules === "object" ? s.proCustomRules : null;
+      settings.customBudgetMs = s.__pii_guard_e2e === true && Number.isFinite(s.__pii_guard_e2e_custom_budget_ms) ? s.__pii_guard_e2e_custom_budget_ms : null;
     } catch (_) { /* 既定のまま */ }
+  }
+  // 読み直すたびに、Pro のカスタムルールをエンジンに渡す (applyCustomRules)。待ち合わせの列 (applyingCustomRules) は
+  // 読み始める前に差し替えるので、読み終えて渡し終えるまで、maskText は伏せない (customRulesReady)
+  function loadSettings() {
+    const read = readSettings();
+    const version = customRulesVersion;
+    applyingCustomRules = applyingCustomRules.then(() => read).then(() => applyCustomRules(version)).catch((e) => { dl("error", errorFields(e)); });
+    return read;
   }
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== "local") return;
     if ("licenseState" in changes) refreshPro();
+    if ("proCustomRules" in changes) customRulesVersion++;
     if (!SETTING_KEYS.some((k) => k in changes)) return;
     // オン/オフやリストが変わったら、オフの警告を出し直す (オフにした直後でも下書きの個人情報で黄色にする)
     loadSettings().then(() => scheduleDraftScan(0));
   });
   // Pro かどうか (docs/pro-license.md の D-PRO-06)。Service Worker のライセンス管理に聞き、この iframe の
   // エンジンに渡す。答えが来るまでは無料版のルールで動く
+  // 最初の答え (届かない・失敗したときも、来たものとする)。保存したカスタムルールがあるときだけ、渡す前に待つ
+  let resolveProAnswer = () => {};
+  const firstProAnswer = new Promise((resolve) => { resolveProAnswer = resolve; });
   function refreshPro() {
     try {
       chrome.runtime.sendMessage({ type: "license:get" }, (r) => {
-        if (chrome.runtime.lastError) return;
-        if (NS.engine && typeof NS.engine.setProEnabled === "function") NS.engine.setProEnabled(!!(r && r.pro === true));
+        if (chrome.runtime.lastError) { resolveProAnswer(); return; }
+        const next = !!(r && r.pro === true);
+        const e = NS.engine;
+        if (e && typeof e.setProEnabled === "function") {
+          const changed = e.isProEnabled() !== next;
+          e.setProEnabled(next);
+          // Pro の状態が変わったら、どちらの向きでも、カスタムルールを渡し直す
+          const version = customRulesVersion;
+          if (changed) applyingCustomRules = applyingCustomRules.then(() => applyCustomRules(version)).catch((err) => { dl("error", errorFields(err)); });
+        }
+        resolveProAnswer();
       });
-    } catch (_) { /* 拡張機能が入れ替わった直後など */ }
+    } catch (_) { resolveProAnswer(); /* 拡張機能が入れ替わった直後など */ }
+  }
+
+  // ---- Pro のカスタムルール (Pro Phase 2 の設計 (P1)) ------------------------------------
+  // 保存したルールを、この iframe のエンジンに渡す (Pro でなければ空)。組み立てと温め (setCustomRules) は上限いっぱいで
+  // 0.9 秒ほどかかるので、送るたびではなく、設定と Pro の状態が変わったときに行い、最後に渡したもの (Pro かどうかと、
+  // ルールの版) と同じなら組み立て直さない (オン/オフなど、ほかの設定が変わったときにも読み直すため)。渡すのは 1 本の列に
+  // 並べ (applyingCustomRules)、maskText は、エンジンを動かす前に列が空くのを待つ (読んだのにまだ渡していない状態で、伏せない)
+  let applyingCustomRules = Promise.resolve();
+  let customRulesVersion = 0; // proCustomRules が変わるたびに増やす
+  let appliedCustomRules = null; // 最後に渡したもの ("off" か "pro:<版>")
+  const hasEnabledCustomRule = (v) => !!(v && Array.isArray(v.rules) && v.rules.some((r) => r && typeof r === "object" && r.enabled !== false));
+  async function applyCustomRules(version) {
+    const stored = settings.proCustomRules;
+    // ルールがあるのに、Pro かどうかの答えがまだなら待つ (ルールの無い人は待たせない)
+    if (hasEnabledCustomRule(stored)) await Promise.race([firstProAnswer, new Promise((r) => setTimeout(r, 3000))]);
+    const e = NS.engine;
+    if (!e || typeof e.setCustomRules !== "function") return;
+    const on = e.isProEnabled() && hasEnabledCustomRule(stored);
+    const key = on ? `pro:${version}` : "off";
+    if (key === appliedCustomRules) return;
+    e.setCustomRules(on ? stored.rules : []);
+    appliedCustomRules = key;
+  }
+  // 列が空くまで待つ (待っているあいだに次の読み直しが並んだら、それも待つ)
+  async function customRulesReady() {
+    let last;
+    do { last = applyingCustomRules; await last; } while (last !== applyingCustomRules);
+  }
+  // カスタムルールの時間の上限 (送る前の上限 LIMITS.sendBudgetMs。E2E のときだけ上書きできる)
+  function customBudgetMs() {
+    if (settings.customBudgetMs !== null) return settings.customBudgetMs;
+    const cr = NS.engine && NS.engine.customRules;
+    return cr && cr.LIMITS ? cr.LIMITS.sendBudgetMs : undefined;
   }
   refreshPro();
   // 除外リストの値か (F-SC-18、D-SC-06)。常に伏せる語にも入っている値は伏せる
@@ -145,10 +204,15 @@
     }
   }
 
+  // Pro のカスタムルールを時間内に当て終えられなかったときの確認の一文 (Pro Phase 2 の設計 (P1))
+  const CUSTOM_PARTIAL_NOTICE = "カスタムルールの一部を時間内に調べきれませんでした。";
   // PII 検出時の送信前確認。表示して iframe を伸ばし、ボタンが押されるまで待つ。
-  function confirmPii(count) {
+  // notice があれば (カスタムルールの時間切れ)、件数の代わりにその一文を出す
+  function confirmPii(count, notice) {
     return new Promise((resolve) => {
-      confirmMsg.textContent = settings.enabled
+      confirmMsg.textContent = notice
+        ? `${notice}${settings.enabled ? "マスキングして送信しますか?" : "マスキングせずに送信しますか?"}`
+        : settings.enabled
         ? `個人情報が ${count} 件見つかりました。マスキングして送信しますか?`
         : `個人情報が ${count} 件含まれています。マスキングせずに送信しますか?`;
       confirmSendBtn.textContent = settings.enabled ? "マスキングして送信" : "このまま送信";
@@ -176,21 +240,26 @@
   // ---- マスキング ------------------------------------------------------------
   async function maskText(text) {
     if (!engineReady()) throw new Error("engine not ready");
+    // 保存したカスタムルールを渡し終えてから伏せる (読んだのにまだ渡していない状態で、伏せない)
+    await customRulesReady();
     const res = await NS.engine.maskSanitize(text, {
       userForceMaskEntries: settings.maskForceList,
       mlEnabled: settings.mlEnabled,
+      customBudgetMs: customBudgetMs(),
     });
     if (!res || typeof res.sanitized_text !== "string") throw new Error("mask produced no text");
     const all = Array.isArray(res.detections) ? res.detections : [];
     // ML の判定を使えたか (off / ok / timeout / error / unavailable)。時間切れと失敗は呼び手が知らせる (D-SC-10)
     const ml = res.ml && typeof res.ml.status === "string" ? res.ml.status : "off";
+    // Pro のカスタムルール (off / ok / partial)。partial (時間切れ) なら、呼び手は必ず確認を出す
+    const custom = res.custom && typeof res.custom.status === "string" ? res.custom.status : "off";
     // 除外リストの値は伏せない (F-SC-18)。除いたときは、残りの検出だけで伏せ字を作り直す
     const allowed = allowedMatcher();
     const kept = all.filter((d) => !(d && (allowed(String(d.text)) || allowed(text.slice(d.start, d.end)))));
-    if (kept.length === all.length) return { text: res.sanitized_text, count: all.length, ml };
+    if (kept.length === all.length) return { text: res.sanitized_text, count: all.length, ml, custom };
     const agg = NS.engine.aggregate;
     if (!agg || typeof agg.applySpans !== "function") throw new Error("engine not ready");
-    return { text: agg.applySpans(text, kept), count: kept.length, ml };
+    return { text: agg.applySpans(text, kept), count: kept.length, ml, custom };
   }
 
   // 0.3 秒より長くかかるときだけ、待っていることを出す。送る前の検出は「確認中…」(F-SC-22、D-SC-11。
@@ -324,8 +393,11 @@
         }
       }
       // 個人情報を検出したときは送信前に確認を出す (無いときは無言で送る)。
-      if (piiCount > 0 && settings.piiSendWarning) {
-        const ok = await confirmPii(piiCount);
+      // カスタムルールを時間内に調べきれなかったときは、件数や piiSendWarning にかかわらず確認を出す (黙って送らない)
+      const partial = res.custom === "partial";
+      if (partial) dl("custom.partial", { via: "secure-composer" });
+      if (partial || (piiCount > 0 && settings.piiSendWarning)) {
+        const ok = await confirmPii(piiCount, partial ? CUSTOM_PARTIAL_NOTICE : "");
         if (!ok) { machine.to("EDITING"); setStatus(""); dl("send.cancelled", { via: "secure-composer" }); return; } // 取消: 下書きはそのまま
       }
       machine.to("COMMIT_READY");

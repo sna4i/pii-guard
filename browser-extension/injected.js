@@ -264,6 +264,17 @@
   // ISOLATED に頼めなかったとき: リストがあるなら、MAIN world のエンジン (リスト無し) で黙って
   // 続けると「常に伏せる語」を伏せないまま送る。マスク失敗として呼び手に返す (fail-closed)。
   const listsNeeded = () => !!(NS.settings && NS.settings.hasSecretLists);
+  // Pro のカスタムルールを、時間の上限までに当て終えられなかった (ISOLATED world の結果の custom.status が partial)。
+  // その送信は、確認を出さない設定でも確認の画面 (サイドバーかモーダル) に回し、上にこの一文を出す。確認の画面が
+  // 無ければ送らない (Pro Phase 2 の設計 (P1))。時間切れは動作ログに残す
+  const CUSTOM_PARTIAL_NOTICE = "カスタムルールの一部を時間内に調べきれませんでした。";
+  function noteCustomPartial(result) {
+    if (!(result && result.custom && result.custom.status === "partial")) return false;
+    plog("custom.partial", { via: "page" });
+    return true;
+  }
+  // 送信を止める (fail-closed)。fetch・XHR・WebSocket の監視が受け止め、動作ログの send.blocked に reason を残す
+  const sendBlocked = (reason) => Object.assign(new Error("mask-mcp: send blocked"), { blockReason: reason });
 
   async function sanitizeOnce(text, service, sourceUrl) {
     const backend = await resolveBackend();
@@ -1217,6 +1228,9 @@
     //   * any other combo (UI helper missing) → fall back to auto-mask.
     const useSidebar = interactive && uiMode === "sidebar" && !!sidebar;
     const useModal = interactive && uiMode === "modal" && !!modal;
+    // カスタムルールが時間切れになった送信だけに使う確認の画面 (確認を出さない設定でも出す)。選んだ方式 (uiMode) の
+    // 画面を使い、その部品が無ければもう一方。どちらも無ければ送らない
+    const timeoutUi = uiMode === "modal" && modal ? "modal" : sidebar ? "sidebar" : modal ? "modal" : null;
 
     // When LLM is enabled we take it as the authoritative detector
     // and ALWAYS open the sidebar with the overlay, even when the
@@ -1249,18 +1263,21 @@
         //     auto-closes silently if the merged result is empty.
         //   * LLM OFF → behave as before. If regex returned 0 rows
         //     we forward the text untouched (no sidebar flash).
+        //   * カスタムルールの時間切れ → 0 件でも開き、上に一文を出す
         const initialAgg = Array.isArray(aggResp.aggregated)
           ? aggResp.aggregated
           : [];
+        const notice = noteCustomPartial(aggResp) ? CUSTOM_PARTIAL_NOTICE : undefined;
         let decision;
         if (llmEnabled) {
           const llmPromise = mergeLlmDetect(aggResp, text);
           decision = await sidebar.show(aggResp, text, {
             llmPending: llmPromise,
             mode: "detect",
+            notice,
           });
-        } else if (initialAgg.length > 0) {
-          decision = await sidebar.show(aggResp, text, { mode: "regex" });
+        } else if (initialAgg.length > 0 || notice) {
+          decision = await sidebar.show(aggResp, text, { mode: "regex", notice });
         } else {
           // Neither regex nor LLM has anything for us — forward.
           masked.push(text);
@@ -1291,8 +1308,34 @@
         ? result.detections
         : [];
 
-      if (useModal && detections.length > 0) {
-        const decision = await modal.show(detections, text);
+      // カスタムルールの時間切れ: 確認を出さない経路 (確認がオフ、または選んだ画面の部品が無い) でも、この送信だけ
+      // 確認の画面に回す。サイドバーは集めた形の結果で開くので、頼み直す
+      const notice = noteCustomPartial(result) ? CUSTOM_PARTIAL_NOTICE : undefined;
+      if (notice && !useModal && timeoutUi !== "modal") {
+        if (timeoutUi !== "sidebar") throw sendBlocked("custom-rules-incomplete");
+        const aggResp = await sanitizeAggregated(text, adapter.name, url);
+        if (!aggResp) {
+          if (!confirmSendUnmasked(adapter.name)) {
+            throw new Error("mask-mcp: user cancelled unmasked send");
+          }
+          masked.push(text);
+          continue;
+        }
+        const decision = await sidebar.show(aggResp, text, { mode: "regex", notice });
+        if (!decision.accepted) {
+          throw new Error("mask-mcp: user cancelled review");
+        }
+        const finalText = applyTriples(text, decision.maskedPositions);
+        if (finalText !== text) anyChanged = true;
+        masked.push(finalText);
+        totalDetections += decision.maskedPositions
+          ? decision.maskedPositions.length
+          : 0;
+        continue;
+      }
+
+      if ((useModal || notice) && (detections.length > 0 || notice)) {
+        const decision = await modal.show(detections, text, { notice });
         if (!decision.accepted) {
           // Cancelled — abort the whole outbound request. The fetch
           // hook translates this exception into a rejected Promise
@@ -1499,6 +1542,8 @@
       for (const f of adapter.autoFields(m)) {
         const r = await sanitizeOnce(f.text, adapter.name, url);
         if (!r || typeof r.sanitized_text !== "string") return { blocked: true };
+        // カスタムルールを時間内に当て終えられなかった添付は、伏せ切れていないので送らない
+        if (noteCustomPartial(r)) { plog("send.blocked", { reason: "custom-rules-incomplete" }); return { blocked: true }; }
         let t = r.sanitized_text;
         if (f.kind === "name") t = t.replace(/</g, "[").replace(/>/g, "]"); // ファイル名に < > は使わない
         if (t !== f.text) { m = adapter.setField(m, f.path, t); maskedAttachments++; }
@@ -1701,7 +1746,8 @@
       // original (PII-bearing) body through. The AI service sees a
       // network error and the user sees the retry-prompt — the correct
       // UX for a privacy-critical tool.
-      plog("send.blocked", { reason: "hook-error", via: "fetch" });
+      // 止めた理由が決まっているとき (sendBlocked) は、その理由を残す
+      plog("send.blocked", { reason: (err && err.blockReason) || "hook-error", via: "fetch" });
       return Promise.reject(
         new TypeError("PII Guard: masking pipeline error; request aborted")
       );
@@ -1804,7 +1850,7 @@
           }
           // [SECURITY] Fail-closed: never send the original body. Chat UIs
           // surface this as a send error.
-          plog("send.blocked", { reason: "hook-error", via: "xhr" });
+          plog("send.blocked", { reason: (err && err.blockReason) || "hook-error", via: "xhr" });
           try { xhr.abort(); } catch (_) { /* noop */ }
           failXhr(xhr);
         }
@@ -1987,7 +2033,7 @@
                 // forwarding the original. The WS stays open so the
                 // session survives; the chat UI treats this as a
                 // missing ack and typically re-prompts.
-                plog("send.blocked", { reason: "hook-error", via: "ws" });
+                plog("send.blocked", { reason: (err && err.blockReason) || "hook-error", via: "ws" });
               }
             })();
             }

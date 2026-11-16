@@ -435,6 +435,18 @@
       line-height: 1.5;
       opacity: 0.6;
     }
+    /* 確認の画面の上に出す一文 (show の opts.notice)。検出が全部は終わっていないことなどを、
+       一覧より先に読ませる。機密の警告と同じく、操作するものではなく読むもの */
+    .notice {
+      flex: 0 0 auto;
+      margin: 0 0 10px;
+      padding: 8px 12px;
+      border-left: 3px solid var(--sev-high);
+      border-radius: 4px;
+      background: var(--sev-high-bg, rgba(217, 119, 6, 0.08));
+      font-size: 12px;
+      line-height: 1.5;
+    }
 
     .categories {
       flex: 1 1 auto;
@@ -1399,12 +1411,15 @@
     const confidentialHits = Array.isArray(aggregatedResponse?.confidential)
       ? aggregatedResponse.confidential
       : [];
+    // 確認の画面の上に出す一文 (injected.js が渡す。例: Pro のカスタムルールの時間切れ)。文字としてだけ出す
+    const notice = typeof opts.notice === "string" ? opts.notice : "";
 
     // Short-circuit only when nothing to review AND no background LLM
     // work in flight — otherwise we'd miss entities the LLM will add.
     // 機密警告だけがある場合も開く: マスクすべき span はゼロでも
     // 「この文は送っていいのか」を問う価値があるのがこの機能の要点。
-    if (aggregated.length === 0 && confidentialHits.length === 0 && !llmPending) {
+    // 一文 (notice) があるときも開く: 調べきれていないことを知らせずに送らない
+    if (aggregated.length === 0 && confidentialHits.length === 0 && !llmPending && !notice) {
       return {
         accepted: true,
         maskedEntityKeys: new Set(),
@@ -1586,6 +1601,14 @@
 
       const body = document.createElement("div");
       body.className = "body";
+
+      if (notice) {
+        const noticeEl = document.createElement("div");
+        noticeEl.className = "notice";
+        noticeEl.setAttribute("role", "status");
+        noticeEl.textContent = notice;
+        body.appendChild(noticeEl);
+      }
 
       const bulkBar = document.createElement("div");
       bulkBar.className = "bulk-bar";

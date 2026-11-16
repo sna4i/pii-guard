@@ -52,6 +52,7 @@
         "engine/user-force-mask.js",
         "engine/confidential.js",
         "engine/pro-rules.js",
+        "engine/custom-rules.js",
         "engine/engine.js",
         "engine/bundle.js",
         "content.js",

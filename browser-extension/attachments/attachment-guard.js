@@ -44,14 +44,17 @@
   const IS_CHATGPT = /(^|\.)chatgpt\.com$|(^|\.)openai\.com$/.test(HOST);
 
   // 設定が読めるまでは「マスク ON」として扱う (読み込み前の添付も素通しさせない)。
-  const settings = { enabled: true, maskForceList: [], mlEnabled: false };
+  // customBudgetMs: E2E のときだけ (E2E_FLAG が true)、カスタムルールの時間の上限を上書きする値 (時間切れを起こして確かめるため)
+  const settings = { enabled: true, maskForceList: [], mlEnabled: false, customBudgetMs: null };
+  const E2E_BUDGET_KEY = "__pii_guard_e2e_custom_budget_ms";
   let exposeForTests = false;
   async function loadSettings() {
     try {
-      const s = await chrome.storage.local.get(["enabled", "maskForceList", "mlEnabled", E2E_FLAG]);
+      const s = await chrome.storage.local.get(["enabled", "maskForceList", "mlEnabled", E2E_FLAG, E2E_BUDGET_KEY]);
       settings.enabled = s.enabled !== false;
       settings.mlEnabled = s.mlEnabled === true;
       exposeForTests = s[E2E_FLAG] === true;
+      settings.customBudgetMs = exposeForTests && Number.isFinite(s[E2E_BUDGET_KEY]) ? s[E2E_BUDGET_KEY] : null;
       settings.maskForceList = Array.isArray(s.maskForceList)
         ? s.maskForceList.map((e) => (typeof e === "string" ? { value: e, category: "OTHER" }
             : e && typeof e.value === "string" ? { value: e.value, category: typeof e.category === "string" ? e.category : "OTHER" } : null)).filter(Boolean)
@@ -62,10 +65,22 @@
 
   const engineReady = () => !!(NS.engine && NS.engine.ready && typeof NS.engine.maskSanitize === "function");
   const isText = (file) => TEXT_EXT.test(file.name || "") || TEXT_MIME.test(file.type || "");
-  const opts = () => ({ userForceMaskEntries: settings.maskForceList, mlEnabled: settings.mlEnabled });
+  // Pro のカスタムルールの時間の上限は、ファイルごとに custom-rules.js の LIMITS.fileBudgetMs (送る前の文より長い)
+  const fileBudgetMs = () => {
+    if (settings.customBudgetMs !== null) return settings.customBudgetMs;
+    const cr = NS.engine && NS.engine.customRules;
+    return cr && cr.LIMITS ? cr.LIMITS.fileBudgetMs : undefined;
+  };
+  const opts = () => ({ userForceMaskEntries: settings.maskForceList, mlEnabled: settings.mlEnabled, customBudgetMs: fileBudgetMs() });
   // 動作ログ (docs/diagnostic-log.md)。件数と経路だけを残し、ファイル名は残さない
   const DL = window.PiiGuardDiagLog;
   const dlog = (code, d) => { if (DL) DL.log(code, d); };
+  // カスタムルールを時間内に当て終えられなかった結果は、伏せ切れていないので使わない (伏せられない添付として確認に回す)
+  function rejectIncomplete(res) {
+    if (!res || !res.custom || res.custom.status !== "partial") return;
+    dlog("custom.partial", { via: "attachment" });
+    throw new Error("custom rules incomplete");
+  }
 
   // 日本の CSV は Shift_JIS、Windows のツールは UTF-16 で書くことが多い。UTF-8 決め打ちだと
   // 文字化けで検出できず、UTF-16 は数字の間に NUL が挟まってパターンをすり抜ける。
@@ -91,6 +106,7 @@
     if (!base) return { name, count: 0 };
     const res = await NS.engine.maskSanitize(base, opts());
     if (!res || typeof res.sanitized_text !== "string") throw new Error("mask produced no name");
+    rejectIncomplete(res);
     const count = Array.isArray(res.detections) ? res.detections.length : 0;
     return { name: count ? res.sanitized_text.replace(/</g, "[").replace(/>/g, "]") + ext : name, count };
   }
@@ -99,6 +115,7 @@
     const text = decodeText(await file.arrayBuffer());
     const res = await NS.engine.maskSanitize(text, opts());
     if (!res || typeof res.sanitized_text !== "string") throw new Error("mask produced no text");
+    rejectIncomplete(res);
     const nm = await maskName(file.name);
     const count = (Array.isArray(res.detections) ? res.detections.length : 0) + nm.count;
     // 出力は UTF-8。元が Shift_JIS/UTF-16 でも、サイトは UTF-8 のほうが確実に読める。
@@ -121,12 +138,15 @@
 
   // 元ファイル群 → { masked: File[] (渡すもの), blocked: string[], unmasked: string[], maskedCount }。
   async function processFiles(fileList) {
+    const files = Array.from(fileList || []);
     const masked = [];
     const blocked = [];
     const unmasked = [];
     const unmaskable = [];
     let maskedCount = 0;
-    for (const f of Array.from(fileList || [])) {
+    // 保存した Pro のカスタムルールを content.js がエンジンに渡し終えてから伏せる (読んだのにまだ渡していない状態で、伏せない)
+    if (settings.enabled && typeof NS.__customRulesReady === "function") await NS.__customRulesReady();
+    for (const f of files) {
       if (!settings.enabled) {
         // マスキング OFF: 中身はそのまま通す (利用者の選択)。未マスクであることだけ知らせる。
         masked.push(f); unmasked.push(f.name);

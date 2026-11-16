@@ -192,7 +192,7 @@
     const secureComposerHost = /(^|\.)(chatgpt\.com|openai\.com)$/.test(location.hostname);
     try {
       const stored = await chrome.storage.local.get([
-        "interactive", "uiMode", "maskAllowlist", "maskForceList", "mlEnabled", "enabled", "secureComposerEnabled",
+        "interactive", "uiMode", "maskAllowlist", "maskForceList", "mlEnabled", "enabled", "secureComposerEnabled", CUSTOM_RULES_KEY,
       ]);
       if (typeof stored.mlEnabled === "boolean") mlEnabled = stored.mlEnabled;
       interactive = stored.interactive !== false;
@@ -210,8 +210,10 @@
       scOwnsComposer = scEnabled && scOverlayLive;
       // リストの値は配らない (maskAllowlist / maskForceList は空のまま)。有無だけ知らせる:
       // ISOLATED に頼めないときに、MAIN world のエンジン (リスト無し) で黙って続けず止めるため。
+      // Pro のカスタムルールも同じ。組み立てを待たずに、読んだ中身で決める (ページの世界が早く止める側に倒れるように)
       hasSecretLists = (Array.isArray(stored.maskAllowlist) && stored.maskAllowlist.length > 0) ||
-        (Array.isArray(stored.maskForceList) && stored.maskForceList.length > 0);
+        (Array.isArray(stored.maskForceList) && stored.maskForceList.length > 0) ||
+        (proEnabled && hasEnabledCustomRule(stored[CUSTOM_RULES_KEY]));
     } catch (_) {
       interactive = true;
       uiMode = "sidebar";
@@ -229,17 +231,58 @@
   // Pro かどうか (docs/pro-license.md の D-PRO-06)。Service Worker のライセンス管理に聞き、この ISOLATED world の
   // エンジンに渡し、ページの世界 (injected.js) へは設定と一緒に配る。答えが来るまでは無料版のルールで動く
   let proEnabled = false;
+  // 最初の答え (届かない・失敗したときも、来たものとする)。保存したカスタムルールがあるときだけ、渡す前に待つ
+  let resolveProAnswer = () => {};
+  const firstProAnswer = new Promise((resolve) => { resolveProAnswer = resolve; });
   function refreshPro() {
     try {
       chrome.runtime.sendMessage({ type: "license:get" }, (r) => {
-        if (chrome.runtime.lastError) return;
+        if (chrome.runtime.lastError) { resolveProAnswer(); return; }
         const next = !!(r && r.pro === true);
         const e = window.__localMaskMCP && window.__localMaskMCP.engine;
         if (e && typeof e.setProEnabled === "function") e.setProEnabled(next);
-        if (next !== proEnabled) { proEnabled = next; broadcastSettings(); }
+        // Pro の状態が変わったら、どちらの向きでも、カスタムルールを渡し直して配り直す
+        if (next !== proEnabled) { proEnabled = next; syncCustomRules(); broadcastSettings(); }
+        resolveProAnswer();
       });
-    } catch (_) { /* 拡張機能が入れ替わった直後など、Service Worker に届かないとき */ }
+    } catch (_) { resolveProAnswer(); /* 拡張機能が入れ替わった直後など、Service Worker に届かないとき */ }
   }
+
+  // ---- Pro のカスタムルール (Pro Phase 2 の設計 (P1)) ----------------------------------------------
+  // 保存したルール (chrome.storage.local の proCustomRules) を、この ISOLATED world のエンジンに渡す (Pro でなければ空)。
+  // ページの世界 (injected.js・sidebar.js) には渡さず、ルールがあることだけを hasSecretLists で知らせる (V-02)。
+  // 組み立てと温め (setCustomRules) は上限いっぱいで 0.9 秒ほどかかるので、送るたびではなく、起動・ルールの変化・
+  // Pro の状態の変化のときに行う。読んだのにまだ渡していないあいだは伏せない: 読み直しと渡しを 1 本の列に並べ
+  // (applyingCustomRules)、伏せる道 (handleLocalMask と添付の見張り) は、エンジンを動かす前に customRulesReady() で
+  // 列が空くのを待つ。最後に渡したもの (Pro かどうかと、ルールの版) と同じなら組み立て直さない (Pro でページを開くと、
+  // 起動の読み直しと「Pro に変わった」の読み直しが続くため。組み立ては、このページと同じスレッドで走る)
+  const CUSTOM_RULES_KEY = "proCustomRules"; // engine/custom-rules.js の STORAGE_KEY と同じ
+  const hasEnabledCustomRule = (v) => !!(v && Array.isArray(v.rules) && v.rules.some((r) => r && typeof r === "object" && r.enabled !== false));
+  let applyingCustomRules = Promise.resolve();
+  let customRulesVersion = 0; // proCustomRules が変わるたびに増やす
+  let appliedCustomRules = null; // 最後に渡したもの ("off" か "pro:<版>")
+  function syncCustomRules() {
+    const version = customRulesVersion;
+    applyingCustomRules = applyingCustomRules.then(async () => {
+      let stored = null;
+      try { stored = (await chrome.storage.local.get(CUSTOM_RULES_KEY))[CUSTOM_RULES_KEY]; } catch (_) { stored = null; }
+      // ルールがあるのに、Pro かどうかの答えがまだなら待つ (ルールの無い人は待たせない)
+      if (hasEnabledCustomRule(stored)) await Promise.race([firstProAnswer, new Promise((r) => setTimeout(r, 3000))]);
+      const engine = await waitIsoEngine(3000);
+      if (!engine || typeof engine.setCustomRules !== "function") return;
+      const on = proEnabled && hasEnabledCustomRule(stored);
+      const key = on ? `pro:${version}` : "off";
+      if (key === appliedCustomRules) return;
+      engine.setCustomRules(on ? stored.rules : []);
+      appliedCustomRules = key;
+    }).catch((e) => { dlog("error", DL ? DL.errorFields(e, "content") : {}); });
+  }
+  // 列が空くまで待つ (待っているあいだに次の読み直しが並んだら、それも待つ)
+  async function customRulesReady() {
+    let last;
+    do { last = applyingCustomRules; await last; } while (last !== applyingCustomRules);
+  }
+
   // adapter (同じ isolated world) が overlay の生死を知らせる口。live が変わるたびに再配布し、
   // injected.js の scOwnsComposer と機密配布を即座に切り替える (fail-closed, F-SC-11)。
   window.__localMaskMCP = window.__localMaskMCP || {};
@@ -249,14 +292,18 @@
     scOverlayLive = next;
     broadcastSettings();
   };
+  // 添付の見張り (attachments/attachment-guard.js、同じ ISOLATED world) が、伏せる前にカスタムルールを待つ口
+  window.__localMaskMCP.__customRulesReady = customRulesReady;
   broadcastSettings();
   refreshPro();
+  syncCustomRules();
   try {
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area !== "local") return;
       if ("licenseState" in changes) refreshPro();
       if ("maskAllowlist" in changes || "maskForceList" in changes) listsVersion++;
-      if ("interactive" in changes || "uiMode" in changes || "maskAllowlist" in changes || "maskForceList" in changes || "mlEnabled" in changes || "enabled" in changes || "secureComposerEnabled" in changes) {
+      if (CUSTOM_RULES_KEY in changes) { customRulesVersion++; syncCustomRules(); }
+      if ("interactive" in changes || "uiMode" in changes || "maskAllowlist" in changes || "maskForceList" in changes || "mlEnabled" in changes || "enabled" in changes || "secureComposerEnabled" in changes || CUSTOM_RULES_KEY in changes) {
         broadcastSettings();
       }
     });
@@ -283,6 +330,15 @@
   }
   const forceEntryOf = (e) => (typeof e === "string" ? { value: e, category: "OTHER" }
     : e && typeof e.value === "string" ? { value: e.value, category: typeof e.category === "string" ? e.category : "OTHER" } : null);
+  // カスタムルールの時間の上限。ページの送信は、送る前の上限 (custom-rules.js の LIMITS.sendBudgetMs)。
+  // E2E のときだけ (__pii_guard_e2e が true)、__pii_guard_e2e_custom_budget_ms で上書きできる (時間切れを起こして確かめるため)
+  const E2E_FLAG = "__pii_guard_e2e";
+  const E2E_BUDGET_KEY = "__pii_guard_e2e_custom_budget_ms";
+  function sendBudgetMs(engine, st) {
+    if (st[E2E_FLAG] === true && Number.isFinite(st[E2E_BUDGET_KEY])) return st[E2E_BUDGET_KEY];
+    const cr = engine.customRules;
+    return cr && cr.LIMITS ? cr.LIMITS.sendBudgetMs : undefined;
+  }
   async function handleLocalMask(data) {
     const { id, kind, text } = data;
     let result = null;
@@ -290,10 +346,12 @@
       if (typeof text === "string" && text.length <= 2 * 1024 * 1024) {
         const engine = await waitIsoEngine(3000);
         if (engine) {
-          const st = await chrome.storage.local.get(["maskAllowlist", "maskForceList", "mlEnabled"]);
+          const st = await chrome.storage.local.get(["maskAllowlist", "maskForceList", "mlEnabled", E2E_FLAG, E2E_BUDGET_KEY]);
           const allow = new Set((Array.isArray(st.maskAllowlist) ? st.maskAllowlist : []).filter((v) => typeof v === "string"));
           const force = (Array.isArray(st.maskForceList) ? st.maskForceList : []).map(forceEntryOf).filter(Boolean);
-          const opts = { userForceMaskEntries: force, mlEnabled: st.mlEnabled === true };
+          const opts = { userForceMaskEntries: force, mlEnabled: st.mlEnabled === true, customBudgetMs: sendBudgetMs(engine, st) };
+          // 保存したカスタムルールを渡し終えてから伏せる (読んだのにまだ渡していない状態で、伏せない)
+          await customRulesReady();
           if (kind === "aggregated") {
             result = await engine.maskAggregated(text, opts);
             for (const row of (result && Array.isArray(result.aggregated) ? result.aggregated : [])) {

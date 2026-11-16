@@ -47,8 +47,11 @@
       text: (d, L) => `送信を伏せ字にしました${paren([L.via, d.attachments ? `添付 ${d.attachments} 件` : ""])}` },
     "send.cancelled": { lv: "info", fields: { via: VIA },
       text: (d, L) => `送信を取り消しました${paren([L.via])}` },
-    "send.blocked": { lv: "warn", fields: { reason: E({ unmaskable: "伏せ字にできなかった", "lists-unavailable": "除外リストなどを読めなかった", "unknown-format": "知らない送信の形式", "hook-error": "処理の失敗", "engine-unavailable": "検出エンジンが使えない" }), via: VIA },
+    "send.blocked": { lv: "warn", fields: { reason: E({ unmaskable: "伏せ字にできなかった", "lists-unavailable": "除外リストなどを読めなかった", "unknown-format": "知らない送信の形式", "hook-error": "処理の失敗", "engine-unavailable": "検出エンジンが使えない", "custom-rules-incomplete": "カスタムルールを時間内に調べきれなかった" }), via: VIA },
       text: (d, L) => `送信を止めました${paren([L.reason, L.via])}` },
+    // Pro のカスタムルールを、時間の上限までに当て終えられなかった。本文は確認に回し、添付は伏せられない添付として扱う
+    "custom.partial": { lv: "warn", fields: { via: E({ page: "ページの送信", "secure-composer": "Secure Composer", attachment: "添付" }) },
+      text: (d, L) => `カスタムルールの一部を時間内に調べきれませんでした${paren([L.via])}` },
     "send.failed": { lv: "warn", fields: { reason: E({ "write-failed": "サイトの入力欄に書き込めなかった", "no-composer": "サイトの入力欄が見つからない", busy: "前の送信の途中", "no-response": "応答が無い", "page-busy": "サイトが回答を作っている途中", "not-accepted": "サイトが送信を受け付けなかった" }), path: E({ button: "送信ボタン", enter: "Enter キー" }), via: VIA },
       text: (d, L) => `送信できませんでした${paren([L.reason, L.path, L.via])}` },
     "ml.skipped": { lv: "warn", fields: { reason: E({ timeout: "時間内に終わらなかった", error: "失敗した" }), where: E({ send: "送信", "mask-draft": "マスキングする" }) },

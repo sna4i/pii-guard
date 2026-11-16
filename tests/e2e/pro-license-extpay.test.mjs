@@ -1,8 +1,8 @@
 // tests/e2e/pro-license-extpay.test.mjs — 同梱した本物の ExtPay を、extensionpay.com を名乗る模擬のサーバにつないで動かす
 // (docs/pro-license.md の T-PRO-12)
 //
-// 拡張機能の写しを作り、license/config.js の ID だけをテスト用に替える。extensionpay.com は
-// --host-resolver-rules でこのファイルの模擬のサーバに向ける。確かめること:
+// 拡張機能の写しを作って license/config.js の ID だけをテスト用に替え、extensionpay.com を模擬のサーバに向ける
+// (tests/fixtures/pro-ext.mjs の launchPro)。確かめること:
 //   - 購入のページを開くまで、extensionpay.com と通信しない (入れた直後はお試しの Pro)
 //   - 「Pro にアップグレード」で、ExtPay が API キーを作り、購入のページを開く
 //   - 「購入状態を更新」で購入済みが届き、「Pro (プラン名)」になる。ページの世界のエンジンにも Pro が届く
@@ -10,84 +10,16 @@
 //   - お試しはインストールから 7 日で終わる
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import https from "node:https";
-import { execFileSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
-
-const HERE = path.dirname(fileURLToPath(import.meta.url));
-const REPO = path.resolve(HERE, "..", "..");
-const SRC = path.resolve(process.env.PII_GUARD_EXT || path.join(REPO, "browser-extension"));
-const TEST_ID = "pii-guard-e2e";
-const API_KEY = "e2e-api-key-0001";
-
-// 写しを作って ID だけを替え、ハーネスがそれを読むようにしてから読み込む (EXT_DIR は読み込んだ時点で決まる)
-const work = fs.mkdtempSync(path.join(os.tmpdir(), "pii-pro-e2e-"));
-const EXT = path.join(work, "ext");
-fs.cpSync(SRC, EXT, { recursive: true });
-fs.writeFileSync(path.join(EXT, "license", "config.js"), `export const EXTPAY_ID = "${TEST_ID}";\n`);
-// Pro のルールパックにテスト用のルールを 1 つ入れる (Pro のときだけ、送る文の QA-PRO-nnnn が伏せ字になる)
-const proRules = path.join(EXT, "engine", "pro-rules.js");
-const proSrc = fs.readFileSync(proRules, "utf8");
-if (!proSrc.includes("const PRO_RULE_PACK = [];")) throw new Error("pro-rules.js の形が変わった");
-fs.writeFileSync(proRules, proSrc.replace("const PRO_RULE_PACK = [];", 'const PRO_RULE_PACK = [{ category: "PRO_TEST", entity_type: "PRO_TEST", pattern: /QA-PRO-\\d{4}/g }];'));
-process.env.PII_GUARD_EXT = EXT;
-const { launch } = await import("../fixtures/harness.mjs");
-
-// ---- extensionpay.com を名乗る模擬のサーバ ------------------------------------------------
-function startMockExtensionPay() {
-  const crt = path.join(work, "pay.crt");
-  const key = path.join(work, "pay.key");
-  execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-keyout", key, "-out", crt, "-days", "1", "-nodes",
-    "-subj", "/CN=extensionpay.com", "-addext", "subjectAltName=DNS:extensionpay.com"], { stdio: "ignore" });
-  // gate: Promise を入れると、購入状態の問い合わせへの答えを、それが解けるまで止める (裏の確かめ直しの途中を見るため)
-  const state = { mode: "unpaid", requests: [], gate: null };
-  const base = `/extension/${TEST_ID}`;
-  const cors = { "access-control-allow-origin": "*", "access-control-allow-headers": "content-type, accept", "access-control-allow-methods": "GET, POST, OPTIONS" };
-  const server = https.createServer({ key: fs.readFileSync(key), cert: fs.readFileSync(crt) }, async (req, res) => {
-    const url = new URL(req.url, "https://extensionpay.com");
-    if (req.method !== "OPTIONS") state.requests.push({ method: req.method, path: url.pathname, apiKey: url.searchParams.get("api_key") });
-    const json = (status, body) => { res.writeHead(status, { ...cors, "content-type": "application/json" }); res.end(JSON.stringify(body)); };
-    if (req.method === "OPTIONS") { res.writeHead(204, cors); res.end(); return; }
-    if (req.method === "POST" && url.pathname === `${base}/api/new-key`) return json(200, API_KEY);
-    if (req.method === "GET" && url.pathname === `${base}/api/v2/user`) {
-      if (state.gate) await state.gate;
-      if (state.mode === "error") { res.writeHead(500, cors); res.end("mock error"); return; }
-      const paid = state.mode === "paid";
-      return json(200, {
-        paid, paidAt: paid ? "2026-11-01T00:00:00.000Z" : null, email: paid ? "buyer@example.test" : null, trialStartedAt: null,
-        plan: paid ? { unitAmountCents: 500, currency: "jpy", nickname: "Pro 月額", interval: "month", intervalCount: 1 } : null,
-        subscriptionStatus: paid ? "active" : null,
-      });
-    }
-    if (url.pathname.startsWith(`${base}/choose-plan`) || url.pathname.startsWith(`${base}/reactivate`)) {
-      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      res.end("<!doctype html><title>mock ExtensionPay</title><p>mock</p>");
-      return;
-    }
-    res.writeHead(404, cors); res.end("not found");
-  });
-  const sockets = new Set();
-  server.on("connection", (s) => { sockets.add(s); s.on("close", () => sockets.delete(s)); });
-  return new Promise((resolve) => server.listen(0, "127.0.0.1", () => resolve({
-    port: server.address().port, state,
-    async close() { for (const s of sockets) s.destroy(); await new Promise((r) => server.close(() => r())); },
-  })));
-}
+import { launchPro, TEST_ID, API_KEY } from "../fixtures/pro-ext.mjs";
 
 let h;
 let pay;
+let close;
 before(async () => {
-  pay = await startMockExtensionPay();
-  h = await launch({ storage: { enabled: true }, hostRules: [`MAP extensionpay.com 127.0.0.1:${pay.port}`] });
+  ({ h, pay, close } = await launchPro({ storage: { enabled: true } }));
 });
 after(async () => {
-  try { if (h) await h.close(); } finally {
-    if (pay) await pay.close();
-    fs.rmSync(work, { recursive: true, force: true });
-  }
+  if (close) await close();
 });
 
 const ask = (msg) => h.ext.evaluate((m) => chrome.runtime.sendMessage(m), msg);

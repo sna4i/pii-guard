@@ -141,6 +141,14 @@
       color: #5a5a63;
       line-height: 1.5;
     }
+    /* 確認の画面の上に出す一文 (show の opts.notice) */
+    .panel header p.notice {
+      padding: 6px 10px;
+      border-left: 3px solid var(--sev-high);
+      border-radius: 4px;
+      background: var(--sev-high-bg);
+      color: #1b1b1f;
+    }
     .list {
       overflow-y: auto;
       padding: 8px 20px;
@@ -554,14 +562,18 @@
    * @param {string} _originalText - Kept for future use (currently
    *   not rendered; the context snippets already carry enough
    *   surrounding text).
+   * @param {{ notice?: string }} [opts] - notice: 確認の画面の上に出す一文
+   *   (injected.js が渡す。例: Pro のカスタムルールの時間切れ)。文字としてだけ出す
    * @returns {Promise<{accepted: boolean, maskedDetectionIds: Set<number>}>}
    */
-  async function show(detections, _originalText) {
+  async function show(detections, _originalText, opts) {
     detections = Array.isArray(detections) ? detections : [];
+    const notice = opts && typeof opts.notice === "string" ? opts.notice : "";
 
     // When the gateway returned no detections, short-circuit — no UI
     // needed, and the caller will just forward the original body.
-    if (detections.length === 0) {
+    // 一文 (notice) があるときは開く: 調べきれていないことを知らせずに送らない
+    if (detections.length === 0 && !notice) {
       return { accepted: true, maskedDetectionIds: new Set() };
     }
 
@@ -600,6 +612,13 @@
         "以下の項目がマスクされます。問題なければ「選択したものをマスクして送信」を押してください。誤検知があればチェックを外して元の文字列のまま送信できます。";
       header.appendChild(title);
       header.appendChild(desc);
+      if (notice) {
+        const noticeEl = document.createElement("p");
+        noticeEl.className = "notice";
+        noticeEl.setAttribute("role", "status");
+        noticeEl.textContent = notice;
+        header.appendChild(noticeEl);
+      }
 
       const list = document.createElement("div");
       list.className = "list";
