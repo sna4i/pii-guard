@@ -78,7 +78,11 @@
       }
       positions.sort((a, b) => a[0] - b[0]);
       // Drop polite-phrase false positives mis-tagged as PERSON.
+      // Pro のカスタムルールの検出 (custom: true の印。engine.js が、ルールが当たったときだけ付ける) を含む値は落とさない。
+      // 名前が PERSON のルールは今の人名の種類として扱うが、利用者が書いた語 (「佐々木 ことみ」など) をこの絞り込みで
+      // 捨てると、確認の行が消えて原文のまま送られる
       if ((label === "PERSON" || label === "PROPER_NOUN_PERSON") &&
+          !hits.some((h) => h.custom === true) &&
           severity.isFalsePositivePerson(value)) {
         continue;
       }

@@ -307,6 +307,8 @@
   // 本文を整える (nfkcWithMap) のは 1 回だけで、その時間も上限に数える。組み立てた正規表現は、この整えた本文に
   // 当てる前提で作ってある (engine/custom-rules.js)。止めた分類 (disabledCategories) は、ルールの名前 (category) で外す。
   // opts.clock はミリ秒の時計 (テスト用。既定は performance.now)
+  // 検出には custom: true の印を付ける。集める所 (aggregate.js) が、名前で行を捨てる絞り込み (人名の絞り込み) から外すため。
+  // 印は真偽値だけで、Pro でルールが当たったときにだけ付く (無料版の検出の形は変わらない)
   function collectCustomDetections(text, opts, deps) {
     const disabled = new Set(opts.disabledCategories || []);
     const rules = customPatterns.filter((p) => !disabled.has(p.category));
@@ -317,7 +319,7 @@
     let dets = [];
     for (const rule of rules) {
       if (clock() - start >= budget) return { dets, status: "partial" };
-      dets = dets.concat(matchNormalized(text, normalized, [rule], true));
+      dets = dets.concat(matchNormalized(text, normalized, [rule], true).map((d) => ({ ...d, custom: true })));
     }
     return { dets, status: "ok" };
   }
@@ -351,7 +353,8 @@
   // 捨てられる。Pro が無料版より弱く伏せないように、つながった組 (A と B、B と C が重なれば A・B・C) のうち、カスタムを
   // 含み、1 つがほかを全部包んではいないものだけをまとめる。名前は、組の中でいちばん左から始まるカスタムの検出の名前。
   // カスタムを含まない組と、1 つがほかを全部包む組は、そのまま resolveOverlaps に任せる (包むものが残るので、かけらは
-  // 出ない)。custom は、カスタムの検出 (オブジェクトそのもの) の集合。範囲は半開区間で、接するだけなら重ならない
+  // 出ない)。custom は、カスタムの検出 (オブジェクトそのもの) の集合。範囲は半開区間で、接するだけなら重ならない。
+  // まとめた検出にも、カスタムの検出の印 (custom: true) を付ける
   function mergeStraddlingCustom(dets, custom, text) {
     const sorted = dets.slice().sort((a, b) => a.start - b.start || b.end - a.end);
     const out = [];
@@ -364,7 +367,7 @@
       const group = sorted.slice(i, j);
       const first = group.find((d) => custom.has(d)); // 左から (同じ位置なら長い順に) 並べてあるので、いちばん左のカスタム
       if (first && !group.some((d) => d.start === start && d.end === end)) {
-        out.push({ ...first, start, end, text: text.slice(start, end) });
+        out.push({ ...first, start, end, text: text.slice(start, end), custom: true });
       } else {
         out.push(...group);
       }

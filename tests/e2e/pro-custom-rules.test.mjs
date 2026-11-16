@@ -1,5 +1,5 @@
 // tests/e2e/pro-custom-rules.test.mjs — Pro のカスタムルールが、送る経路のすべて (ページの送信・ChatGPT の保護入力欄・
-// 添付) で効き、時間内に調べきれなかったときは必ず確認に回る (Pro Phase 2 の設計 (P1)、T-CR-31〜40)
+// 添付) で効き、時間内に調べきれなかったときは必ず確認に回る (Pro Phase 2 の設計 (P1)、T-CR-31〜40・53)
 //
 // 土台は tests/fixtures/pro-ext.mjs の launchPro (拡張機能の写し + 模擬の ExtensionPay。入れた直後はお試しの Pro)。
 // 模擬の ChatGPT と、模擬の Claude・Gemini (mock-sites/server.mjs) に向ける。ルールの値は架空のものだけ。
@@ -668,4 +668,38 @@ test("T-CR-40 ルールがあるのに Pro かどうか分からない (待つ�
     await removeProWait();
     await setInstalledAt(Date.now()); // お試しに戻す
   }
+});
+
+test("T-CR-53 名前が PERSON のルール (語「佐々木 ことみ」): 確認のサイドバーが開いて行が出る。開いたまま常に伏せる語を変えて行を組み直しても消えず、送ると伏せ字で届く", async () => {
+  // 人名の絞り込み (「こと」などを含む 7 文字以上の人名を捨てる) は、カスタムの印のある検出を落とさない。サイドバーは、
+  // 常に伏せる語が変わると、開いたときの行と新しい語の位置から行を組み直す (どちらの組み直しでも印を運ぶ)
+  const rules = [{ id: "p1", label: "PERSON", kind: "words", words: ["佐々木 ことみ"], match: "exact", enabled: true }];
+  const text = "佐々木 ことみ様にゼータ案件とオメガ案件を連絡します";
+  const p = await openSite("claude", { interactive: true, proCustomRules: { version: 1, rules } });
+  try {
+    await waitSettings(p, { pro: true, hasSecretLists: true });
+    const values = async () => ((await S.sidebarState(p)) || { rows: [] }).rows.map((r) => String(r.label));
+    const waitRow = async (word) => {
+      for (let i = 0; i < 50; i++) { if ((await values()).some((v) => v.startsWith(word))) return true; await S.sleep(100); }
+      return false;
+    };
+    const t0 = Date.now();
+    await send(p, "claude", text);
+    assert.ok(await S.waitSidebar(p), "確認のサイドバーが開く");
+    assert.ok(await waitRow("佐々木 ことみ"), `カスタムの行が出る (${JSON.stringify(await values())})`);
+    assert.equal(SITES.claude.sent(t0).length, 0, "確かめる前は届かない");
+
+    // 以前の content.js の形の知らせ (常に伏せる語の値を配る) で組み直す (recomputeWithForcelist)
+    await p.evaluate(() => window.dispatchEvent(new CustomEvent("mask-mcp:settings-updated", { detail: { maskForceList: [{ value: "ゼータ案件", category: "OTHER" }] } })));
+    assert.ok(await waitRow("ゼータ案件"), "足した語の行が出る (知らせで組み直す)");
+    assert.ok((await values()).some((v) => v.startsWith("佐々木 ことみ")), `組み直しても、カスタムの行は消えない (${JSON.stringify(await values())})`);
+
+    // 今の形: 常に伏せる語を保存すると、ISOLATED world が新しい語の位置を返し、それで組み直す (recomputeWithDetections)
+    await h.setStorage({ maskForceList: [{ value: "ゼータ案件", category: "OTHER" }, { value: "オメガ案件", category: "OTHER" }] });
+    assert.ok(await waitRow("オメガ案件"), "足した語の行が出る (位置で組み直す)");
+    assert.ok((await values()).some((v) => v.startsWith("佐々木 ことみ")), `組み直しても、カスタムの行は消えない (${JSON.stringify(await values())})`);
+
+    assert.ok(await S.clickInShadow(p, SIDEBAR, /マスクして送信/), "送るを押せる");
+    assert.deepEqual(await waitSent("claude", t0), ["<PERSON_1>様に<USER_DEFINED_OTHER_1>と<USER_DEFINED_OTHER_2>を連絡します"], "伏せ字で届く");
+  } finally { await p.close(); }
 });

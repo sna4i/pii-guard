@@ -2805,6 +2805,11 @@
       let previousForcelist = [];
       let previousForceKeys = null; // V-02: 直前の「常に伏せる語」の検出 (label|value)
 
+      // Pro のカスタムルールの行 (ISOLATED world が custom の印を付けた行) から組み直す検出には、同じ印を付ける。
+      // 集める所 (aggregate.js の aggregateDetections) は、印のある検出を人名の絞り込みで落とさない。印が無いと、
+      // 組み直すたびに「佐々木 ことみ」のような名前が PERSON のルールの行が消え、原文のまま送られる。印の無い行は今のまま
+      const customMark = (row) => (row.custom === true ? { custom: true } : {});
+
       // V-02: 「常に伏せる語」のリストは MAIN world に来ないので、ISOLATED world が返した
       // 「この文の中の位置」(ufmDets) で再計算する。
       function recomputeWithDetections(ufmDets) {
@@ -2818,7 +2823,7 @@
           if (!row || typeof row.label !== "string" || row.label.startsWith("USER_DEFINED_")) continue;
           for (const pos of Array.isArray(row.positions) ? row.positions : []) {
             if (!Array.isArray(pos) || pos.length < 2) continue;
-            baselineDets.push({ entity_type: row.label, start: Number(pos[0]), end: Number(pos[1]), text: String(row.value || ""), score: 1.0, action: row.masked === false ? "allowed" : "masked" });
+            baselineDets.push({ entity_type: row.label, start: Number(pos[0]), end: Number(pos[1]), text: String(row.value || ""), score: 1.0, action: row.masked === false ? "allowed" : "masked", ...customMark(row) });
           }
         }
         const dets = (Array.isArray(ufmDets) ? ufmDets : []).filter((d) => d && typeof d.entity_type === "string" && Number.isInteger(d.start) && Number.isInteger(d.end));
@@ -2874,6 +2879,7 @@
               text: String(row.value || ""),
               score: 1.0,
               action: row.masked === false ? "allowed" : "masked",
+              ...customMark(row),
             });
           }
         }

@@ -1,4 +1,4 @@
-// tests/engine/custom-rules-engine.test.mjs — エンジンが、Pro のときだけカスタムルールを当てる (Pro Phase 2 の設計 (P1)、T-CR-21〜29)
+// tests/engine/custom-rules-engine.test.mjs — エンジンが、Pro のときだけカスタムルールを当てる (Pro Phase 2 の設計 (P1)、T-CR-21〜30・52)
 //
 // カスタムルールは setCustomRules で 1 回だけ組み立てて持ち (engine/custom-rules.js の compileRules)、送るたびには組み立てない。
 // Pro でないか、ルールが 0 個なら、足した処理を通らず、結果は今と同じ (custom.status は off)。
@@ -305,4 +305,36 @@ test("T-CR-30 既定のブロックリストにある語 (サーバー) も、�
     const entries = [{ value: "データ", category: "OTHER" }, { value: "社外秘資料", category: "OTHER" }];
     assert.equal(await sanitize("データと社外秘資料を送る", { userForceMaskEntries: entries }), "データと<USER_DEFINED_OTHER_1>を送る");
   });
+});
+
+test("T-CR-52 名前が PERSON のルールの行は、人名の絞り込み (「こと」「ため」などを含む 7 文字以上の人名を捨てる) で落とさない。今の検出にまたがってまとめた検出も同じ。無料版の行は今と同じ", async () => {
+  // 確認のサイドバーは集めた形 (maskAggregated) の行で開き、行が 0 件なら確認なしで原文のまま送る。カスタムの行が
+  // この絞り込みで消えると、ルールの語が黙って送られる。カスタムの検出には custom: true の印が付き、絞り込みはそれを見る
+  const words = (id, list, match) => ({ id, label: "PERSON", kind: "words", words: list, match, enabled: true });
+  // [ルール, 本文, Pro の行, 無料版の行]
+  const cases = [
+    [words("p1", ["佐々木 ことみ"], "exact"), "佐々木 ことみ様に連絡します", [["PERSON", "佐々木 ことみ", "<PERSON_1>"]], [["JP_SURNAME", "佐々木", "<JP_SURNAME_1>"]]],
+    [words("p2", ["勅使河原ことみ"], "exact"), "勅使河原ことみ様に連絡します", [["PERSON", "勅使河原ことみ", "<PERSON_1>"]], []],
+    // 今の検出 (名字の 佐々木) にまたがる語: 1 つにまとめた検出 (佐々木 ことみ) にも印が付く
+    [words("p3", ["木 ことみ"], "partial"), "佐々木 ことみ様に連絡します", [["PERSON", "佐々木 ことみ", "<PERSON_1>"]], [["JP_SURNAME", "佐々木", "<JP_SURNAME_1>"]]],
+  ];
+  const rowsOf = (agg) => agg.aggregated.map((r) => [r.label, r.value, r.placeholder]);
+  for (const [rule, text, proRows, freeRows] of cases) {
+    const before = await engine.maskAggregated(text, {});
+    assert.deepEqual(rowsOf(before), freeRows, `無料版の行 (${text})`);
+    await withRules([rule], async () => {
+      assert.deepEqual((await engine.maskAggregated(text, {})).aggregated, before.aggregated, `Pro でなければ今と同じ (${text})`);
+      engine.setProEnabled(true);
+      for (const mlEnabled of [false, true]) {
+        assert.deepEqual(rowsOf(await engine.maskAggregated(text, { mlEnabled })), proRows, `Pro の行 (${text}、mlEnabled: ${mlEnabled})`);
+      }
+      assert.equal(await sanitize(text), text.replace(proRows[0][1], "<PERSON_1>"), `伏せた文 (${text})`);
+    });
+  }
+
+  // 絞り込みそのもの: 印の無い人名の検出は今どおり捨て、印のある検出 (Pro でルールが当たったときだけ) は残す
+  const aggregate = require(E + "aggregate.js");
+  const det = { entity_type: "PERSON", start: 0, end: 7, text: "佐々木 ことみ", score: 1.0, action: "masked" };
+  assert.deepEqual(aggregate.aggregateDetections([det]), [], "印の無い検出は、今どおり捨てる");
+  assert.deepEqual(aggregate.aggregateDetections([{ ...det, custom: true }]).map((r) => [r.label, r.value]), [["PERSON", "佐々木 ことみ"]], "印のある検出は残す");
 });
