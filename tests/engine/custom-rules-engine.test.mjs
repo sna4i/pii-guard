@@ -225,3 +225,32 @@ test("T-CR-29 名前が今の種類と同じ (label: PERSON、語「ジョン・
     ]);
   });
 });
+
+test("T-CR-30 既定のブロックリストにある語 (サーバー) も、語のルールに入れれば Pro のときは伏せる。Pro でないときは今と同じ (伏せない)", async () => {
+  // ブロックリストは自動の検出の誤検出を抑えるためのもの。利用者が書いたルールは、それで黙って無効にしない
+  const text = "このサーバーは来月止める";
+  const before = await engine.maskSanitize(text, {});
+  assert.ok(before.sanitized_text.includes("サーバー"), "今のエンジンは、普通名詞のサーバーを伏せない");
+  const host = { id: "r6", label: "HOST", kind: "words", words: ["サーバー"], match: "exact", enabled: true };
+  await withRules([host], async () => {
+    const off = await engine.maskSanitize(text, {});
+    assert.equal(off.sanitized_text, before.sanitized_text);
+    assert.deepEqual(off.detections, before.detections);
+    assert.deepEqual(off.custom, { status: "off" });
+
+    engine.setProEnabled(true);
+    for (const mlEnabled of [false, true]) {
+      const on = await engine.maskSanitize(text, { mlEnabled });
+      assert.equal(on.sanitized_text, "この<HOST_1>は来月止める");
+      assert.deepEqual(on.custom, { status: "ok" });
+    }
+    const agg = await engine.maskAggregated(text, {});
+    assert.deepEqual(agg.aggregated.map((r) => [r.label, r.value, r.placeholder]), [["HOST", "サーバー", "<HOST_1>"]]);
+    // 外すのはブロックリストだけ。ほかの絞り込み (ここでは分類の絞り込み。HOST の分類は other) は、これまでどおり効く
+    assert.equal(await sanitize(text, { enabledPiiClasses: ["contact"] }), text);
+
+    // サイドバーから足す「常に伏せる語」は、Pro でカスタムルールがあっても、これまでどおりブロックリストに負ける
+    const entries = [{ value: "データ", category: "OTHER" }, { value: "社外秘資料", category: "OTHER" }];
+    assert.equal(await sanitize("データと社外秘資料を送る", { userForceMaskEntries: entries }), "データと<USER_DEFINED_OTHER_1>を送る");
+  });
+});

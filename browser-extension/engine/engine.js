@@ -132,7 +132,7 @@
   // Pro のカスタムルール (Pro Phase 2 の設計 (P1))。engine/custom-rules.js の compileRules で組み立てたものを持つ。
   // 組み立ては上限いっぱいで数十ミリ秒かかるので、送るたびではなく、ルールが変わったときに setCustomRules で 1 回だけ行う。
   // 持つのは、有効で正しいものを先頭から上限の数まで (オフのもの・正しくないものは持たない)。返すのは持った数。
-  // 当てるのは Pro のときだけ (collectWithCustom)
+  // 当てるのは Pro のときだけ (collectCustom)
   let customPatterns = [];
   function setCustomRules(rules) {
     const deps = resolveDeps();
@@ -277,14 +277,12 @@
     return dets;
   }
 
-  // 今の検出に、Pro のカスタムルールの検出を足す (重なりは、このあと finishPipeline が今の検出と一緒に解く)。
-  // custom は結果に付ける状態で、今の ml と同じく maskSanitize・maskAggregated まで運ぶ。
-  // Pro でないか、ルールが 0 個なら、カスタムの処理を通らず (時計も見ない)、今の検出をそのまま返す
-  function collectWithCustom(text, opts, deps) {
-    const dets = collectRawDetections(text, opts, deps);
-    if (!proEnabled || customPatterns.length === 0) return { dets, custom: { status: "off" } };
-    const found = collectCustomDetections(text, opts, deps);
-    return { dets: dets.concat(found.dets), custom: { status: found.status } };
+  // Pro のカスタムルールの検出と、その状態 ("off" / "ok" / "partial")。検出は今の検出と分けて finishPipeline に渡し
+  // (普通名詞のブロックリストで落とさないため)、状態は今の ml と同じく maskSanitize・maskAggregated の結果まで運ぶ。
+  // Pro でないか、ルールが 0 個なら、カスタムの処理を通らず (時計も見ない)、検出は空で "off"
+  function collectCustom(text, opts, deps) {
+    if (!proEnabled || customPatterns.length === 0) return { dets: [], status: "off" };
+    return collectCustomDetections(text, opts, deps);
   }
 
   const nowMs = () => (typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now());
@@ -315,11 +313,16 @@
   // minScore → enabledPiiClasses → overlap resolver. Idempotent enough
   // that calling it after merging in async ML detections still yields
   // the right answer.
-  function finishPipeline(dets, opts, deps) {
+  // Pro のカスタムルールの検出 (customDets) は、ブロックリストの絞り込みのあとで足す。ブロックリストは自動の検出の
+  // 誤検出を抑えるためのもので、利用者が書いたルールを黙って無効にしない (サイドバーから足す「常に伏せる語」は、
+  // 誤って足すことがあるので、これまでどおりブロックリストに負ける)。minScore・enabledPiiClasses・重なりの解消は、
+  // 今の検出と同じく効く
+  function finishPipeline(dets, opts, deps, customDets) {
     const minScore = typeof opts.minScore === "number" ? opts.minScore : 0.0;
     const bl = opts.commonNounBlocklist instanceof Set ? opts.commonNounBlocklist
       : new Set(opts.commonNounBlocklist || deps.blocklist.DEFAULT_COMMON_NOUN_BLOCKLIST);
     if (bl.size > 0) dets = dets.filter((d) => !bl.has(d.text));
+    if (customDets.length > 0) dets = dets.concat(customDets);
     if (minScore > 0.0) dets = dets.filter((d) => d.score >= minScore);
     if (opts.enabledPiiClasses) {
       const en = new Set(opts.enabledPiiClasses);
@@ -329,10 +332,11 @@
   }
 
   // Returns { dets, custom }; custom.status is "off" / "ok" / "partial"
-  // (collectWithCustom) so callers can tell when custom rules ran out of time.
+  // (collectCustom) so callers can tell when custom rules ran out of time.
   function runPipeline(text, opts, deps) {
-    const { dets, custom } = collectWithCustom(text, opts, deps);
-    return { dets: finishPipeline(dets, opts, deps), custom };
+    const dets = collectRawDetections(text, opts, deps);
+    const custom = collectCustom(text, opts, deps);
+    return { dets: finishPipeline(dets, opts, deps, custom.dets), custom: { status: custom.status } };
   }
 
   // Async variant: same as runPipeline but also invokes the ML detector
@@ -344,8 +348,8 @@
   // ml.status is "off" / "ok" / "timeout" / "error" / "unavailable"
   // (onnx-detector.js) so callers can tell the user when ML was skipped.
   async function runPipelineWithMl(text, opts, deps) {
-    const collected = collectWithCustom(text, opts, deps);
-    let dets = collected.dets;
+    let dets = collectRawDetections(text, opts, deps);
+    const custom = collectCustom(text, opts, deps);
     let ml = { status: "off" };
     if (opts.mlEnabled && deps.onnxDetector) {
       try {
@@ -355,7 +359,7 @@
         if (mlDets.length > 0) dets = dets.concat(mlDets);
       } catch (_) { ml = { status: "error" }; /* fall through with regex-only */ }
     }
-    return { dets: finishPipeline(dets, opts, deps), ml, custom: collected.custom };
+    return { dets: finishPipeline(dets, opts, deps, custom.dets), ml, custom: { status: custom.status } };
   }
   async function runPipelineAsync(text, opts, deps) {
     return (await runPipelineWithMl(text, opts, deps)).dets;
