@@ -35,6 +35,25 @@ function pidsFor(userDataDir) {
 }
 
 /**
+ * 読み込む拡張機能のディレクトリを返す。Store の束は LLM とモデルの取得先を `optional_host_permissions` に
+ * しているが、ヘッドレスでは `chrome.permissions.request` が解決しないので、インストールしただけでは
+ * 許可されないまま通信だけが落ちる (開発版は `host_permissions` に入っていて最初から許可済みなので出ない)。
+ * 任意権限を持つ manifest を読んだときだけ、それらを `host_permissions` に移した写しを tmp に作り、そちらを読む。
+ * 何を許すかはどちらの束でも同じになる。
+ */
+function extDirFor(tmp) {
+  const manifest = JSON.parse(fs.readFileSync(path.join(EXT_DIR, "manifest.json"), "utf8"));
+  const optional = manifest.optional_host_permissions || [];
+  if (!optional.length) return EXT_DIR;
+  const dir = path.join(tmp, "ext");
+  fs.cpSync(EXT_DIR, dir, { recursive: true });
+  manifest.host_permissions = [...(manifest.host_permissions || []), ...optional];
+  delete manifest.optional_host_permissions;
+  fs.writeFileSync(path.join(dir, "manifest.json"), JSON.stringify(manifest, null, 2));
+  return dir;
+}
+
+/**
  * 拡張機能を読み込んだブラウザと CDP の記録係を立ち上げる。モックのサーバは呼ぶ側が先に立ち上げ、
  * その片付け (closeServer) を渡す。立ち上げに失敗したときも、サーバを含めて片付けてから投げる。
  * @param {{ tmpPrefix: string, hostRules: string[], closeServer: () => Promise<void>,
@@ -47,8 +66,11 @@ export async function launchExtensionBrowser(opts) {
   // 一時ディレクトリを作れなかったときも、呼ぶ側が先に立ち上げたモックのサーバを閉じてから投げる
   // (ブラウザはまだ無いので、片付けるのはサーバだけ)
   let tmp;
+  let loadDir;
   try {
     tmp = fs.mkdtempSync(path.join(os.tmpdir(), opts.tmpPrefix));
+    // 読み込む拡張機能。任意権限を持つ束 (Store の zip) は、権限を移した写しになる (extDirFor)
+    loadDir = extDirFor(tmp);
   } catch (e) {
     await opts.closeServer().catch(() => {});
     throw e;
@@ -76,8 +98,8 @@ export async function launchExtensionBrowser(opts) {
       viewport: opts.viewport,
       ...(opts.colorScheme ? { colorScheme: opts.colorScheme } : {}),
       args: [
-        `--disable-extensions-except=${EXT_DIR}`,
-        `--load-extension=${EXT_DIR}`,
+        `--disable-extensions-except=${loadDir}`,
+        `--load-extension=${loadDir}`,
         `--host-resolver-rules=${opts.hostRules.join(",")}`,
         "--ignore-certificate-errors",
         "--disable-quic",
