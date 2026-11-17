@@ -17,6 +17,7 @@
 // 終了コード: 0 = LLM を使うすべてのモードで、形式の値が一部も漏れず、伏せ字が壊れず、LLM が応答した
 //             1 = それ以外
 import { chromium } from "playwright";
+import { browserMode } from "../fixtures/browser-mode.mjs";
 import https from "node:https";
 import fs from "node:fs";
 import os from "node:os";
@@ -37,7 +38,6 @@ async function runMode(model) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "pii-verify-"));
   let server, ctx;
   const received = [];
-  const logs = [];
   const out = { model, sent: "", rows: [], llm: null, ms: null, error: null };
   try {
     const crt = path.join(tmp, "server.crt"), k = path.join(tmp, "server.key");
@@ -55,7 +55,7 @@ async function runMode(model) {
     });
     await new Promise((r) => server.listen(0, "127.0.0.1", r));
     ctx = await chromium.launchPersistentContext(path.join(tmp, "profile"), {
-      headless: false, ignoreHTTPSErrors: true,
+      ...browserMode(), ignoreHTTPSErrors: true,
       args: [`--disable-extensions-except=${EXT}`, `--load-extension=${EXT}`,
              `--host-resolver-rules=MAP chatgpt.com 127.0.0.1:${server.address().port}`,
              "--ignore-certificate-errors", "--no-sandbox"],
@@ -77,7 +77,6 @@ async function runMode(model) {
     }
 
     const page = await ctx.newPage();
-    page.on("console", (m) => { const t = m.text(); if (t.includes("[pii-guard]")) logs.push(t); });
     await page.goto("https://chatgpt.com/");
     await page.waitForTimeout(3500);
     const t0 = Date.now();
@@ -89,11 +88,18 @@ async function runMode(model) {
       }).catch(() => {});
     }, FIX.text);
 
-    const done = () => logs.find((l) => /llm detect merge:|llm detect: (ok_empty|failed|all LLM entities filtered)|llm response not JSON/.test(l));
+    // 1.7.1 から拡張機能はコンソールに書かない。LLM の判定の結果は動作ログ (docs/diagnostic-log.md) で読む
+    const done = async () => {
+      const all = await sw.evaluate(() => chrome.storage.local.get(null));
+      const e = Object.entries(all).filter(([key]) => key.startsWith("diagLog:")).flatMap(([, v]) => v)
+        .filter((x) => x.code === "llm.detect").sort((a, b) => b.t - a.t)[0];
+      return e ? `${e.d.status} (追加 ${e.d.added ?? 0} 件、除外 ${e.d.filtered ?? 0} 件)` : null;
+    };
     if (model) {
-      for (let i = 0; i < 360 && !done(); i++) await page.waitForTimeout(1000);
+      let result = null;
+      for (let i = 0; i < 360 && !(result = await done()); i++) await page.waitForTimeout(1000);
       out.ms = Date.now() - t0;
-      out.llm = done() || "応答なし (待ち時間切れ)";
+      out.llm = result || "応答なし (待ち時間切れ)";
       await page.waitForTimeout(2500); // 統合後のサイドバーの描き直しを待つ
     } else {
       await page.waitForTimeout(4000);

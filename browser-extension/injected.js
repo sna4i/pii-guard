@@ -18,13 +18,30 @@
 (() => {
   "use strict";
 
-  const LOG = (...args) => console.debug("[pii-guard]", ...args);
-  const WARN = (...args) => console.warn("[pii-guard]", ...args);
+  // 動作ログ (docs/diagnostic-log.md)。コンソールには何も書かない (R-LG-01)。決まった種類の出来事だけを
+  // content script に渡し、Service Worker が検めて残す。この経路はページのスクリプトにも見えるので、
+  // 件数・理由・宛先のホスト名だけを入れ、文章や URL のパスは入れない (D-LG-02, D-LG-03)
+  function plog(code, d) {
+    try { window.postMessage({ source: "mask-mcp-inpage", type: "diag-log", entry: { code, d: d || {} } }, "*"); } catch (_) {}
+  }
+  const hostOfUrl = (u) => { try { return new URL(u, location.href).hostname; } catch (_) { return undefined; } };
+  const errName = (e) => (e && typeof e.name === "string" ? e.name : "Error");
+  // 自分 (拡張機能のファイル) のエラーだけを拾い、コンソールに出さずに動作ログへ (D-LG-09)
+  const OWN_BASE = (() => { try { return new URL(document.currentScript.src).origin + "/"; } catch (_) { return ""; } })();
+  window.addEventListener("error", (ev) => {
+    if (!OWN_BASE || !String((ev && ev.filename) || "").startsWith(OWN_BASE)) return;
+    plog("error", { where: "page", name: errName(ev.error) });
+    ev.preventDefault();
+  });
+  window.addEventListener("unhandledrejection", (ev) => {
+    const stack = ev && ev.reason && ev.reason.stack;
+    if (!OWN_BASE || typeof stack !== "string" || !stack.includes(OWN_BASE)) return;
+    plog("error", { where: "page", name: errName(ev.reason) });
+    ev.preventDefault();
+  });
 
-  // Query params that commonly carry session credentials. Our diagnostic
-  // LOGs echo URLs verbatim, which means JWT/API-key leaks into console
-  // and any screenshot / paste. Redaction keeps the host + path visible
-  // (useful for endpoint discovery) while masking secrets.
+  // Query params that commonly carry session credentials. The URL handed to
+  // processBody() (and from there to the review UI) has them masked.
   const SENSITIVE_QS = [
     "token",
     "auth",
@@ -51,32 +68,11 @@
     }
   }
 
-  // Dedupe diagnostic logs so ChatGPT-style telemetry floods don't
-  // drown out the few LOG lines that matter (adapter hits, LLM
-  // results). Key = "logTag|host+path" — we log once per unique
-  // route per page load.
-  const _logSeen = new Set();
-  function logOnce(tag, url, extra) {
-    try {
-      const u = new URL(url, location.href);
-      const key = tag + "|" + u.host + u.pathname;
-      if (_logSeen.has(key)) return;
-      _logSeen.add(key);
-    } catch (_) {}
-    if (extra !== undefined) LOG(tag, redactUrl(url), extra);
-    else LOG(tag, redactUrl(url));
-  }
 
   // Bounded-length snippet for logging WS frames. Socket.IO EVENT frames
   // start with ``42[...]`` and are usually under a few hundred chars —
   // 160 chars is enough to see the event name + first field without
   // drowning the console in long JSON payloads.
-  function previewPayload(data, max = 160) {
-    if (typeof data !== "string") return "(" + typeof data + ")";
-    return data.length <= max
-      ? data
-      : data.slice(0, max) + "…(+" + (data.length - max) + " chars)";
-  }
 
   const TAG_IN = "mask-mcp-inpage";   // outgoing to content script
   const TAG_OUT = "mask-mcp-content"; // incoming from content script
@@ -107,6 +103,7 @@
         ...NS.settings,
         ...data.settings,
       };
+      applyPro(NS.engine);
       try {
         window.dispatchEvent(
           new CustomEvent("mask-mcp:settings-updated", {
@@ -247,7 +244,14 @@
 
   async function getEngine() {
     const e = await enginePromise;
-    return isEngineReady(e) ? e : null;
+    if (!isEngineReady(e)) return null;
+    applyPro(e);
+    return e;
+  }
+  // Pro かどうか (docs/pro-license.md の D-PRO-06)。content.js が設定と一緒に配る値を、使う前にエンジンへ渡す。
+  // 設定が届く前にエンジンを使っても、無料版のルールで動く
+  function applyPro(e) {
+    try { if (e && typeof e.setProEnabled === "function") e.setProEnabled(!!(NS.settings && NS.settings.pro === true)); } catch (_) {}
   }
 
   // V-02: マスクは ISOLATED world (content.js) のエンジンにリスト込みで頼む。リストの値は
@@ -260,23 +264,36 @@
   // ISOLATED に頼めなかったとき: リストがあるなら、MAIN world のエンジン (リスト無し) で黙って
   // 続けると「常に伏せる語」を伏せないまま送る。マスク失敗として呼び手に返す (fail-closed)。
   const listsNeeded = () => !!(NS.settings && NS.settings.hasSecretLists);
+  // Pro のカスタムルールを当て終えられなかった (ISOLATED world の結果の custom.status が partial)。
+  // その送信は、確認を出さない設定でも確認の画面 (サイドバーかモーダル) に回し、上に一文を出す。確認の画面が
+  // 無ければ送らない (Pro Phase 2 の設計 (P1))。理由 (custom.cause) は、時間の上限に届いた (timeout。エンジンの partial) か、
+  // ルールがあるのに Pro かどうか分からず、1 本も当てなかった (pro-unknown。content.js が付ける) か。動作ログに理由ごと残す。
+  // 保護入力欄 (secure-composer.js) と添付 (attachments/attachment-guard.js) も同じ文を使う
+  const CUSTOM_PARTIAL_NOTICES = {
+    timeout: "カスタムルールの一部を時間内に調べきれませんでした。伏せられていない語が残っているかもしれません。送る前に確かめてください。",
+    "pro-unknown": "Pro の状態を確かめられないため、カスタムルールを当てていません。送る前に確かめてください。",
+  };
+  // partial なら、記録して一文を返す。そうでなければ "" (偽)
+  function noteCustomPartial(result) {
+    if (!(result && result.custom && result.custom.status === "partial")) return "";
+    const cause = result.custom.cause === "pro-unknown" ? "pro-unknown" : "timeout";
+    plog("custom.partial", { via: "page", cause });
+    return CUSTOM_PARTIAL_NOTICES[cause];
+  }
+  // 送信を止める (fail-closed)。fetch・XHR・WebSocket の監視が受け止め、動作ログの send.blocked に reason を残す
+  const sendBlocked = (reason) => Object.assign(new Error("mask-mcp: send blocked"), { blockReason: reason });
 
   async function sanitizeOnce(text, service, sourceUrl) {
     const backend = await resolveBackend();
     if (backend === "standalone") {
       const local = await localMask("sanitize", text);
       if (local && typeof local.sanitized_text === "string") return local;
-      if (listsNeeded()) { WARN("isolated masking unavailable; refusing to mask without the user's lists"); return null; }
+      if (listsNeeded()) { plog("send.blocked", { reason: "lists-unavailable" }); return null; }
       const engine = await getEngine();
       if (!engine) {
         // Engine missing AND gateway not preferred: degrade by returning
         // the raw text so the fetch hook's unmasked-confirm prompt fires.
-        WARN(
-          "standalone mode requested but engine unavailable after",
-          ENGINE_WAIT_MS + "ms.",
-          "Check DevTools Console for [pii-guard] engine bundle errors",
-          "or CSP violations blocking chrome-extension:// scripts."
-        );
+        plog("engine.unavailable", { where: "masking" });
         return null;
       }
       try {
@@ -285,7 +302,7 @@
         // the catch below rather than escaping the function.
         return await engine.maskSanitize(text, engineOpts());
       } catch (e) {
-        WARN("standalone maskSanitize failed:", e?.message || e);
+        plog("error", { where: "masking", name: errName(e) });
         return null;
       }
     }
@@ -312,21 +329,16 @@
     if (backend === "standalone") {
       const local = await localMask("aggregated", text);
       if (local && Array.isArray(local.aggregated)) return local;
-      if (listsNeeded()) { WARN("isolated masking unavailable; refusing to mask without the user's lists"); return null; }
+      if (listsNeeded()) { plog("send.blocked", { reason: "lists-unavailable" }); return null; }
       const engine = await getEngine();
       if (!engine) {
-        WARN(
-          "standalone mode requested but engine unavailable after",
-          ENGINE_WAIT_MS + "ms.",
-          "Check DevTools Console for [pii-guard] engine bundle errors",
-          "or CSP violations blocking chrome-extension:// scripts."
-        );
+        plog("engine.unavailable", { where: "masking" });
         return null;
       }
       try {
         return await engine.maskAggregated(text, engineOpts());
       } catch (e) {
-        WARN("standalone maskAggregated failed:", e?.message || e);
+        plog("error", { where: "masking", name: errName(e) });
         return null;
       }
     }
@@ -341,6 +353,7 @@
   // unreachable / times out, so callers can treat "no augmentation"
   // as the normal case.
   async function llmAugment(text, mode) {
+    llmAugment.lastIssue = null; // 呼び手が動作ログに残す、失敗の種類 (no-response / invalid-response / failed)
     try {
       const cfgResp = await request("llm-config", {});
       const cfg = cfgResp && cfgResp.config;
@@ -358,9 +371,6 @@
       // even the slowest 4B cold-start scenarios while still
       // bounding how long a stuck request can hang.
       const innerBudget = (cfg.timeoutMs || 120000) * 3 + 30000;
-      LOG(
-        `llm ${mode}: inner bridge budget ${Math.round(innerBudget / 1000)}s (fetch timeout ${Math.round((cfg.timeoutMs || 120000) / 1000)}s)`,
-      );
       const callResp = await request(
         "llm-call",
         { system, user, config: cfg },
@@ -368,10 +378,9 @@
       );
       const raw = callResp && callResp.result;
       if (!raw || typeof raw !== "string") {
-        LOG(`llm ${mode}: no response (timeout / network / CORS)`);
+        llmAugment.lastIssue = "no-response";
         return null;
       }
-      LOG(`llm ${mode}: got response (${raw.length} chars)`);
       // The LLM sometimes wraps JSON in ```json fences despite instructions.
       // Qwen3 / Deepseek-R1 / other "thinking" models wrap reasoning
       // in <think>...</think> before the actual answer. Strip those
@@ -394,19 +403,19 @@
       try {
         parsed = JSON.parse(cleaned);
       } catch (_) {
-        LOG("llm response not JSON; ignoring");
+        llmAugment.lastIssue = "invalid-response";
         return null;
       }
       // [MEDIUM] Strict schema validation — a prompt-injected response
       // that returns free-form text or unexpected fields must be
       // rejected so the regex pipeline stays authoritative.
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-        LOG("llm response not object; ignoring");
+        llmAugment.lastIssue = "invalid-response";
         return null;
       }
       if (mode === "detect") {
         if (!Array.isArray(parsed.entities)) {
-          LOG("llm detect response missing entities[]; ignoring");
+          llmAugment.lastIssue = "invalid-response";
           return null;
         }
         parsed.entities = parsed.entities.filter(
@@ -425,14 +434,14 @@
           typeof parsed.rewritten_text !== "string" ||
           parsed.rewritten_text.length === 0
         ) {
-          LOG("llm replace response missing rewritten_text; ignoring");
+          llmAugment.lastIssue = "invalid-response";
           return null;
         }
         return parsed;
       }
       return parsed;
     } catch (err) {
-      WARN("llmAugment failed:", err?.message || err);
+      llmAugment.lastIssue = "failed";
       return null;
     }
   }
@@ -450,7 +459,6 @@
       const cfgResp = await request("llm-config", {});
       const cfg = cfgResp && cfgResp.config;
       if (!cfg) {
-        LOG("llm detect: SKIPPED (no config — enable toggle + set URL in options)");
         aggResp._llmStatus = "failed";
         return aggResp;
       }
@@ -460,11 +468,9 @@
       // pipeline — otherwise LLM effectively contributes nothing on
       // replace-mode failure. So detect runs for BOTH modes.
       if (cfg.mode !== "detect" && cfg.mode !== "replace") {
-        LOG(`llm detect: SKIPPED (mode="${cfg.mode}", not detect/replace)`);
         aggResp._llmStatus = "failed";
         return aggResp;
       }
-      LOG(`llm detect: querying local model (mode=${cfg.mode})`);
       // No showLoading() here — the sidebar's centered overlay is now
       // the sole LLM progress indicator when regex found ≥1 entity and
       // we opened the sidebar in parallel. For the zero-regex path
@@ -479,9 +485,7 @@
       //   "ok_entities"  — LLM answered with at least one entity
       if (!llmEnts.length) {
         aggResp._llmStatus = out === null ? "failed" : "ok_empty";
-        LOG(
-          `llm detect: ${aggResp._llmStatus} — keeping regex/morphology only`,
-        );
+        plog("llm.detect", { status: out === null ? (llmAugment.lastIssue || "failed") : "empty" });
         return aggResp;
       }
       aggResp._llmStatus = "ok_entities";
@@ -517,30 +521,22 @@
         const v = (e && e.text) || "";
         if (typeof v !== "string" || !v.trim()) return false;
         if (LLM_DENYLIST.has(v)) {
-          LOG(`llm detect: dropped false positive "${v}" (denylist)`);
           return false;
         }
         if (LLM_DENY_REGEX.some((re) => re.test(v))) {
-          LOG(`llm detect: dropped false positive "${v}" (pattern)`);
           return false;
         }
         // Short surfaces that are pure hiragana are almost always
         // particles / polite phrases mis-tagged.
         if (v.length <= 3 && /^[ぁ-ん]+$/.test(v)) {
-          LOG(`llm detect: dropped short hiragana "${v}"`);
           return false;
         }
         return true;
       });
-      if (filtered.length !== llmEnts.length) {
-        LOG(
-          `llm detect: filtered ${llmEnts.length - filtered.length} ` +
-            `false positives, ${filtered.length} kept`
-        );
-      }
+      const droppedFp = llmEnts.length - filtered.length;
       llmEnts = filtered;
       if (!llmEnts.length) {
-        LOG("llm detect: all LLM entities filtered out; keeping regex only");
+        plog("llm.detect", { status: "all-filtered", filtered: droppedFp });
         return aggResp;
       }
       const LABEL_TO_CATEGORY = {
@@ -600,20 +596,22 @@
       // This gives LLM final say on label/severity while retaining
       // structured regex detections (email, credit card, etc.) that
       // LLM might not have surfaced.
+      // Pro のカスタムルールの行 (ISOLATED world が custom の印を付ける) は例外で、LLM が同じ値を挙げても捨てない。LLM の行も
+      // 今どおり作るので、伏せる範囲は両方を合わせたもの (LLM の数え直しが落とす英数字の語の途中の出現も、LLM の人名の範囲の
+      // 広げも残る)。重なった所の名前は applySpans が決める (長いほう、同じ長さなら先に並んだほう)。カスタムの行を先に並べるので、
+      // 同じ長さならカスタムの名前になる。印の無い行 (無料版の行) は今どおり LLM の行に置き換わり、並び順も今と同じ
+      const customRows = (aggResp.aggregated || []).filter((a) => a && a.custom === true);
       const keptRegex = (aggResp.aggregated || []).filter(
-        (a) => !llmValues.has(String(a.value))
+        (a) => !(a && a.custom === true) && !llmValues.has(String(a.value))
       );
       const replaced = (aggResp.aggregated || []).length - keptRegex.length;
-      // LLM rows come first in the aggregated list so the sidebar
-      // shows them at the top of their severity tab.
-      aggResp.aggregated = [...llmRows, ...keptRegex];
-      LOG(
-        `llm detect merge: +${llmRows.length} llm entities, ` +
-          `+${keptRegex.length} regex kept, ${replaced} regex overridden by LLM`
-      );
+      // LLM rows come first in the aggregated list (after any Pro custom
+      // rows) so the sidebar shows them at the top of their severity tab.
+      aggResp.aggregated = [...customRows, ...llmRows, ...keptRegex];
+      plog("llm.detect", { status: "found", added: llmRows.length, filtered: droppedFp });
       return aggResp;
     } catch (err) {
-      WARN("mergeLlmDetect failed:", err?.message || err);
+      plog("llm.detect", { status: "failed" });
       aggResp._llmStatus = "failed";
       return aggResp;
     }
@@ -1096,17 +1094,8 @@
   async function processBody(adapter, bodyJson, url) {
     const inputs = adapter.extractInputs(bodyJson);
     if (!inputs.length) {
-      // Log once per adapter/URL so when a site adds a new body shape
-      // that extractInputs doesn't recognise, the user can paste this
-      // log line back to us for fixing.
-      logOnce(
-        `${adapter.name}: adapter matched but body had no user text —`
-          + " keys: " + Object.keys(bodyJson || {}).slice(0, 8).join(","),
-        url,
-      );
       return { changed: false, body: bodyJson };
     }
-    LOG(`${adapter.name}: ${inputs.length} input string(s) to mask`);
 
     // v0.5.0 — AI replace mode. The LLM rewrites each input into
     // <tag_N> placeholders. We open the review sidebar IMMEDIATELY
@@ -1120,7 +1109,12 @@
         const sidebarNS = NS.sidebar;
         const wantReview =
           NS.settings && NS.settings.interactive !== false;
-        if (wantReview && sidebarNS && inputs.length > 0) {
+        // Pro のカスタムルールが効いているあいだは、置き換えモードを使わない (LLM はルールを知らないので、ルールの語を
+        // 残して書き換えうる)。置き換えに失敗したときと同じく、下のいつもの道 (ISOLATED world のエンジン、カスタムルール
+        // あり) で伏せる。ページの世界には、効いているかどうかだけが届く (content.js の customRulesActive)
+        if (wantReview && sidebarNS && inputs.length > 0 && NS.settings.customRulesActive === true) {
+          plog("llm.replace", { status: "skipped" });
+        } else if (wantReview && sidebarNS && inputs.length > 0) {
           const LBL2CAT = {
             PERSON: "PERSON",
             COMPANY: "ORGANIZATION",
@@ -1222,20 +1216,20 @@
             throw new Error("mask-mcp: user cancelled review");
           }
           if (replaceResult.ok && replaceResult.rewritten.length === inputs.length) {
-            LOG(`${adapter.name}: LLM replace mode substituted ${inputs.length} input(s)`);
+            plog("llm.replace", { status: "ok" });
             return {
               changed: true,
               body: adapter.replaceInputs(bodyJson, replaceResult.rewritten),
             };
           }
-          LOG(`${adapter.name}: LLM replace partial/failed; falling back to regex path`);
+          plog("llm.replace", { status: "fallback" });
         }
       }
     } catch (err) {
       if (err && err.message && err.message.includes("mask-mcp: user cancelled")) {
         throw err;
       }
-      WARN("llm replace path failed; falling back to regex:", err?.message || err);
+      plog("llm.replace", { status: "failed" });
     }
 
     const interactive = NS.settings && NS.settings.interactive !== false;
@@ -1251,6 +1245,9 @@
     //   * any other combo (UI helper missing) → fall back to auto-mask.
     const useSidebar = interactive && uiMode === "sidebar" && !!sidebar;
     const useModal = interactive && uiMode === "modal" && !!modal;
+    // カスタムルールが時間切れになった送信だけに使う確認の画面 (確認を出さない設定でも出す)。選んだ方式 (uiMode) の
+    // 画面を使い、その部品が無ければもう一方。どちらも無ければ送らない
+    const timeoutUi = uiMode === "modal" && modal ? "modal" : sidebar ? "sidebar" : modal ? "modal" : null;
 
     // When LLM is enabled we take it as the authoritative detector
     // and ALWAYS open the sidebar with the overlay, even when the
@@ -1283,18 +1280,21 @@
         //     auto-closes silently if the merged result is empty.
         //   * LLM OFF → behave as before. If regex returned 0 rows
         //     we forward the text untouched (no sidebar flash).
+        //   * カスタムルールの時間切れ → 0 件でも開き、上に一文を出す
         const initialAgg = Array.isArray(aggResp.aggregated)
           ? aggResp.aggregated
           : [];
+        const notice = noteCustomPartial(aggResp) || undefined;
         let decision;
         if (llmEnabled) {
           const llmPromise = mergeLlmDetect(aggResp, text);
           decision = await sidebar.show(aggResp, text, {
             llmPending: llmPromise,
             mode: "detect",
+            notice,
           });
-        } else if (initialAgg.length > 0) {
-          decision = await sidebar.show(aggResp, text, { mode: "regex" });
+        } else if (initialAgg.length > 0 || notice) {
+          decision = await sidebar.show(aggResp, text, { mode: "regex", notice });
         } else {
           // Neither regex nor LLM has anything for us — forward.
           masked.push(text);
@@ -1325,8 +1325,34 @@
         ? result.detections
         : [];
 
-      if (useModal && detections.length > 0) {
-        const decision = await modal.show(detections, text);
+      // カスタムルールの時間切れ: 確認を出さない経路 (確認がオフ、または選んだ画面の部品が無い) でも、この送信だけ
+      // 確認の画面に回す。サイドバーは集めた形の結果で開くので、頼み直す
+      const notice = noteCustomPartial(result) || undefined;
+      if (notice && !useModal && timeoutUi !== "modal") {
+        if (timeoutUi !== "sidebar") throw sendBlocked("custom-rules-incomplete");
+        const aggResp = await sanitizeAggregated(text, adapter.name, url);
+        if (!aggResp) {
+          if (!confirmSendUnmasked(adapter.name)) {
+            throw new Error("mask-mcp: user cancelled unmasked send");
+          }
+          masked.push(text);
+          continue;
+        }
+        const decision = await sidebar.show(aggResp, text, { mode: "regex", notice });
+        if (!decision.accepted) {
+          throw new Error("mask-mcp: user cancelled review");
+        }
+        const finalText = applyTriples(text, decision.maskedPositions);
+        if (finalText !== text) anyChanged = true;
+        masked.push(finalText);
+        totalDetections += decision.maskedPositions
+          ? decision.maskedPositions.length
+          : 0;
+        continue;
+      }
+
+      if ((useModal || notice) && (detections.length > 0 || notice)) {
+        const decision = await modal.show(detections, text, { notice });
         if (!decision.accepted) {
           // Cancelled — abort the whole outbound request. The fetch
           // hook translates this exception into a rejected Promise
@@ -1488,7 +1514,7 @@
   }
 
   function notifyGuard(r, url) {
-    LOG(`egress guard: ${r.action} ${redactUrl(url)} (${r.reason || "scrubbed"})`);
+    plog(r.action === "scrub" ? "egress.scrubbed" : "egress.blocked", { dest: hostOfUrl(url) });
     guard.noticeCount++;
     const now = Date.now();
     if (now - guard.lastNotice < 15000) return; // ピルへの通知はまとめる
@@ -1527,19 +1553,22 @@
     if (!model || !model.fields.length) return null;
     const result = await processBody(adapter, model, url); // 取消は例外で上へ
     let m = result.changed ? result.body : model;
+    let maskedAttachments = 0;
     // 添付 (中身・ファイル名) は確認画面を出さずに自動でマスクする。マスクできなければ送らない
     if (typeof adapter.autoFields === "function") {
       for (const f of adapter.autoFields(m)) {
         const r = await sanitizeOnce(f.text, adapter.name, url);
         if (!r || typeof r.sanitized_text !== "string") return { blocked: true };
+        // カスタムルールを時間内に当て終えられなかった添付は、伏せ切れていないので送らない
+        if (noteCustomPartial(r)) { plog("send.blocked", { reason: "custom-rules-incomplete" }); return { blocked: true }; }
         let t = r.sanitized_text;
         if (f.kind === "name") t = t.replace(/</g, "[").replace(/>/g, "]"); // ファイル名に < > は使わない
-        if (t !== f.text) { m = adapter.setField(m, f.path, t); LOG(`${adapter.name}: masked an attachment ${f.kind}`); }
+        if (t !== f.text) { m = adapter.setField(m, f.path, t); maskedAttachments++; }
       }
     }
     const other = adapter.scrubOthers(m, guard.sensitive);
     if (other.stuck) return { blocked: true };
-    if (result.changed) LOG(`${adapter.name}: substituted masked body`);
+    if (result.changed || maskedAttachments) plog("send.masked", { attachments: maskedAttachments });
     return { body: adapter.encode(other.model) };
   }
 
@@ -1671,7 +1700,6 @@
         try {
           const h = new URL(url, location.href).host;
           if (/(claude\.(ai|com)|\.claude\.com|chatgpt\.com|\.openai\.com|gemini\.google\.com|manus\.im|butterfly-effect\.dev)/i.test(h)) {
-            logOnce(adapter ? "provider POST (adapter matched):" : "provider POST (NO adapter match):", url);
           }
         } catch (_) {}
         if (adapter) {
@@ -1684,7 +1712,7 @@
             if (!result.changed) return originalFetch(input, init);
             const nextInit = { ...(init || {}) };
             nextInit.body = JSON.stringify(result.body);
-            LOG(`${adapter.name}: substituted masked body`);
+            plog("send.masked", { via: "fetch" });
             return originalFetch(input, nextInit);
           }
         }
@@ -1723,7 +1751,7 @@
       return blockedFetch(url);
     } catch (err) {
       if (err && err.message && err.message.includes("mask-mcp: user cancelled")) {
-        LOG(err.message);
+        plog("send.cancelled", { via: "fetch" });
         // Surface as a rejected Promise so the page's send logic
         // treats it as a normal network failure (no masked payload
         // ever leaves the browser). Chat UIs typically present this
@@ -1735,7 +1763,8 @@
       // original (PII-bearing) body through. The AI service sees a
       // network error and the user sees the retry-prompt — the correct
       // UX for a privacy-critical tool.
-      WARN("fetch hook error; ABORTING request (fail-closed):", err?.message || err);
+      // 止めた理由が決まっているとき (sendBlocked) は、その理由を残す
+      plog("send.blocked", { reason: (err && err.blockReason) || "hook-error", via: "fetch" });
       return Promise.reject(
         new TypeError("PII Guard: masking pipeline error; request aborted")
       );
@@ -1769,7 +1798,6 @@
         try {
           const h = new URL(url, location.href).host;
           if (/(claude\.(ai|com)|\.claude\.com|chatgpt\.com|\.openai\.com|gemini\.google\.com|manus\.im|butterfly-effect\.dev)/i.test(h)) {
-            logOnce(adapter ? "provider XHR (adapter matched):" : "provider XHR (NO adapter match):", url);
           }
         } catch (_) {}
       }
@@ -1805,7 +1833,7 @@
             if (!(await isEnabled())) { originalXhrSend.apply(xhr, args); return; }
             const result = await processBody(adapter, parsed, url);
             if (!result.changed) { originalXhrSend.apply(xhr, args); return; }
-            LOG(`${adapter.name}: substituted masked XHR body`);
+            plog("send.masked", { via: "xhr" });
             originalXhrSend.call(xhr, JSON.stringify(result.body));
             return;
           }
@@ -1832,21 +1860,21 @@
           else failXhr(xhr);
         } catch (err) {
           if (err && err.message && err.message.includes("mask-mcp: user cancelled")) {
-            LOG(err.message);
+            plog("send.cancelled", { via: "xhr" });
             try { xhr.abort(); } catch (_) { /* noop */ }
             failXhr(xhr);
             return;
           }
           // [SECURITY] Fail-closed: never send the original body. Chat UIs
           // surface this as a send error.
-          WARN("XHR hook error; ABORTING (fail-closed):", err?.message || err);
+          plog("send.blocked", { reason: (err && err.blockReason) || "hook-error", via: "xhr" });
           try { xhr.abort(); } catch (_) { /* noop */ }
           failXhr(xhr);
         }
       })();
     } catch (err) {
       // [SECURITY] Outer setup error — also fail closed.
-      WARN("XHR send hook setup failed; ABORTING:", err?.message || err);
+      plog("send.blocked", { reason: "hook-error", via: "xhr" });
       try { this.abort(); } catch (_) { /* noop */ }
       return;
     }
@@ -1875,7 +1903,7 @@
           // reports). Refuse the beacon unconditionally — the return
           // value of false signals the page that delivery failed,
           // which chat apps gracefully ignore.
-          LOG("provider beacon BLOCKED:", redactUrl(url), "bodyType=" + typeof data);
+          plog("egress.blocked", { dest: hostOfUrl(url), via: "beacon" });
           return false;
         }
         if (guardActive()) {
@@ -1959,6 +1987,10 @@
 
   if (typeof WebSocket !== "undefined") {
     const originalWsSend = WebSocket.prototype.send;
+    // 閉じかけ (2)・閉じた (3) 接続への send() は、ブラウザがデータを捨てたうえで「WebSocket is already in
+    // CLOSING or CLOSED state.」をコンソールに出す。ここを通すとその出どころがこの拡張機能の行に見えるので、
+    // 呼ぶ前に確かめて黙って戻る。どちらにしても何も送られない (docs/release-1.7.1.md の D-EG-08)
+    const sendRaw = (ws, args) => (ws.readyState === 2 || ws.readyState === 3 ? undefined : originalWsSend.apply(ws, args));
     WebSocket.prototype.send = function patchedWsSend(data) {
       let asyncHandled = false;
       try {
@@ -1969,14 +2001,6 @@
             host
           )
         ) {
-          const size = (data && typeof data.length === "number") ? data.length : 0;
-          LOG(
-            "provider ws send:",
-            redactUrl(url),
-            "bodyType=" + typeof data,
-            "size=" + size,
-            "preview=" + previewPayload(data)
-          );
         }
 
         if (manusWsAdapter.matchUrl(url) && typeof data === "string") {
@@ -1992,10 +2016,9 @@
               const ws = this;
               const args = arguments;
               const redacted = redactUrl(url);
-              LOG("manus-ws: intercepting user_message frame");
               (async () => {
                 if (!(await isEnabled())) {
-                  originalWsSend.apply(ws, args);
+                  sendRaw(ws, args);
                   return;
                 }
                 try {
@@ -2005,41 +2028,36 @@
                     redacted
                   );
                   if (!result.changed) {
-                    originalWsSend.apply(ws, args);
+                    sendRaw(ws, args);
                     return;
                   }
                 const newFrame = serializeSocketIoEvent(
                   parsed.prefix,
                   wrapped.restore(result.body)
                 );
-                LOG(
-                  `${manusWsAdapter.name}: substituted masked WS frame (${data.length} → ${newFrame.length} bytes)`
-                );
-                originalWsSend.call(ws, newFrame);
+                plog("send.masked", { via: "ws" });
+                sendRaw(ws, [newFrame]);
               } catch (err) {
                 if (
                   err &&
                   err.message &&
                   err.message.includes("mask-mcp: user cancelled")
                 ) {
-                  LOG(err.message, "— WS frame dropped");
+                  plog("send.cancelled", { via: "ws" });
                   return;
                 }
                 // [SECURITY] Fail-closed: drop the frame instead of
                 // forwarding the original. The WS stays open so the
                 // session survives; the chat UI treats this as a
                 // missing ack and typically re-prompts.
-                WARN(
-                  "WS hook error; DROPPING frame (fail-closed):",
-                  err?.message || err
-                );
+                plog("send.blocked", { reason: (err && err.blockReason) || "hook-error", via: "ws" });
               }
             })();
             }
           }
         }
       } catch (err) {
-        WARN("WS send hook setup failed:", err?.message || err);
+        plog("error", { where: "ws-hook", name: errName(err) });
       }
       if (!asyncHandled) {
         // アダプタが扱わないフレームにも持ち出しガードを掛ける (入力中の文字を送るイベント等)
@@ -2048,17 +2066,12 @@
             const sb = syncBody(data);
             const r = guardDecide(String(this.url || ""), sb.unreadable ? { unreadable: true } : sb.bytes ? { bytes: sb.bytes } : { text: sb.text });
             if (r.action === "block") return undefined; // フレームを落とす (接続は保つ)
-            if (r.action === "scrub") return originalWsSend.call(this, r.text != null ? r.text : r.bytes);
+            if (r.action === "scrub") return sendRaw(this, [r.text != null ? r.text : r.bytes]);
           }
         } catch (_) { /* 判定できないときは従来どおり */ }
-        return originalWsSend.apply(this, arguments);
+        return sendRaw(this, arguments);
       }
     };
   }
 
-  LOG(
-    "injected hooks installed on",
-    window.location.hostname,
-    "(fetch, xhr, sendBeacon, ws)"
-  );
 })();

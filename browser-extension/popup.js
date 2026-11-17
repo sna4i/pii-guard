@@ -3,6 +3,8 @@
 // detection count. Standalone-only build: no gateway probe.
 
 const $ = (id) => document.getElementById(id);
+const DL = window.PiiGuardDiagLog; // 動作ログ (docs/diagnostic-log.md)
+if (DL) DL.captureErrors("popup");
 
 async function loadEnabled() {
   const { enabled = true } = await chrome.storage.local.get("enabled");
@@ -10,6 +12,7 @@ async function loadEnabled() {
 }
 
 async function saveEnabled(value) {
+  if (DL) { DL.log("settings.enabled", { value: value ? "on" : "off", via: "popup" }); DL.flushNow(); }
   await chrome.storage.local.set({ enabled: value });
 }
 
@@ -94,6 +97,39 @@ async function loadLlmIndicator() {
   }
 }
 
+// ---- Pro 版 (docs/pro-license.md の F-PRO-07、D-PRO-05) ------------------------------
+// 状態は Service Worker のライセンス管理に聞く。支払いの直後は自動では届かないので (extensionpay.com に
+// content script を置いていない)、「購入状態を更新」で確かめ直す
+function renderLicense(state) {
+  const v = window.PiiGuardLicenseView.describeLicense(state);
+  $("license-box").hidden = !v.visible;
+  if (!v.visible) return;
+  const st = $("license-status");
+  st.textContent = v.status;
+  st.className = "value " + (v.tone === "pro" ? "status-ok" : v.tone === "warn" ? "status-warn" : "");
+  $("license-note").textContent = v.note;
+  $("license-note").hidden = !v.note;
+  $("license-upgrade").hidden = !v.canUpgrade;
+  $("license-login").hidden = !v.canLogin;
+  $("license-refresh").hidden = !v.canRefresh;
+}
+async function loadLicense(refresh) {
+  let state = null;
+  try { state = await chrome.runtime.sendMessage({ type: "license:get", refresh: refresh === true }); } catch (_) {}
+  renderLicense(state);
+  // キャッシュで先に出したとき (60 分を過ぎている) は、確かめ直しの答えを待って出し直す。確かめられなければ注記が出る。
+  // 裏の確かめ直しが走っていればそれを待ち、もう終わっていれば、もう 1 回問い合わせる (D-PRO-11)
+  if (refresh !== true && state && state.source === "stale") loadLicense(true);
+}
+async function openLicensePage(type) {
+  let r = null;
+  try { r = await chrome.runtime.sendMessage({ type }); } catch (_) {}
+  if (!(r && r.ok)) {
+    $("license-note").textContent = window.PiiGuardLicenseView.describeOpenFailure(r && r.reason);
+    $("license-note").hidden = false;
+  }
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   // バージョン表示を manifest から自動反映 — ハードコード文字列が
   // 古いままにならないよう runtime に寄せる。
@@ -109,7 +145,15 @@ document.addEventListener("DOMContentLoaded", () => {
   loadUiMode();
   loadDetectionCount();
   loadLlmIndicator();
+  loadLicense(false);
 
+  $("license-upgrade").addEventListener("click", () => openLicensePage("license:openPayment"));
+  $("license-login").addEventListener("click", () => openLicensePage("license:openLogin"));
+  $("license-refresh").addEventListener("click", () => loadLicense(true));
+  // 時間切れのあとで答えが届いたときなど、購入状態が書き換わったら出し直す
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === "local" && "licenseState" in changes) loadLicense(false);
+  });
   $("enabled-toggle").addEventListener("change", (e) => {
     saveEnabled(e.target.checked);
   });

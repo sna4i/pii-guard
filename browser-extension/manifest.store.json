@@ -1,12 +1,13 @@
 {
   "manifest_version": 3,
   "name": "PII Guard",
-  "version": "1.7.0",
+  "version": "1.7.1",
   "description": "AIチャットへの送信前に、個人情報や機密の数値を端末内で自動検出してマスキング。入力内容を第三者のサーバーへ送信しません。",
   "permissions": [
     "storage",
     "activeTab",
-    "offscreen"
+    "offscreen",
+    "alarms"
   ],
   "host_permissions": [
     "https://claude.ai/*",
@@ -40,6 +41,7 @@
         "https://*.manus.im/*"
       ],
       "js": [
+        "diag-log.js",
         "engine/dictionaries.js",
         "engine/patterns.js",
         "engine/classification.js",
@@ -50,6 +52,8 @@
         "engine/blocklist.js",
         "engine/user-force-mask.js",
         "engine/confidential.js",
+        "engine/pro-rules.js",
+        "engine/custom-rules.js",
         "engine/engine.js",
         "engine/bundle.js",
         "content.js",
@@ -80,6 +84,7 @@
         "engine/user-force-mask.js",
         "engine/surrogates.js",
         "engine/llm-prompts.js",
+        "engine/pro-rules.js",
         "engine/engine.js",
         "engine/bundle.js",
         "engine/onnx-detector.js",

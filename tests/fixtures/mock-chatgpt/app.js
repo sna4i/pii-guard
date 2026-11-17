@@ -17,17 +17,48 @@
 (() => {
   "use strict";
   const q = new URLSearchParams(location.search);
-  const VARIANT = q.get("variant") === "loggedout" ? "loggedout" : "loggedin";
+  // thread2026: 2026-10-28 に利用者の画面 (ログイン後、暗い表示、会話の途中) で診断した入れ子と属性。
+  // 角丸の箱 (背景色) は入力欄の 7 段上、<html class="chatgpt-theme" data-theme="dark"> で color-scheme: dark。
+  // 入力欄に min-height を付けると、箱ごと上に伸びる (下に寄せた縦の並び)。?pill=translucent で箱を半透明にする
+  // single2026: 2026-10-30 の利用者のスクショの「1 行の並び」(＋、文、「高」、マイク、音声のボタンが 1 行)。
+  // 作りと並びの決め方は、2026-11-04 に読んだ実物の CSS と JavaScript (ログインなしの /images が読み込む、ログイン後と
+  // 同じ入力欄の部品) を写す (docs/release-1.7.1.md の「1 行の並びで、ChatGPT の入力欄が伸びない」):
+  //   - 1 行の並びでは入力欄の箱の高さが 36px に固定で、入力欄に min-height を付けても伸びない (server.mjs の CSS)
+  //   - 段落が 2 つ以上か改行があると 2 段の並び、文が 1 行からあふれても 2 段の並び。空になると 1 行の並びに戻る
+  //   - Shift+Enter で段落を分け、空の段落は Backspace / Delete でつなぐ (合成のキーも受け付ける。?noSplit=1 なら
+  //     合成の Shift+Enter を受け付けない)
+  const VARIANT = ["loggedout", "thread2026", "single2026"].includes(q.get("variant")) ? q.get("variant") : "loggedin";
   const FLAGS = {
     telemetry: q.get("telemetry") === "1",
     ws: q.get("ws") === "1",
     worker: q.get("worker") === "1",
     draft: q.get("draft") === "1",
     prepareRequired: q.get("prepareRequired") === "1",
+    // 入力欄が拡張機能の書き込みを受け付けない (書いた直後に空に戻す)。送れなかったときの動きを試す
+    rejectWrite: q.get("rejectWrite") === "1",
+    // 送信の操作を受け付けない (入力欄の文はそのまま残る)。受け付けなかったことに気づけるかを試す (T-SC-21b)
+    ignoreSend: q.get("ignoreSend") === "1",
+    // 回答の途中は、停止のボタンが送信ボタンの id (#composer-submit-button) を持つ (T-SC-21c)
+    stopSharesId: q.get("stopSharesId") === "1",
+    // 送信ボタンは文字が入ってから 0.3 秒後に出る (React の描き直しを真似る)。合成した Enter のキーは受け付けない (T-SC-21d)
+    lateSendButton: q.get("lateSendButton") === "1",
+    // single2026: 合成した Shift+Enter で段落を分けない (ChatGPT の作りが変わったときを真似る、T-SC-25e)
+    noSplit: q.get("noSplit") === "1",
+    // 新しい会話の 1 回目を送り終えたら、会話の画面 (/c/…) に移って入力欄を作り直し、すぐフォーカスする
+    // (実物: 新しい会話を送ると入力欄を作り直す。作り直した入力欄は表示されるとフォーカスを取る、T-SC-29)
+    navOnSend: q.get("navOnSend") === "1",
+    // 回答の中に、その場で直せる文章の欄 (writing block) を出す (T-SC-31)。実物 (2026-11-06 に読んだ JS): 回答の中の
+    // 文章の欄は、入力欄と同じ ProseMirror の編集欄 (div.ProseMirror[contenteditable=true]) で、会話は入力欄より前にある
+    // ?writingBlock=sameId: 文章の欄が送信の入力欄と同じ id (prompt-textarea) を持つ (部品を使い回したときを真似る、T-SC-31e)
+    writingBlock: ["1", "sameId"].includes(q.get("writingBlock")),
+    writingBlockSameId: q.get("writingBlock") === "sameId",
+    // 入力欄の form に送信ボタンを出さない (ChatGPT が送信ボタンの作りを変えたときを真似る。拡張機能は文書全体を探し、
+    // 無ければ Enter で送る、D-SC-14 / T-SC-31d)
+    noSendButton: q.get("noSendButton") === "1",
   };
   const PREPARE_DEBOUNCE_MS = 350;
   const MODEL = "gpt-6-thinking";
-  const state = { conduitToken: null, streaming: false, prepareTimer: 0, prepareSeq: 0, sentCount: 0 };
+  const state = { conduitToken: null, streaming: false, prepareTimer: 0, prepareSeq: 0, sentCount: 0, abort: null };
   const W = window;
   W.__mock = { state, FLAGS, VARIANT, events: [] };
   const log = (type, extra) => W.__mock.events.push({ t: Date.now(), type, ...(extra || {}) });
@@ -70,12 +101,78 @@
     if (editor.tagName === "TEXTAREA") editor.value = "";
     else editor.innerHTML = "<p><br></p>";
     refreshButtons();
+    updateLayout();
   }
+
+  // ---- single2026 の並び (実物の決め方を写す) ---------------------------------------
+  // 実物 (2026-11-04): 段落が 2 つ以上か文に改行があれば multiline、文が 1 行からあふれたら multiline。
+  // 文が無ければ single-line に戻る。一度 multiline になったら、空になるまで戻らない
+  let fitsSingleLine = true;
+  let curLayout = "single-line";
+  const paragraphs = () => (editor ? Array.from(editor.querySelectorAll(":scope > p")) : []);
+  function updateLayout() {
+    if (VARIANT !== "single2026" || !editor) return;
+    const ps = paragraphs();
+    const text = ps.map((p) => p.textContent).join("\n");
+    const kind = ps.length > 1 || text.includes("\n") ? "multiline" : text.trim() ? "single-line" : "empty";
+    if (kind === "empty") fitsSingleLine = true;
+    if (kind === "multiline") fitsSingleLine = false;
+    // 1 行の並びで文があふれた (入力欄の中の文の高さが行の高さを超えた)
+    if (kind === "single-line" && curLayout === "single-line" && ps[0] && ps[0].scrollHeight > 24 * 1.5) fitsSingleLine = false;
+    setLayout(kind !== "multiline" && fitsSingleLine ? "single-line" : "multiline");
+  }
+  function setLayout(layout) {
+    if (layout === curLayout) return;
+    curLayout = layout;
+    for (const el of root.querySelectorAll("[data-composer-layout]")) el.setAttribute("data-composer-layout", layout);
+    const rows = root.querySelector("[data-composer-rows]");
+    if (rows) rows.setAttribute("data-composer-rows", layout === "multiline" ? "stacked" : "inline");
+    const box = root.querySelector("[data-composer-input-layout]");
+    if (box) box.setAttribute("data-composer-input-layout", layout);
+    log("layout", { layout });
+  }
+  // ProseMirror の Shift+Enter (段落を分ける)。入力欄にフォーカスが無ければ最後の段落のあとに足す
+  function splitParagraph() {
+    const p = document.createElement("p");
+    p.appendChild(document.createElement("br"));
+    const sel = window.getSelection();
+    const ps = paragraphs();
+    const inEditor = sel && sel.anchorNode && editor.contains(sel.anchorNode);
+    const at = (inEditor && ps.find((x) => x.contains(sel.anchorNode))) || ps[ps.length - 1];
+    if (at) at.after(p); else editor.appendChild(p);
+    log("split", { paragraphs: paragraphs().length });
+    updateLayout();
+  }
+  const onlyEmptyParagraphs = () => Array.from(editor.children).every((c) => c.tagName === "P" && !c.textContent.trim());
+  let lateTimer = 0;
   function refreshButtons() {
     const has = editorText().trim().length > 0;
-    if (sendBtn) { sendBtn.hidden = !has || state.streaming; sendBtn.disabled = !has || state.streaming; }
+    const showSend = has && !state.streaming;
+    if (sendBtn) {
+      clearTimeout(lateTimer);
+      if (FLAGS.noSendButton) { sendBtn.hidden = true; sendBtn.disabled = true; }
+      else if (FLAGS.lateSendButton && showSend && sendBtn.hidden) {
+        lateTimer = setTimeout(() => { if (editorText().trim() && !state.streaming) { sendBtn.hidden = false; sendBtn.disabled = false; } }, 300);
+      } else { sendBtn.hidden = !showSend; sendBtn.disabled = !showSend; }
+    }
     if (voiceBtn) voiceBtn.hidden = has || state.streaming;
     if (stopBtn) stopBtn.hidden = !state.streaming;
+    // ログインなし: 送信ボタンそのものが、回答の途中は停止のボタンになる
+    if (VARIANT === "loggedout" && sendBtn) {
+      sendBtn.setAttribute("aria-label", state.streaming ? sendBtn.dataset.stopLabel : sendBtn.dataset.sendLabel);
+      sendBtn.hidden = !(has || state.streaming);
+      sendBtn.disabled = !(has || state.streaming);
+    }
+    // 送信ボタンの場所には、送信か停止のどちらか 1 つだけを置く (React が描き分けるのと同じ)
+    if (FLAGS.stopSharesId && sendBtn && stopBtn) {
+      if (state.streaming) {
+        sendBtn.removeAttribute("id"); stopBtn.id = "composer-submit-button";
+        if (sendBtn.isConnected) sendBtn.replaceWith(stopBtn);
+      } else {
+        stopBtn.removeAttribute("id"); sendBtn.id = "composer-submit-button";
+        if (stopBtn.isConnected) stopBtn.replaceWith(sendBtn);
+      }
+    }
   }
 
   function buildLoggedIn() {
@@ -96,27 +193,114 @@
   }
 
   function buildLoggedOut() {
-    // 2026-10-18 に実サイト (ログインなし) で読んだ DOM の要素と属性
+    // 2026-10-18 に実サイト (ログインなし) で読んだ DOM の要素と属性。送信ボタンは 2026-10-29 に読んだもの:
+    // 停止のボタンは別に無く、同じボタンが回答の途中に aria-label を data-stop-label (「生成を中止」) に替え、
+    // 押すと回答を止める
     root.innerHTML = `<form class="x1lo-grid" style="display:grid;grid-template-columns:36px minmax(0,630px) 80px;grid-template-areas:'leading primary trailing';align-items:end">
-<div style="grid-area:leading"><button type="button" data-composer-action="" aria-label="ファイルを追加">+</button></div>
+<div style="grid-area:leading"><button type="button" data-composer-action="" aria-label="ファイルなどを追加">+</button></div>
 <div style="grid-area:primary"><textarea class="x-default-marker" aria-label="ChatGPT とチャット" autocapitalize="sentences" autocomplete="off" autocorrect="on" data-mobile-composer-prompt="" enterkeyhint="enter" id="mobile-composer-prompt" inputmode="text" name="prompt" placeholder="ChatGPT に聞く" required="" rows="1" spellcheck="true"></textarea></div>
-<div style="grid-area:trailing"><button type="submit" data-composer-submit="" aria-label="送信" disabled>↑</button><button type="button" data-testid="stop-button" hidden>■</button></div>
+<div style="grid-area:trailing"><button type="button" data-start-dictation="" aria-label="音声入力を開始">🎤</button><button type="submit" data-composer-submit="" aria-label="メッセージを送信します" data-send-label="メッセージを送信します" data-stop-label="生成を中止" disabled hidden>↑</button></div>
 </form>`;
     editor = root.querySelector("#mobile-composer-prompt");
     sendBtn = root.querySelector("[data-composer-submit]");
-    stopBtn = root.querySelector('[data-testid="stop-button"]');
+    stopBtn = null;
     voiceBtn = null;
+    // 回答の途中に押すと止める (同じボタン)
+    sendBtn.addEventListener("click", (e) => {
+      if (!state.streaming) return;
+      e.preventDefault();
+      log("stop-clicked");
+      if (state.abort) state.abort.abort();
+    });
+  }
+
+  function buildThread2026() {
+    const html = document.documentElement;
+    html.className = "chatgpt-theme";
+    html.setAttribute("data-theme", "dark");
+    html.style.colorScheme = "dark";
+    document.body.classList.add("v2026");
+    // ?pill=translucent: 半透明の箱 (rgba)。?pill=oklch: 半透明の箱を oklch() で (getComputedStyle も oklch() のまま返す)
+    const translucent = ["translucent", "oklch"].includes(q.get("pill")) ? " " + q.get("pill") : "";
+    root.innerHTML = `<form data-composer-placement="thread" class="relative flex flex-col gap-2" data-type="unified-composer"><div class="contents" style="display:contents"><div class="relative w-full flex-col gap-2 flex"><div class="ComposerModeSurface-lVLm7j">
+<div class="pill2026${translucent}"><div data-composer-layout="multiline" data-composer-body="" class="ComposerLayoutBody-uBBf1A">
+<div data-composer-footer-responsive="" data-composer-layout="multiline" data-composer-rows="stacked" data-composer-spacing="default">
+<div data-composer-layout="multiline" class="min-w-0 AdaptiveFooterInput-zji599 col-span-full row-start-1 -mx-2"><div class="contents" style="display:contents">
+<div data-composer-layout="multiline" data-composer-spacing="default" data-composer-input-variant="default"><div data-composer-input-layout="multiline" data-composer-input-variant="default">
+<div contenteditable="true" role="textbox" id="prompt-textarea" class="ProseMirror" data-composer-markdown="" aria-label="ChatGPT に聞く" data-placeholder="ChatGPT に聞く"><p><br></p></div>
+</div></div></div></div>
+<div class="footer-left"><span data-state="closed" class="contents"><button type="button" class="btn" aria-label="ファイルなどを追加" data-composer-navigation-target="add-context">+</button></span></div>
+<div class="footer-right"><span data-state="closed" class="contents"><button type="button" class="btn" aria-label="音声入力"><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><use href="/cdn/assets/icons-9453d99f50597150.svg#microphone-light-16" fill="currentColor"></use></svg>🎤</button></span>
+<button type="button" class="btn round" data-testid="voice-button" aria-label="音声モードを開始する">◉</button>
+<button type="submit" id="composer-submit-button" data-testid="send-button" class="btn round dark" aria-label="プロンプトを送信する" hidden>↑</button>
+<button type="button" data-testid="stop-button" class="btn round dark" aria-label="ストリーミングの停止" hidden>■</button></div>
+</div></div></div></div></div></div></form>`;
+    editor = root.querySelector("#prompt-textarea");
+    sendBtn = root.querySelector('[data-testid="send-button"]');
+    stopBtn = root.querySelector('[data-testid="stop-button"]');
+    voiceBtn = root.querySelector('[data-testid="voice-button"]');
+  }
+
+  function buildSingle2026() {
+    const html = document.documentElement;
+    html.className = "chatgpt-theme";
+    html.setAttribute("data-theme", "dark");
+    html.style.colorScheme = "dark";
+    document.body.classList.add("v2026", "single2026");
+    fitsSingleLine = true;
+    curLayout = "single-line";
+    root.innerHTML = `<form data-composer-placement="home" class="relative flex flex-col gap-2" data-type="unified-composer"><div class="ComposerModeSurface-lVLm7j">
+<div class="pill2026"><div data-composer-layout="single-line" data-composer-body="" class="ComposerLayoutBody-uBBf1A">
+<div data-composer-footer-responsive="" data-composer-layout="single-line" data-composer-rows="inline" data-composer-spacing="default">
+<div class="footer-left"><span data-state="closed" class="contents"><button type="button" class="btn" aria-label="ファイルなどを追加" data-composer-navigation-target="add-context">+</button></span></div>
+<div data-composer-layout="single-line" class="min-w-0 AdaptiveFooterInput-zji599"><div class="contents" style="display:contents">
+<div data-composer-input-layout="single-line" data-composer-input-variant="default">
+<div contenteditable="true" role="textbox" id="prompt-textarea" class="ProseMirror" data-composer-markdown="" aria-label="ChatGPT に聞く" data-placeholder="ChatGPT に聞く"><p><br></p></div>
+</div></div></div>
+<div class="footer-right"><span data-state="closed" class="contents"><button type="button" aria-label="ChatGPT モデルを選択" data-composer-navigation-target="reasoning" class="pill">高 ∨</button></span>
+<span data-state="closed" class="contents"><button type="button" class="btn" aria-label="音声入力"><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><use href="/cdn/assets/icons-9453d99f50597150.svg#microphone-light-16" fill="currentColor"></use></svg>🎤</button></span>
+<button type="button" class="btn round" data-testid="voice-button" aria-label="音声モードを開始する">◉</button>
+<button type="submit" id="composer-submit-button" data-testid="send-button" class="btn round dark" aria-label="プロンプトを送信する" hidden>↑</button>
+<button type="button" data-testid="stop-button" class="btn round dark" aria-label="ストリーミングの停止" hidden>■</button></div>
+</div></div></div></div></form>`;
+    editor = root.querySelector("#prompt-textarea");
+    sendBtn = root.querySelector('[data-testid="send-button"]');
+    stopBtn = root.querySelector('[data-testid="stop-button"]');
+    voiceBtn = root.querySelector('[data-testid="voice-button"]');
   }
 
   function mountComposer() {
-    if (VARIANT === "loggedout") buildLoggedOut(); else buildLoggedIn();
+    if (VARIANT === "loggedout") buildLoggedOut();
+    else if (VARIANT === "thread2026") buildThread2026();
+    else if (VARIANT === "single2026") buildSingle2026();
+    else buildLoggedIn();
     const form = root.querySelector("form");
     form.appendChild(imageInput);  // 実物と同じく、入力欄の form の中に画像用 → 汎用の順
     form.appendChild(attachInput);
     form.addEventListener("submit", (e) => { e.preventDefault(); submit("button"); });
     if (sendBtn && sendBtn.type !== "submit") sendBtn.addEventListener("click", () => submit("button"));
+    // 停止のボタン: 回答の流れを止める (ChatGPT と同じく、途中までの回答は残す)
+    if (stopBtn) stopBtn.addEventListener("click", () => { log("stop-clicked"); if (state.abort) state.abort.abort(); });
+    if (FLAGS.rejectWrite) editor.addEventListener("input", () => {
+      if (editor.tagName === "TEXTAREA") editor.value = ""; else editor.innerHTML = "<p><br></p>";
+    }, true);
     editor.addEventListener("input", onInput);
     editor.addEventListener("keydown", (e) => {
+      if (VARIANT === "single2026" && e.key === "Enter" && e.shiftKey) {
+        if (FLAGS.noSplit && !e.isTrusted) return;
+        e.preventDefault();
+        splitParagraph();
+        return;
+      }
+      // 空の段落どうしは Backspace / Delete でつなぐ (ProseMirror の joinBackward / joinForward)
+      if (VARIANT === "single2026" && (e.key === "Backspace" || e.key === "Delete") && paragraphs().length > 1 && onlyEmptyParagraphs()) {
+        e.preventDefault();
+        paragraphs().pop().remove();
+        log("join", { paragraphs: paragraphs().length });
+        updateLayout();
+        return;
+      }
+      if (FLAGS.lateSendButton && !e.isTrusted) return;
       if (e.key === "Enter" && !e.shiftKey && !e.isComposing && e.keyCode !== 229) {
         e.preventDefault();
         submit("enter");
@@ -138,6 +322,7 @@
   function onInput() {
     const text = editorText();
     refreshButtons();
+    updateLayout();
     if (FLAGS.draft) localStorage.setItem("mock-draft:" + location.pathname, text);
     leakEverywhere(text);
     if (VARIANT === "loggedout") return; // 実サイトのログインなしでは prepare を観測していない
@@ -243,8 +428,25 @@
     return div;
   }
 
+  // 回答の中の文章の欄 (writing block)。ChatGPT が書いた文を、その場で直せる編集欄に入れて出す。文章の欄の
+  // ボタンの名前は実物で確かめていない (集めた JS に無かった)。「Send」を名前に含むボタンを置き、拡張機能が
+  // 送信ボタンと取り違えて押さないかを試す (T-SC-31d)
+  function addWritingBlock(reply) {
+    const wb = document.createElement("div");
+    wb.className = "writing-block";
+    wb.setAttribute("data-testid", "writing-block");
+    const id = FLAGS.writingBlockSameId ? ' id="prompt-textarea"' : "";
+    wb.innerHTML = '<div class="wb-header">メール <button type="button" aria-label="Send email" data-testid="writing-block-send">送信</button></div>' +
+      `<div contenteditable="true" translate="no" class="ProseMirror"${id} data-testid="writing-block-editor">` +
+      "<p>件名: 打ち合わせの日程</p><p>来週の打ち合わせの候補日をお送りします。</p><p>ご都合の良い日をお知らせください。</p></div>";
+    wb.querySelector('[data-testid="writing-block-send"]').addEventListener("click", () => log("writing-block-send"));
+    reply.appendChild(wb);
+    log("writing-block");
+  }
+
   async function submit(via) {
     const text = editorText();
+    if (FLAGS.ignoreSend) { log("submit-ignored", { via }); return; }
     if (!text.trim() || state.streaming) return;
     log("submit", { via, len: text.length });
     clearTimeout(state.prepareTimer);
@@ -265,12 +467,13 @@
     const headers = { "content-type": "application/json", accept: "text/event-stream" };
     if (state.conduitToken) headers["x-conduit-token"] = state.conduitToken;
     state.streaming = true;
+    state.abort = new AbortController();
     clearEditor();
     if (FLAGS.draft) localStorage.removeItem("mock-draft:" + location.pathname);
     addMessage("user", text);
     const reply = addMessage("assistant", "");
     try {
-      const r = await fetch(url, { method: "POST", headers, body: JSON.stringify(body) });
+      const r = await fetch(url, { method: "POST", headers, body: JSON.stringify(body), signal: state.abort.signal });
       if (!r.ok) throw new Error("HTTP " + r.status);
       const reader = r.body.getReader();
       const dec = new TextDecoder();
@@ -288,8 +491,10 @@
         }
       }
       state.conduitToken = null; // 次の送信では新しい prepare が要る
+      if (FLAGS.writingBlock) addWritingBlock(reply);
       log("conversation-ok");
     } catch (e) {
+      if (state.abort && state.abort.signal.aborted) { log("conversation-stopped"); return; }
       reply.remove();
       const retry = document.createElement("button");
       retry.type = "button"; retry.textContent = "再試行"; retry.setAttribute("data-testid", "retry-button");
@@ -298,7 +503,15 @@
       log("conversation-failed", { error: String(e && e.message || e) });
     } finally {
       state.streaming = false;
+      state.abort = null;
       refreshButtons();
+      if (FLAGS.navOnSend && !state.navigatedOnSend) {
+        state.navigatedOnSend = true;
+        history.pushState({}, "", "/c/new-conversation");
+        mountComposer();
+        editor.focus();
+        log("navigated-on-send", { path: location.pathname });
+      }
     }
   }
 
@@ -313,6 +526,64 @@
     log("navigated", { path: location.pathname });
   });
   W.__mock.remountComposer = mountComposer;
+
+  // ---- チャットの検索の画面 (実物を模す、T-SC-27) -------------------------------------
+  // 2026-11-05 の利用者のスクショ: 検索の画面 (ダイアログ) が入力欄の行に重なって出る。ページの末尾に足す普通の
+  // 表示 (トップレイヤーではない、z-index 50)。開くと検索の欄にフォーカスし、画面の外にフォーカスが移ったら検索の欄に
+  // 戻す (Radix のフォーカスの閉じ込めをまねる)。Escape で閉じ、開いたボタンにフォーカスを戻す
+  (function setupSearch() {
+    const btn = document.querySelector('[data-testid="search-button"]');
+    if (!btn) return;
+    let dlg = null;
+    const onFocusIn = (e) => {
+      if (!dlg || dlg.contains(e.target)) return;
+      const input = dlg.querySelector("input");
+      if (input) input.focus();
+      log("search-focus-trapped");
+    };
+    function close() {
+      if (!dlg) return;
+      dlg.remove();
+      dlg = null;
+      document.removeEventListener("focusin", onFocusIn, true);
+      log("search-closed");
+      btn.focus();
+    }
+    function open() {
+      if (dlg) return;
+      const er = editor.getBoundingClientRect();
+      dlg = document.createElement("div");
+      dlg.setAttribute("role", "dialog");
+      dlg.setAttribute("aria-modal", "true");
+      dlg.setAttribute("data-testid", "search-dialog");
+      // 入力欄の行 (文の欄の上下の中ほど) が、候補の一覧の途中に来るように置く
+      const top = Math.max(8, Math.round(er.top + Math.min(er.height / 2, 18) - 200));
+      dlg.style.cssText = `position:fixed;z-index:50;left:${Math.max(8, Math.round(er.left - 40))}px;top:${top}px;` +
+        `width:${Math.round(er.width * 0.9)}px;height:400px;box-sizing:border-box;padding:8px;overflow:auto;` +
+        "background:#202020;color:#eee;border-radius:16px;box-shadow:0 8px 32px rgba(0,0,0,.5)";
+      const input = document.createElement("input");
+      input.placeholder = "検索...";
+      input.setAttribute("data-testid", "search-input");
+      input.style.cssText = "display:block;width:100%;box-sizing:border-box;font:inherit;padding:8px;margin:0 0 8px;background:#303030;color:inherit;border:0";
+      dlg.appendChild(input);
+      for (let i = 0; i < 12; i++) {
+        const it = document.createElement("button");
+        it.type = "button";
+        it.className = "search-item";
+        it.dataset.index = String(i);
+        it.textContent = `会話 ${i + 1}`;
+        it.style.cssText = "display:block;width:100%;height:32px;text-align:left;background:transparent;color:inherit;border:0";
+        it.addEventListener("click", () => { log("search-item", { index: i }); close(); });
+        dlg.appendChild(it);
+      }
+      dlg.addEventListener("keydown", (e) => { if (e.key === "Escape") { e.preventDefault(); close(); } });
+      document.body.appendChild(dlg);
+      document.addEventListener("focusin", onFocusIn, true);
+      input.focus();
+      log("search-opened");
+    }
+    btn.addEventListener("click", open);
+  })();
 
   mountComposer();
   // 本物の ChatGPT と同じく、読み込み直後に入力欄へフォーカスする

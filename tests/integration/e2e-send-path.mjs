@@ -19,6 +19,7 @@ import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { chromium } from "playwright";
+import { browserMode } from "../fixtures/browser-mode.mjs";
 
 const EXT = path.resolve(process.argv[2] || "");
 if (!process.argv[2] || !fs.existsSync(path.join(EXT, "manifest.json"))) {
@@ -71,7 +72,7 @@ try {
   const port = server.address().port;
 
   ctx = await chromium.launchPersistentContext(path.join(tmp, "profile"), {
-    headless: false, ignoreHTTPSErrors: true,
+    ...browserMode(), ignoreHTTPSErrors: true,
     args: [`--disable-extensions-except=${EXT}`, `--load-extension=${EXT}`,
            `--host-resolver-rules=MAP chatgpt.com 127.0.0.1:${port}`,
            "--ignore-certificate-errors", "--no-sandbox"],

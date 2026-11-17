@@ -18,6 +18,16 @@ test("T-12 normalizeTint accepts #rrggbb and #rgb, and nothing else", () => {
   }
 });
 
+test("T-12h flatten composites translucent layers over an opaque base (docs/release-1.7.1.md の D-SC-01)", () => {
+  const black = { r: 0, g: 0, b: 0, a: 1 };
+  assert.deepEqual(T.flatten([], black), black, "重ねるものが無ければ土台の色");
+  assert.deepEqual(T.flatten([{ r: 48, g: 48, b: 48, a: 1 }], black), { r: 48, g: 48, b: 48, a: 1 }, "不透明な色はそのまま");
+  assert.deepEqual(T.flatten([{ r: 255, g: 255, b: 255, a: 0.05 }], black), { r: 13, g: 13, b: 13, a: 1 }, "5% の白を黒に重ねる");
+  // 下から上の順: 黒の上に半透明の灰、その上に 50% の白
+  assert.deepEqual(T.flatten([{ r: 100, g: 100, b: 100, a: 0.5 }, { r: 255, g: 255, b: 255, a: 0.5 }], black), { r: 153, g: 153, b: 153, a: 1 });
+  assert.deepEqual(T.flatten([null, { r: 10, g: 20, b: 30, a: 0 }], { r: 1, g: 2, b: 3, a: 1 }), { r: 1, g: 2, b: 3, a: 1 }, "透明と空は無視する");
+});
+
 test("T-12b parseColor reads the formats getComputedStyle returns", () => {
   assert.deepEqual(T.parseColor("rgb(252, 252, 252)"), { r: 252, g: 252, b: 252, a: 1 });
   assert.deepEqual(T.parseColor("rgba(0, 0, 0, 0)"), { r: 0, g: 0, b: 0, a: 0 });

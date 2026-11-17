@@ -37,8 +37,40 @@ main{max-width:760px;margin:0 auto;padding:16px;display:flex;flex-direction:colu
 .btn.round.dark{background:#0d0d0d;color:#fff}
 .pill{height:36px;border:0;background:transparent;color:inherit}
 textarea#mobile-composer-prompt{width:100%;font:inherit;border:1px solid #ddd;border-radius:20px;padding:8px 12px;resize:none}
+/* thread2026 (app.js の buildThread2026): 暗い表示、下に寄せた縦の並び。入力欄が伸びると箱ごと上に伸びる */
+html.chatgpt-theme{background:#000}
+/* 画面の高さちょうどに収める (上の nav のぶんも含めて、入力欄の下の段が画面の外に出ないように) */
+body.v2026{background:#000;color:#ececec;height:100vh;display:flex;flex-direction:column;overflow:hidden}
+body.v2026 main{flex:1;min-height:0;width:100%;box-sizing:border-box}
+body.v2026 #thread{flex:1;min-height:0;overflow:auto}
+body.v2026 .pill2026{background:rgb(48,48,48);border-radius:28px;padding:10px 12px}
+body.v2026 .pill2026.translucent{background:rgba(255,255,255,0.05)}
+body.v2026 .pill2026.oklch{background:oklch(1 0 0 / 0.05)}
+body.v2026 [data-composer-footer-responsive][data-composer-rows=stacked]{display:grid;grid-template-columns:auto 1fr auto;grid-template-rows:auto auto;align-items:center}
+body.v2026 .AdaptiveFooterInput-zji599{grid-column:1 / -1;grid-row:1}
+body.v2026 .footer-left{grid-column:1;grid-row:2}
+body.v2026 .footer-right{grid-column:3;grid-row:2;display:flex;align-items:center;gap:4px}
+body.v2026 .ProseMirror{color:#ececec}
+/* 入力欄の親は、高さの上限を超えると入力欄を切り取ってスクロールする (2025 年の実物は親に max-h-52 と overflow-auto。
+   2026 年の実物でどの段かは未確認) */
+body.v2026 [data-composer-input-layout]{max-height:13rem;overflow-y:auto}
+/* single2026 (app.js の buildSingle2026): 2026-11-04 に読んだ実物の CSS を写す。
+   1 行の並び: 入力欄の箱の高さを 36px (--composer-editor-single-line-height) に固定して切り取り、入力欄に height:100% と
+   min-height:0 を !important で付ける (入力欄に min-height を付けても伸びない)。上下の余白は (36px - 1 行) / 2。
+   2 段の並び: 箱は高さ auto で、25dvh を超えると中をスクロールする。入力欄の最低の高さは 40px。高さは 0.22 秒かけて動く。
+   Tailwind と同じく border-box */
+body.single2026 *{box-sizing:border-box}
+body.v2026 [data-composer-footer-responsive][data-composer-rows=inline]{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:4px}
+body.v2026 [data-composer-rows=inline] .footer-left{grid-column:1;grid-row:1}
+body.v2026 [data-composer-rows=inline] .AdaptiveFooterInput-zji599{grid-column:2;grid-row:1}
+body.v2026 [data-composer-rows=inline] .footer-right{grid-column:3;grid-row:1;display:flex;align-items:center;gap:4px}
+body.single2026 [data-composer-input-layout=single-line]{display:flex;height:36px;max-height:none;overflow:hidden}
+body.single2026 [data-composer-input-layout=single-line]>*{height:100%!important;min-height:0!important;min-width:0;flex:1;overflow:hidden;padding-top:6px;padding-bottom:6px}
+body.single2026 [data-composer-input-layout=multiline]{height:auto;max-height:25dvh;overflow-y:auto}
+body.single2026 [data-composer-input-layout=multiline]>*{min-height:40px;padding-top:0;padding-bottom:0}
+body.single2026 .AdaptiveFooterInput-zji599[data-composer-layout=multiline]{interpolate-size:allow-keywords;transition:height .22s cubic-bezier(.2,0,0,1)}
 </style></head>
-<body><nav><a href="/" data-nav="new">新しいチャット</a><a href="/c/abc123" data-nav="c">会話A</a></nav>
+<body><nav><a href="/" data-nav="new">新しいチャット</a><a href="/c/abc123" data-nav="c">会話A</a><button type="button" data-testid="search-button" aria-label="チャットを検索">検索</button></nav>
 <!-- 実物 (2026-10-18 ログイン後) と同じく、スレッド側の入れ物のクラス名にも "composer" を含む -->
 <main><div class="relative flex group-has-[[data-expanded-composer]]/home-composer-layout:hidden" style="display:contents"><div id="thread"></div></div><div id="composer-root"></div></main>
 <script src="/mock/app.js"></script></body></html>`;
@@ -166,16 +198,22 @@ export async function startMockChatGPT(opts = {}) {
   };
 }
 
-/** ローカル LLM (Ollama) を名乗る HTTP サーバ。届いた要求をすべて記録する。 */
-export async function startMockLlm() {
+/**
+ * ローカル LLM (Ollama) を名乗る HTTP サーバ。届いた要求をすべて記録する。
+ * reply: 要求の本文 (JSON) を受けて、LLM の答えの中身 (文字列) を返す関数。省くと、検出の答え {"entities":[]} を返す
+ */
+export async function startMockLlm({ reply } = {}) {
   const requests = [];
   const server = http.createServer((req, res) => {
     const chunks = [];
     req.on("data", (c) => chunks.push(c));
     req.on("end", () => {
-      requests.push({ t: Date.now(), method: req.method, url: req.url, body: Buffer.concat(chunks).toString("utf8") });
+      const body = Buffer.concat(chunks).toString("utf8");
+      requests.push({ t: Date.now(), method: req.method, url: req.url, body });
+      let content = '{"entities":[]}';
+      if (typeof reply === "function") { try { content = reply(JSON.parse(body)); } catch (_) { /* 読めない要求は、検出の答えのまま */ } }
       res.writeHead(200, { "content-type": "application/json", "access-control-allow-origin": "*" });
-      res.end(JSON.stringify({ message: { role: "assistant", content: '{"entities":[]}' } }));
+      res.end(JSON.stringify({ message: { role: "assistant", content } }));
     });
   });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));

@@ -25,6 +25,22 @@
   const TAG_IN = "mask-mcp-inpage";   // injected → content
   const TAG_OUT = "mask-mcp-content"; // content → injected
 
+  // 動作ログ (docs/diagnostic-log.md)。コンソールには何も書かない (R-LG-01)
+  const DL = window.PiiGuardDiagLog;
+  const dlog = (code, d) => { if (DL) DL.log(code, d); };
+  if (DL) DL.captureErrors("content", { ownOnly: true });
+  // ページの世界 (injected.js など) からの記録。ページのスクリプトも送れるので、
+  // Service Worker で検め直し「ページ側から報告」として残す。1 分に 60 件まで (D-LG-03)
+  let pageLogWindow = 0;
+  let pageLogCount = 0;
+  function forwardPageLog(entry) {
+    if (!DL || !entry || typeof entry !== "object" || typeof entry.code !== "string") return;
+    const now = Date.now();
+    if (now - pageLogWindow > 60000) { pageLogWindow = now; pageLogCount = 0; }
+    if (++pageLogCount > 60) return;
+    DL.log(entry.code, entry.d && typeof entry.d === "object" ? entry.d : {}, { src: "page" });
+  }
+
   const GATEWAY_URL = "http://127.0.0.1:8081/v1/extension/sanitize";
   const GATEWAY_AGGREGATED_URL =
     "http://127.0.0.1:8081/v1/extension/sanitize/aggregated";
@@ -75,16 +91,7 @@
   // Also completes the PNA preflight + TCP warmup for the common
   // gateway-mode path. Sets gatewayReachable for Hybrid dispatch.
   (async () => {
-    const t0 = Date.now();
-    const ok = await probeGateway();
-    const elapsed = Date.now() - t0;
-    if (ok) {
-      console.debug("[pii-guard] gateway warmup ok in", elapsed + "ms");
-    } else {
-      console.debug(
-        "[pii-guard] gateway unreachable at warmup — standalone engine will handle masking"
-      );
-    }
+    await probeGateway();
   })();
 
   // 1) Inject the page-world scripts in order:
@@ -130,6 +137,7 @@
     "engine/confidential.js",
     "engine/surrogates.js",
     "engine/llm-prompts.js",
+    "engine/pro-rules.js",
     "engine/engine.js",
     "engine/bundle.js",
   ];
@@ -139,11 +147,6 @@
   // 原文の持ち出しガード (F-EG-01〜04)。injected.js が使うので先に読む
   injectScript("security/egress-guard.js");
   injectScript("injected.js");
-  console.debug(
-    "[pii-guard] injected",
-    ENGINE_FILES.length + 4,
-    "scripts (engine + ui + hook)"
-  );
 
   // Push the current ``interactive`` + ``uiMode`` preferences into
   // MAIN world as soon as we can. The injected script reads them off
@@ -158,6 +161,17 @@
   let scOverlayLive = false;
   // V-02: 除外リスト・常に伏せる語が変わったことだけを MAIN world に知らせる番号 (中身からは作らない)
   let listsVersion = 0;
+
+  // ML がオンなら、ページを開いた時点でモデルを読み込んでおく (docs/release-1.7.1.md の D-SC-12)。送るときに
+  // 読み込み (初回は取得に 1 分近く、キャッシュからでも温まるまでは 13〜22 秒) を待たずに済むようにする。ページごとに 1 回。読み込み済みなら
+  // Service Worker は何もしない。content script は対応サイトすべてで動くので、保護入力欄以外の経路にも効く
+  let mlPrewarmSent = false;
+  function prewarmMl() {
+    if (mlPrewarmSent) return;
+    mlPrewarmSent = true;
+    try { chrome.runtime.sendMessage({ type: "ML_PREWARM" }, () => void chrome.runtime.lastError); }
+    catch (_) { /* 拡張機能が更新された直後など、Service Worker に届かないとき */ }
+  }
 
   async function broadcastSettings() {
     let interactive = true;
@@ -175,10 +189,13 @@
     // 確認画面は、この ISOLATED world のエンジンに "local-mask" で頼み、渡された文についての
     // 結果だけを受け取る (handleLocalMask)。配るのは「リストがあるか」と変わった合図だけ。
     let hasSecretLists = false;
+    // customRulesActive: Pro のカスタムルールが効いているか (真偽値だけ。ルールの中身は配らない)。ページの世界は、
+    // これが true のあいだ LLM の置き換えモードを使わない (LLM はルールを知らないので、ルールの語を残して書き換えうる)
+    let customRulesActive = false;
     const secureComposerHost = /(^|\.)(chatgpt\.com|openai\.com)$/.test(location.hostname);
     try {
       const stored = await chrome.storage.local.get([
-        "interactive", "uiMode", "maskAllowlist", "maskForceList", "mlEnabled", "enabled", "secureComposerEnabled",
+        "interactive", "uiMode", "maskAllowlist", "maskForceList", "mlEnabled", "enabled", "secureComposerEnabled", CUSTOM_RULES_KEY,
       ]);
       if (typeof stored.mlEnabled === "boolean") mlEnabled = stored.mlEnabled;
       interactive = stored.interactive !== false;
@@ -196,21 +213,122 @@
       scOwnsComposer = scEnabled && scOverlayLive;
       // リストの値は配らない (maskAllowlist / maskForceList は空のまま)。有無だけ知らせる:
       // ISOLATED に頼めないときに、MAIN world のエンジン (リスト無し) で黙って続けず止めるため。
+      // Pro のカスタムルールも同じ。組み立てを待たずに、読んだ中身で決める (ページの世界が早く止める側に倒れるように)。
+      // ルールがあって Pro かどうかがまだ分からないあいだも、効いているものとして扱う (分からないときは伏せる側に倒す)
+      customRulesActive = hasEnabledCustomRule(stored[CUSTOM_RULES_KEY]) && (proEnabled || !proAnswered);
       hasSecretLists = (Array.isArray(stored.maskAllowlist) && stored.maskAllowlist.length > 0) ||
-        (Array.isArray(stored.maskForceList) && stored.maskForceList.length > 0);
+        (Array.isArray(stored.maskForceList) && stored.maskForceList.length > 0) ||
+        customRulesActive;
     } catch (_) {
       interactive = true;
       uiMode = "sidebar";
     }
+    if (mlEnabled) prewarmMl();
     window.postMessage(
       {
         source: TAG_OUT,
         type: "settings",
-        settings: { interactive, uiMode, maskAllowlist, maskForceList, mlEnabled, enabled, scOwnsComposer, hasSecretLists, listsVersion },
+        settings: { interactive, uiMode, maskAllowlist, maskForceList, mlEnabled, enabled, scOwnsComposer, hasSecretLists, customRulesActive, listsVersion, pro: proEnabled },
       },
       "*"
     );
   }
+  // Pro かどうか (docs/pro-license.md の D-PRO-06)。Service Worker のライセンス管理に聞き、この ISOLATED world の
+  // エンジンに渡し、ページの世界 (injected.js) へは設定と一緒に配る。答えが来るまでは無料版のルールで動く
+  let proEnabled = false;
+  // proAnswered: Pro かどうかの答えを受け取ったか (届かない・失敗したあいだは false = 分からない)。
+  // firstProAttempt: 最初の問い合わせが終わったこと (答えでも失敗でも)。保存したカスタムルールがあるときだけ、渡す前に待つ
+  let proAnswered = false;
+  let resolveProAttempt = () => {};
+  const firstProAttempt = new Promise((resolve) => { resolveProAttempt = resolve; });
+  function refreshPro() {
+    try {
+      chrome.runtime.sendMessage({ type: "license:get" }, (r) => {
+        // 届かない・失敗した問い合わせと、ライセンスの確かめに失敗した答え (source: "none"。7 日以内のキャッシュが無いまま、
+        // 通信に失敗したか時間切れ) は、「答えが来ていない」と同じに扱う (Pro でないと分かったわけではない)。Pro かどうかは
+        // 前のまま、proAnswered も立てない。保存したルールがあれば、送信は partial と同じに確認へ回り、聞き直しを続ける
+        // (ルールが無い人は、どちらに扱っても動きは同じ: Pro にならず、待ちも聞き直しも起きない)
+        if (chrome.runtime.lastError || !r || r.source === "none") { resolveProAttempt(); return; }
+        const first = !proAnswered;
+        proAnswered = true;
+        const next = !!(r && r.pro === true);
+        const e = window.__localMaskMCP && window.__localMaskMCP.engine;
+        if (e && typeof e.setProEnabled === "function") e.setProEnabled(next);
+        // Pro の状態が変わったら (どちらの向きでも)、または最初の答えが来たら (分からなかったあいだの扱いを外す)、
+        // カスタムルールを渡し直して配り直す
+        if (next !== proEnabled || first) { proEnabled = next; syncCustomRules(); broadcastSettings(); }
+        resolveProAttempt();
+      });
+    } catch (_) { resolveProAttempt(); /* 拡張機能が入れ替わった直後など、Service Worker に届かないとき */ }
+  }
+
+  // ---- Pro のカスタムルール (Pro Phase 2 の設計 (P1)) ----------------------------------------------
+  // 保存したルール (chrome.storage.local の proCustomRules) を、この ISOLATED world のエンジンに渡す (Pro でなければ空)。
+  // ページの世界 (injected.js・sidebar.js) には渡さず、ルールがあることだけを hasSecretLists で知らせる (V-02)。
+  // 組み立てと温め (setCustomRules) は上限いっぱいで 0.9 秒ほどかかるので、送るたびではなく、起動・ルールの変化・
+  // Pro の状態の変化のときに行う。読んだのにまだ渡していないあいだは伏せない: 読み直しと渡しを 1 本の列に並べ
+  // (applyingCustomRules)、伏せる道 (handleLocalMask と添付の見張り) は、エンジンを動かす前に customRulesReady() で
+  // 列が空くのを待つ。最後に渡したもの (Pro かどうかと、ルールの版) と同じなら組み立て直さない (Pro でページを開くと、
+  // 起動の読み直しと「Pro に変わった」の読み直しが続くため。組み立ては、このページと同じスレッドで走る)
+  const CUSTOM_RULES_KEY = "proCustomRules"; // engine/custom-rules.js の STORAGE_KEY と同じ
+  const hasEnabledCustomRule = (v) => !!(v && Array.isArray(v.rules) && v.rules.some((r) => r && typeof r === "object" && r.enabled !== false));
+  // E2E のときだけ (__pii_guard_e2e が true) 上書きできる時間の上限 (時間切れや、Pro の答えを待つあいだを確かめるため):
+  // カスタムルールの時間の上限 (__pii_guard_e2e_custom_budget_ms) と、Pro かどうかの答えを待つ上限 (__pii_guard_e2e_pro_wait_ms)
+  const E2E_FLAG = "__pii_guard_e2e";
+  const E2E_BUDGET_KEY = "__pii_guard_e2e_custom_budget_ms";
+  const E2E_PRO_WAIT_KEY = "__pii_guard_e2e_pro_wait_ms";
+  const e2eNumber = (st, key) => (st && st[E2E_FLAG] === true && Number.isFinite(st[key]) ? st[key] : null);
+  const PRO_ANSWER_WAIT_MS = 3000; // ルールがあるときに、Pro かどうかの答えを待つ上限
+  // 当てているカスタムルールの名前 (compileRules と同じく、有効で正しいもの)。集めた形の結果で、この名前の行に custom の
+  // 印 (真偽値だけ) を付ける。ページの世界は、LLM の検出を混ぜるときにその行を残す (ルールの中身は渡さない)
+  let appliedCustomLabels = new Set();
+  function customLabelsOf(rules, cr) {
+    const out = new Set();
+    if (!cr || typeof cr.validateRule !== "function") return out;
+    for (const r of Array.isArray(rules) ? rules : []) {
+      if (!r || typeof r !== "object" || r.enabled === false) continue;
+      const checked = cr.validateRule(r);
+      if (checked.ok) out.add(checked.rule.label);
+    }
+    return out;
+  }
+  let applyingCustomRules = Promise.resolve();
+  let customRulesVersion = 0; // proCustomRules が変わるたびに増やす
+  let appliedCustomRules = null; // 最後に渡したもの ("off" か "pro:<版>")
+  // ルールがあるのに、待っても Pro かどうか分からない (答えが待つ上限までに来ない・問い合わせに失敗した)。
+  // ルールを当てられないので、伏せる道は時間切れ (custom.status の partial) と同じに扱う
+  let customRulesUnknown = false;
+  function syncCustomRules() {
+    const version = customRulesVersion;
+    applyingCustomRules = applyingCustomRules.then(async () => {
+      let got = {};
+      try { got = await chrome.storage.local.get([CUSTOM_RULES_KEY, E2E_FLAG, E2E_PRO_WAIT_KEY]); } catch (_) { got = {}; }
+      const stored = got[CUSTOM_RULES_KEY];
+      const has = hasEnabledCustomRule(stored);
+      // ルールがあるのに、Pro かどうかの答えがまだなら待つ (ルールの無い人は待たせない)
+      const waitMs = e2eNumber(got, E2E_PRO_WAIT_KEY) ?? PRO_ANSWER_WAIT_MS;
+      if (has) await Promise.race([firstProAttempt, new Promise((r) => setTimeout(r, waitMs))]);
+      customRulesUnknown = has && !proAnswered;
+      const engine = await waitIsoEngine(3000);
+      if (!engine || typeof engine.setCustomRules !== "function") return;
+      const on = proEnabled && has;
+      const key = on ? `pro:${version}` : "off";
+      if (key === appliedCustomRules) return;
+      engine.setCustomRules(on ? stored.rules : []);
+      appliedCustomRules = key;
+      appliedCustomLabels = on ? customLabelsOf(stored.rules, engine.customRules) : new Set();
+    }).catch((e) => { dlog("error", DL ? DL.errorFields(e, "content") : {}); });
+  }
+  // 列が空くまで待つ (待っているあいだに次の読み直しが並んだら、それも待つ)。Pro かどうか分からないままなら true を返す。
+  // そのときは、答えが来るよう聞き直す (5 秒に 1 回まで。届かなかった問い合わせのあとも、いつかは今どおりに戻るように)
+  let lastProRetry = 0;
+  async function customRulesReady() {
+    let last;
+    do { last = applyingCustomRules; await last; } while (last !== applyingCustomRules);
+    if (customRulesUnknown && Date.now() - lastProRetry > 5000) { lastProRetry = Date.now(); refreshPro(); }
+    return customRulesUnknown;
+  }
+
   // adapter (同じ isolated world) が overlay の生死を知らせる口。live が変わるたびに再配布し、
   // injected.js の scOwnsComposer と機密配布を即座に切り替える (fail-closed, F-SC-11)。
   window.__localMaskMCP = window.__localMaskMCP || {};
@@ -220,12 +338,18 @@
     scOverlayLive = next;
     broadcastSettings();
   };
+  // 添付の見張り (attachments/attachment-guard.js、同じ ISOLATED world) が、伏せる前にカスタムルールを待つ口
+  window.__localMaskMCP.__customRulesReady = customRulesReady;
   broadcastSettings();
+  refreshPro();
+  syncCustomRules();
   try {
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area !== "local") return;
+      if ("licenseState" in changes) refreshPro();
       if ("maskAllowlist" in changes || "maskForceList" in changes) listsVersion++;
-      if ("interactive" in changes || "uiMode" in changes || "maskAllowlist" in changes || "maskForceList" in changes || "mlEnabled" in changes || "enabled" in changes || "secureComposerEnabled" in changes) {
+      if (CUSTOM_RULES_KEY in changes) { customRulesVersion++; syncCustomRules(); }
+      if ("interactive" in changes || "uiMode" in changes || "maskAllowlist" in changes || "maskForceList" in changes || "mlEnabled" in changes || "enabled" in changes || "secureComposerEnabled" in changes || CUSTOM_RULES_KEY in changes) {
         broadcastSettings();
       }
     });
@@ -252,6 +376,13 @@
   }
   const forceEntryOf = (e) => (typeof e === "string" ? { value: e, category: "OTHER" }
     : e && typeof e.value === "string" ? { value: e.value, category: typeof e.category === "string" ? e.category : "OTHER" } : null);
+  // カスタムルールの時間の上限。ページの送信は、送る前の上限 (custom-rules.js の LIMITS.sendBudgetMs)。E2E の上書きあり
+  function sendBudgetMs(engine, st) {
+    const e2e = e2eNumber(st, E2E_BUDGET_KEY);
+    if (e2e !== null) return e2e;
+    const cr = engine.customRules;
+    return cr && cr.LIMITS ? cr.LIMITS.sendBudgetMs : undefined;
+  }
   async function handleLocalMask(data) {
     const { id, kind, text } = data;
     let result = null;
@@ -259,14 +390,18 @@
       if (typeof text === "string" && text.length <= 2 * 1024 * 1024) {
         const engine = await waitIsoEngine(3000);
         if (engine) {
-          const st = await chrome.storage.local.get(["maskAllowlist", "maskForceList", "mlEnabled"]);
+          const st = await chrome.storage.local.get(["maskAllowlist", "maskForceList", "mlEnabled", E2E_FLAG, E2E_BUDGET_KEY]);
           const allow = new Set((Array.isArray(st.maskAllowlist) ? st.maskAllowlist : []).filter((v) => typeof v === "string"));
           const force = (Array.isArray(st.maskForceList) ? st.maskForceList : []).map(forceEntryOf).filter(Boolean);
-          const opts = { userForceMaskEntries: force, mlEnabled: st.mlEnabled === true };
+          const opts = { userForceMaskEntries: force, mlEnabled: st.mlEnabled === true, customBudgetMs: sendBudgetMs(engine, st) };
+          // 保存したカスタムルールを渡し終えてから伏せる (読んだのにまだ渡していない状態で、伏せない)
+          const customUnknown = await customRulesReady();
           if (kind === "aggregated") {
             result = await engine.maskAggregated(text, opts);
             for (const row of (result && Array.isArray(result.aggregated) ? result.aggregated : [])) {
               if (row && allow.has(row.value)) { row.masked = false; row.allowlisted = true; }
+              // Pro のカスタムルールの行の印 (真偽値だけ)。LLM の検出を混ぜるとき、ページの世界はこの行の位置と名前を残す
+              if (row && appliedCustomLabels.has(row.label)) row.custom = true;
             }
           } else if (kind === "lists") {
             const values = (Array.isArray(data.values) ? data.values : []).filter((v) => typeof v === "string").slice(0, 500);
@@ -278,6 +413,9 @@
           } else {
             result = await engine.maskSanitize(text, opts);
           }
+          // ルールがあるのに Pro かどうか分からず、ルールを当てられなかった: 時間切れと同じに扱う (ページの世界が確認に回す)。
+          // 理由 (cause) を添えて、確認の一文を時間切れと分ける (エンジンの partial は時間切れ)
+          if (customUnknown && kind !== "lists" && result) result.custom = { status: "partial", cause: "pro-unknown" };
         }
       }
     } catch (_) { result = null; }
@@ -301,6 +439,8 @@
     const data = event.data;
     if (!data || data.source !== TAG_IN) return;
 
+    if (data.type === "diag-log") { forwardPageLog(data.entry); return; }
+
     // Allowlist add (no id — fire-and-forget write to chrome.storage).
     // 除外リストと常に伏せる語の変更 (サイドバーから)。ページ側 (MAIN world) からの
     // メッセージはサイトのスクリプトにも送れるので、ここでは保存しない。isolated world の
@@ -310,7 +450,7 @@
       if (typeof confirm === "function") {
         confirm({ type: data.type, value: data.value, category: typeof data.category === "string" ? data.category : null });
       } else {
-        console.warn(`[pii-guard] ${data.type} ignored: the confirmation UI is not available`);
+        dlog("error", { where: "persist", name: "NotSupportedError" });
       }
       return;
     }
@@ -402,7 +542,6 @@
   // failure so the caller can fall back to ``confirmSendUnmasked``.
   async function callGateway(url, payload) {
     let responseBody = null;
-    const t0 = Date.now();
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), GATEWAY_TIMEOUT_MS);
@@ -417,38 +556,14 @@
         });
         if (resp.ok) {
           responseBody = await resp.json();
-          const elapsed = Date.now() - t0;
-          if (elapsed > 1500) {
-            console.info(
-              "[pii-guard] gateway slow:",
-              elapsed + "ms",
-              "url:",
-              url
-            );
-          }
         } else {
-          console.warn("[pii-guard] gateway returned", resp.status, "for", url);
+          dlog("gateway.status", { status: resp.status });
         }
       } finally {
         clearTimeout(timer);
       }
-    } catch (err) {
-      const elapsed = Date.now() - t0;
-      if (err && err.name === "AbortError") {
-        console.warn(
-          "[pii-guard] gateway timed out after",
-          elapsed + "ms (limit",
-          GATEWAY_TIMEOUT_MS + "ms)."
-        );
-      } else {
-        console.warn(
-          "[pii-guard] gateway call failed after",
-          elapsed + "ms:",
-          err?.message || err,
-          "url:",
-          url
-        );
-      }
+    } catch (_) {
+      dlog("gateway.status", { status: 0 });
     }
     return responseBody;
   }
@@ -639,12 +754,6 @@
     const TIMEOUT_DELAY_MS = 2000;
     let warmupTries = 0;
     let timeoutTries = 0;
-    const callStart = Date.now();
-    console.debug(
-      "[pii-guard] llm fetch start:",
-      url,
-      "timeout=" + (config.timeoutMs || 120000) + "ms",
-    );
     while (true) {
       try {
         const resp = await chrome.runtime.sendMessage({
@@ -660,11 +769,6 @@
             ? j?.choices?.[0]?.message?.content
             : j?.message?.content;
           result = result || null;
-          console.debug(
-            `[pii-guard] llm fetch OK in ${Date.now() - callStart}ms, content=${
-              result ? result.length + " chars" : "EMPTY"
-            }${result ? "" : " (check num_predict / think settings)"}`,
-          );
           break;
         }
         const warming =
@@ -674,9 +778,6 @@
           /loading model|model is still loading|server loading/i.test(resp.body);
         if (warming && warmupTries < WARMUP_MAX) {
           warmupTries++;
-          console.debug(
-            `[pii-guard] llm warming up (${warmupTries}/${WARMUP_MAX}), waiting ${WARMUP_DELAY_MS}ms…`
-          );
           await new Promise((r) => setTimeout(r, WARMUP_DELAY_MS));
           continue;
         }
@@ -688,38 +789,20 @@
           /abort|aborted|AbortError/i.test(resp.error);
         if (abortLike && timeoutTries < TIMEOUT_MAX) {
           timeoutTries++;
-          console.debug(
-            `[pii-guard] llm inference timeout (${timeoutTries}/${TIMEOUT_MAX}), retrying…`
-          );
           await new Promise((r) => setTimeout(r, TIMEOUT_DELAY_MS));
           continue;
         }
-        if (resp && resp.status === 403) {
-          console.warn(
-            "[pii-guard] Ollama returned 403 (CORS). Set OLLAMA_ORIGINS=" +
-              "chrome-extension://* or restart ollama with " +
-              "OLLAMA_ORIGINS=* env. Docker: `docker run -e OLLAMA_ORIGINS=* ...` " +
-              "or `docker exec ollama sh -c 'export OLLAMA_ORIGINS=*'` then restart."
-          );
-        } else {
-          console.debug(
-            "[pii-guard] llm call non-ok:",
-            resp && (resp.status || resp.error),
-            resp && resp.body && resp.body.slice(0, 200)
-          );
-        }
+        // 応答の中身は残さない (LLM の出力に入力が含まれる)。番号だけ
+        dlog("llm.http", { status: resp && Number.isInteger(resp.status) ? resp.status : 0 });
         break;
       } catch (err) {
         const isAbort = err && err.name === "AbortError";
         if (isAbort && timeoutTries < TIMEOUT_MAX) {
           timeoutTries++;
-          console.debug(
-            `[pii-guard] llm inference timeout (${timeoutTries}/${TIMEOUT_MAX}), retrying…`
-          );
           await new Promise((r) => setTimeout(r, TIMEOUT_DELAY_MS));
           continue;
         }
-        console.debug("[pii-guard] llm call failed:", err?.message || err);
+        dlog("error", DL ? DL.errorFields(err, "llm") : {});
         break;
       }
     }

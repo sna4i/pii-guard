@@ -2,7 +2,9 @@
 //
 // AT-01 テキストファイルを添付すると、アップロードされる中身がマスク済みになる (原文の
 //        個人情報が出ない・プレースホルダが入る)。attachment-guard が選択時に差し替える。
-// AT-02 バイナリ (画像) はマスクできないのでブロックされ、アップロードされない + ピルが警告色。
+// AT-02 バイナリ (画像) はマスクできないので、添付の前に確認が出る (1.7.1 の D-SC-24)。キャンセルすると
+//        アップロードされない + ピルが警告色。
+// AT-02b 確認で OK を選ぶと、元のままアップロードされ、ピルが「マスクしていない添付」を知らせる。
 // AT-03 Shift_JIS のテキスト (日本の CSV に多い) も正しく読んでマスクし、UTF-8 で渡す。
 // AT-04 BOM 付き UTF-16 も同じ。BOM 無し UTF-16 (NUL が混ざる) は読めない扱いでブロック。
 import { test, before, after } from "node:test";
@@ -46,19 +48,53 @@ test("AT-01 テキスト添付はアップロード前にマスクされる (F-S
   assert.ok(body.includes(canary), "非 PII のカナリアは残るはず (中身が届いた証拠)");
 });
 
-test("AT-02 バイナリ添付はブロックされ警告 (F-SC-08)", async () => {
+const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 1, 2, 3, 4]);
+// 確認 (window.confirm) を待って、答える。出た文を返す (出なければ null)
+function answerConfirm(page, accept) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(null), 5000);
+    page.once("dialog", async (d) => {
+      clearTimeout(timer);
+      const msg = d.message();
+      if (accept) await d.accept(); else await d.dismiss();
+      resolve(msg);
+    });
+  });
+}
+
+test("AT-02 バイナリ添付は確認が出て、キャンセルすると止めて警告 (F-SC-08、D-SC-24)", async () => {
   await h.setStorage({ enabled: true });
   h.server.clear();
   const page = await openReady();
-  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 1, 2, 3, 4]);
-  await page.setInputFiles('#mock-file', { name: "secret.png", mimeType: "image/png", buffer: png });
-  await sleep(2500);
+  const asked = answerConfirm(page, false);
+  await page.setInputFiles('#mock-file', { name: "secret.png", mimeType: "image/png", buffer: PNG });
+  const msg = await asked;
+  await sleep(2000);
   const uploaded = h.server.byKind("files-content");
   const tone = await page.evaluate((sel) => { const el = document.querySelector(sel); return el ? el.dataset.tone : null; }, HOST);
-  writeEvidence("at-02", { uploads: uploaded.length, pillTone: tone });
+  writeEvidence("at-02", { uploads: uploaded.length, pillTone: tone, asked: !!msg });
   await page.close();
-  assert.equal(uploaded.length, 0, "マスクできないバイナリがアップロードされた (ブロック失敗)");
-  assert.equal(tone, "warning", "未マスク添付をブロックしたのにピルが警告色でない");
+  assert.ok(msg && msg.includes("secret.png") && msg.includes("伏せずに"), `確認が出ない、またはファイル名が無い: ${JSON.stringify(msg)}`);
+  assert.equal(uploaded.length, 0, "キャンセルしたのにバイナリがアップロードされた");
+  assert.equal(tone, "warning", "止めたのにピルが警告色でない");
+});
+
+test("AT-02b バイナリ添付は確認で OK を選ぶと、元のまま添付して知らせる (D-SC-24)", async () => {
+  await h.setStorage({ enabled: true });
+  h.server.clear();
+  const page = await openReady();
+  const asked = answerConfirm(page, true);
+  await page.setInputFiles('#mock-file', { name: "photo.png", mimeType: "image/png", buffer: PNG });
+  const msg = await asked;
+  await sleep(2000);
+  const uploaded = h.server.byKind("files-content");
+  const names = await page.evaluate(() => window.__mock.events.filter((e) => e.type === "attach-upload").map((e) => e.name));
+  const tone = await page.evaluate((sel) => { const el = document.querySelector(sel); return el ? el.dataset.tone : null; }, HOST);
+  await page.close();
+  assert.ok(msg && msg.includes("photo.png"), `確認が出ない: ${JSON.stringify(msg)}`);
+  assert.equal(uploaded.length, 1, "OK を選んだのにアップロードされない");
+  assert.deepEqual(names, ["photo.png"], "元のファイル名で添付されていない");
+  assert.equal(tone, "warning", "マスクしていない添付を知らせていない");
 });
 
 // Python で作った Shift_JIS のバイト列 (Node には Shift_JIS のエンコーダが無い)。中身は架空:

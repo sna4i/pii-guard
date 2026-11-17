@@ -36,6 +36,70 @@
 //      ML_PREWARM.
 //   2. Forward the message there with target:"offscreen".
 //   3. Relay the offscreen response back to the original sender.
+import "./diag-log.js";
+import ExtPay from "./vendor/extpay/ExtPay.esm.js";
+import { EXTPAY_ID } from "./license/config.js";
+import { createLicenseManager } from "./license/license.js";
+
+// ---- Pro 版のライセンス (docs/pro-license.md) --------------------------------------
+// 購入状態は license/license.js だけで決める。外との通信は ExtensionPay の購入状態の確認だけで、
+// 本文や検出結果は扱わない。ID が仮のあいだは ExtPay を作らず、無料版としてだけ動く (D-PRO-09)。
+// ExtPay の決まりに合わせ、Service Worker の最上位で 1 回だけ初期化する。作るときと初期化で何かが投げても、
+// ほかの仕事 (バッジ、動作ログ、ML など、無料版の機能) を止めないよう、ここで受け止める。
+// ただし、上の import (ExtPay.esm.js の読み込み) そのものが投げると、Service Worker ごと起動しない
+// (Service Worker では import() が使えないので避けられない)。ExtPay の版を上げたら全部の E2E を流す
+// (vendor/extpay/README.md)
+try {
+  createLicenseManager({
+    extpayId: EXTPAY_ID,
+    makeExtPay: ExtPay,
+    storage: chrome.storage.local,
+    alarms: chrome.alarms,
+    runtime: chrome.runtime,
+  }).initLicense();
+} catch (_) { /* 無料版のまま動き続ける */ }
+
+// ---- 動作ログ (docs/diagnostic-log.md) ----------------------------------------
+// 保存は Service Worker だけが行う (D-LG-03)。書き込みは 1 本の列に並べ、0.3 秒まとめてから書く (D-LG-04)
+const DL = globalThis.PiiGuardDiagLog;
+const EXT_BASE = chrome.runtime.getURL("");
+let diagQueue = [];
+let diagTimer = null;
+let diagChain = Promise.resolve();
+function queueDiag(entries) {
+  for (const e of entries) if (e) diagQueue.push(e);
+  if (!diagTimer && diagQueue.length) diagTimer = setTimeout(flushDiag, 300);
+}
+function flushDiag() {
+  diagTimer = null;
+  const batch = diagQueue.splice(0);
+  if (!batch.length) return;
+  diagChain = diagChain.then(() => DL.append(chrome.storage.local, batch)).catch(() => {});
+}
+DL.setSink((batch) => queueDiag(batch.map((e) => DL.sanitize(e, { src: "background", site: null }))));
+DL.captureErrors("background");
+diagChain = diagChain.then(() => DL.purge(chrome.storage.local)).catch(() => {});
+function hostOf(url) {
+  try { return new URL(url).hostname; } catch (_) { return null; }
+}
+// 設定の変更 (値は残さず、何を変えたかだけ)。オン/オフは、変えた画面 (アイコン、メニュー、設定画面) が残す
+const SETTING_KINDS = {
+  maskAllowlist: "allowlist", maskForceList: "forcelist", chatTint: "tint", uiMode: "mode", interactive: "mode",
+  localLlmEnabled: "llm", localLlmUrl: "llm", localLlmModel: "llm", localLlmMode: "llm", localLlmTimeoutMs: "llm",
+  mlEnabled: "engine", secureComposerEnabled: "secure-composer",
+};
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== "local") return;
+  const kinds = new Set();
+  for (const k of Object.keys(changes)) if (SETTING_KINDS[k]) kinds.add(SETTING_KINDS[k]);
+  for (const what of kinds) DL.log("settings.changed", { what });
+});
+chrome.runtime.onInstalled.addListener((details) => {
+  if (details && details.reason === "update") {
+    DL.log("ext.updated", { from: details.previousVersion, to: chrome.runtime.getManifest().version });
+  }
+});
+
 const OFFSCREEN_DOCUMENT_PATH = "offscreen.html";
 let creatingOffscreenPromise = null;
 
@@ -116,8 +180,12 @@ chrome.runtime.onConnect.addListener((port) => {
   const slot = role === "sc-iframe" ? "iframe" : "content";
   let pair = scPairs.get(tabId);
   if (!pair) { pair = {}; scPairs.set(tabId, pair); }
-  // 同じ役割の古いポートがあれば捨てる (タブ内の作り直し)。
-  if (pair[slot]) { try { pair[slot].disconnect(); } catch (_) {} }
+  // 同じ役割の古いポートがあれば捨てる (タブ内の作り直し)。古いほうには「置き換えた」と知らせてから切る。
+  // 知らされた側はつなぎ直さない (privacy-boundary.js の D-SC-35。同じ役割の 2 つが互いを追い出し合わない)
+  if (pair[slot]) {
+    try { pair[slot].postMessage({ __sc: "retired" }); } catch (_) {}
+    try { pair[slot].disconnect(); } catch (_) {}
+  }
   pair[slot] = port;
 
   port.onMessage.addListener((msg) => {
@@ -189,6 +257,20 @@ const EGRESS_TTL_MS = 30 * 60 * 1000; // 持ち出しガードの記憶を残す
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || typeof message.type !== "string") {
+    return false;
+  }
+
+  if (message.type === "DIAG_LOG") {
+    // 出どころは受け手が決める。拡張機能のページか content script か。ページの世界から
+    // content script が中継したものだけを "page" にする。サイトはタブの URL のホスト名
+    const fromExtensionPage = typeof sender.url === "string" && sender.url.startsWith(EXT_BASE);
+    const site = sender.tab && sender.tab.url && !sender.tab.url.startsWith(EXT_BASE) ? hostOf(sender.tab.url) : null;
+    const list = Array.isArray(message.entries) ? message.entries.slice(0, 50) : [];
+    queueDiag(list.map((e) => DL.sanitize(e, {
+      src: fromExtensionPage ? "extension" : (e && e.src === "page" ? "page" : "content"),
+      site,
+    })));
+    sendResponse({ ok: true });
     return false;
   }
 

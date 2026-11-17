@@ -3,6 +3,8 @@
 // for the maskAllowlist key in chrome.storage.local.
 
 const $ = (id) => document.getElementById(id);
+const DLOG = window.PiiGuardDiagLog; // 動作ログ (docs/diagnostic-log.md)
+if (DLOG) DLOG.captureErrors("options");
 
 // --- Allowlist CRUD -----------------------------------------------------
 
@@ -206,7 +208,6 @@ const ML_HF_ORIGINS = [
 
 async function requestMlHostPermission() {
   if (!chrome.permissions || typeof chrome.permissions.request !== "function") {
-    console.warn("[ml] chrome.permissions API unavailable; falling back to true");
     return true;
   }
   try {
@@ -215,7 +216,7 @@ async function requestMlHostPermission() {
   try {
     return await chrome.permissions.request({ origins: ML_HF_ORIGINS });
   } catch (e) {
-    console.warn("[ml] permission request failed:", e?.message || e);
+    if (window.PiiGuardDiagLog) PiiGuardDiagLog.log("error", PiiGuardDiagLog.errorFields(e, "options"));
     return false;
   }
 }
@@ -294,24 +295,19 @@ async function ensureLlmHostPermission(rawUrl) {
   const pattern = toOriginPattern(rawUrl);
   if (!pattern) return false;
   if (!chrome || !chrome.permissions || typeof chrome.permissions.request !== "function") {
-    console.warn(
-      "[pii-guard] chrome.permissions API unavailable — falling back to direct fetch for",
-      pattern
-    );
     return true;
   }
   try {
     const already = await chrome.permissions.contains({ origins: [pattern] });
     if (already) return true;
   } catch (err) {
-    console.warn("[pii-guard] chrome.permissions.contains failed:", err);
     // Fall through and try request() — contains() failure shouldn't block.
   }
   try {
     const granted = await chrome.permissions.request({ origins: [pattern] });
     return granted === true;
   } catch (err) {
-    console.warn("[pii-guard] chrome.permissions.request failed:", err);
+    if (window.PiiGuardDiagLog) PiiGuardDiagLog.log("error", PiiGuardDiagLog.errorFields(err, "options"));
     return false;
   }
 }
@@ -789,6 +785,57 @@ async function loadLlmSettings() {
 }
 
 
+// ---- Pro 版 (docs/pro-license.md の F-PRO-07、D-PRO-05) ------------------------------
+// カスタムルールのカード (options-custom-rules.js) との継ぎ目 (apply と init)。カードの部品が投げても、無料版の設定と
+// #pro-card は動かし続ける: 例外はここで受け止め、動作ログに残し、カードを隠す (操作の配線が途中のカードを見せない)。
+// 一度投げたら、このページを開き直すまでカードには触らない
+let customRulesFailed = false;
+function callCustomRules(fn) {
+  if (customRulesFailed || !window.PiiGuardCustomRules) return;
+  try {
+    fn(window.PiiGuardCustomRules);
+  } catch (e) {
+    customRulesFailed = true;
+    const card = $("custom-rules-card");
+    if (card) card.hidden = true;
+    if (window.PiiGuardDiagLog) PiiGuardDiagLog.log("error", PiiGuardDiagLog.errorFields(e, "options"));
+  }
+}
+
+// 状態は Service Worker のライセンス管理に聞く。支払いの直後は自動では届かないので (extensionpay.com に
+// content script を置いていない)、「購入状態を更新」で確かめ直す
+function renderProLicense(state) {
+  const v = window.PiiGuardLicenseView.describeLicense(state);
+  // カスタムルールのカード (options-custom-rules.js) も、同じ答えで出し分ける
+  callCustomRules((card) => card.apply(v.visible, !!state && state.pro === true));
+  $("pro-card").hidden = !v.visible;
+  if (!v.visible) return;
+  const st = $("pro-status");
+  st.textContent = v.status;
+  st.dataset.tone = v.tone;
+  $("pro-note").textContent = v.note;
+  $("pro-note").hidden = !v.note;
+  $("pro-upgrade").hidden = !v.canUpgrade;
+  $("pro-login").hidden = !v.canLogin;
+  $("pro-refresh").hidden = !v.canRefresh;
+}
+async function loadProLicense(refresh) {
+  let state = null;
+  try { state = await chrome.runtime.sendMessage({ type: "license:get", refresh: refresh === true }); } catch (_) {}
+  renderProLicense(state);
+  // キャッシュで先に出したとき (60 分を過ぎている) は、確かめ直しの答えを待って出し直す。確かめられなければ注記が出る。
+  // 裏の確かめ直しが走っていればそれを待ち、もう終わっていれば、もう 1 回問い合わせる (D-PRO-11)
+  if (refresh !== true && state && state.source === "stale") loadProLicense(true);
+}
+async function openProPage(type) {
+  let r = null;
+  try { r = await chrome.runtime.sendMessage({ type }); } catch (_) {}
+  if (!(r && r.ok)) {
+    $("pro-note").textContent = window.PiiGuardLicenseView.describeOpenFailure(r && r.reason);
+    $("pro-note").hidden = false;
+  }
+}
+
 document.addEventListener("DOMContentLoaded", () => {
   // version / engine-version のプレースホルダを manifest から自動反映。
   try {
@@ -806,7 +853,16 @@ document.addEventListener("DOMContentLoaded", () => {
   loadUiMode();
   loadLlmSettings();
   loadMlSettings();
+  callCustomRules((card) => card.init());
+  loadProLicense(false);
 
+  $("pro-upgrade").addEventListener("click", () => openProPage("license:openPayment"));
+  $("pro-login").addEventListener("click", () => openProPage("license:openLogin"));
+  $("pro-refresh").addEventListener("click", () => loadProLicense(true));
+  // 購入状態が変わったら (60 分ごとの確かめ直しなど)、開いている設定画面にも出す
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === "local" && "licenseState" in changes) loadProLicense(false);
+  });
   $("allowlist-add-btn").addEventListener("click", () => {
     const input = $("allowlist-input");
     addToAllowlist(input.value);
@@ -848,6 +904,7 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 
   $("opt-enabled").addEventListener("change", (e) => {
+    if (window.PiiGuardDiagLog) PiiGuardDiagLog.log("settings.enabled", { value: e.target.checked ? "on" : "off", via: "options" });
     chrome.storage.local.set({ enabled: e.target.checked });
   });
   $("opt-interactive").addEventListener("change", (e) => {
@@ -935,4 +992,102 @@ document.addEventListener("DOMContentLoaded", () => {
       prewarmMl();
     });
   }
+});
+
+// --- タブと動作ログ (docs/diagnostic-log.md の D-LG-07) --------------------------
+// 表示は textContent だけで組む。記録の中身は diag-log.js の検めを通った決まった値だけ
+const TABS = { settings: { btn: "tabbtn-settings", panel: "tab-settings" }, log: { btn: "tabbtn-log", panel: "tab-log" } };
+const LEVEL_JA = { info: "情報", warn: "注意", error: "エラー" };
+let logShown = [];
+let logTimer = null;
+
+function selectTab(name, focus) {
+  for (const [key, t] of Object.entries(TABS)) {
+    const on = key === name;
+    const btn = $(t.btn);
+    btn.setAttribute("aria-selected", on ? "true" : "false");
+    btn.tabIndex = on ? 0 : -1;
+    $(t.panel).hidden = !on;
+    if (on && focus) btn.focus();
+  }
+  try { history.replaceState(null, "", name === "log" ? "#log" : location.pathname); } catch (_) { /* 何もしない */ }
+  if (name === "log") renderLog();
+}
+
+async function renderLog() {
+  if (!DLOG) return;
+  const days = Number($("log-days").value) || DLOG.RETENTION_DAYS;
+  const warnOnly = $("log-level").value === "warn";
+  let entries = [];
+  try { entries = await DLOG.readAll(chrome.storage.local, { days }); } catch (e) { DLOG.log("error", DLOG.errorFields(e, "options")); }
+  if (warnOnly) entries = entries.filter((e) => e.lv === "warn" || e.lv === "error");
+  logShown = entries;
+  const tbody = $("log-rows");
+  tbody.textContent = "";
+  for (const e of entries) {
+    const tr = document.createElement("tr");
+    const time = document.createElement("td");
+    time.className = "log-time";
+    time.textContent = DLOG.timeStr(e.t);
+    const lvCell = document.createElement("td");
+    const lv = document.createElement("span");
+    lv.className = `lv lv-${e.lv}`;
+    lv.textContent = LEVEL_JA[e.lv] || e.lv;
+    lvCell.appendChild(lv);
+    const site = document.createElement("td");
+    site.className = "log-site";
+    site.textContent = e.site || "拡張機能";
+    const msg = document.createElement("td");
+    msg.textContent = DLOG.format(e) + (e.n > 1 ? ` ×${e.n}` : "");
+    if (e.src === "page") {
+      const note = document.createElement("span");
+      note.className = "log-note";
+      note.textContent = "ページ側から報告";
+      msg.appendChild(note);
+    }
+    tr.append(time, lvCell, site, msg);
+    tbody.appendChild(tr);
+  }
+  $("log-empty").hidden = entries.length > 0;
+}
+
+function scheduleRenderLog() {
+  clearTimeout(logTimer);
+  logTimer = setTimeout(() => { if (!$("tab-log").hidden) renderLog(); }, 300);
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  $("tabbtn-settings").addEventListener("click", () => selectTab("settings"));
+  $("tabbtn-log").addEventListener("click", () => selectTab("log"));
+  // 左右の矢印キーでタブを移る
+  for (const id of ["tabbtn-settings", "tabbtn-log"]) {
+    $(id).addEventListener("keydown", (e) => {
+      if (e.key !== "ArrowLeft" && e.key !== "ArrowRight") return;
+      e.preventDefault();
+      selectTab(id === "tabbtn-settings" ? "log" : "settings", true);
+    });
+  }
+  $("log-days").addEventListener("change", renderLog);
+  $("log-level").addEventListener("change", renderLog);
+  $("log-copy").addEventListener("click", async () => {
+    const version = chrome.runtime.getManifest().version;
+    const head = `PII Guard ${version} の動作ログ (${$("log-days").selectedOptions[0].textContent}、${$("log-level").selectedOptions[0].textContent})`;
+    const text = [head, ...logShown.map((e) => DLOG.formatLine(e))].join("\n");
+    try {
+      await navigator.clipboard.writeText(text);
+      $("log-status").textContent = `${logShown.length} 件をコピーしました`;
+    } catch (_) {
+      $("log-status").textContent = "コピーできませんでした";
+    }
+  });
+  $("log-clear").addEventListener("click", async () => {
+    if (!confirm("動作ログをすべて消しますか？")) return;
+    await DLOG.clear(chrome.storage.local);
+    $("log-status").textContent = "動作ログを消しました";
+    renderLog();
+  });
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === "local" && Object.keys(changes).some((k) => k.startsWith("diagLog"))) scheduleRenderLog();
+  });
+  if (location.hash === "#log") selectTab("log");
 });

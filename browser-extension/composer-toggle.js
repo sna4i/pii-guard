@@ -40,17 +40,35 @@
   // 返り値: { count: 警告の件数, items: [{ name, count }] (多い順) }
   function summarizeWarning(aggregated, allowlist, confidential) {
     const allow = new Set(Array.isArray(allowlist) ? allowlist.map(String) : []);
-    const perName = new Map();
-    let count = 0;
+    const perCategory = Object.create(null);
     for (const row of Array.isArray(aggregated) ? aggregated : []) {
       if (!row || typeof row !== "object") continue;
       const value = row.value == null ? "" : String(row.value);
       if (!value.trim() || allow.has(value)) continue;
-      const name = CATEGORY_JA[row.category] || CATEGORY_JA.OTHER;
-      perName.set(name, (perName.get(name) || 0) + 1);
-      count++;
+      const cat = typeof row.category === "string" ? row.category : "OTHER";
+      perCategory[cat] = (perCategory[cat] || 0) + 1;
     }
-    const conf = Array.isArray(confidential) ? confidential.length : 0;
+    return summarizeCounts(perCategory, Array.isArray(confidential) ? confidential.length : 0);
+  }
+
+  // 種類ごとの件数 ({ PERSON: 2, ... }) と、機密と思われる文の件数から、警告の要約を作る。
+  // Secure Composer (iframe) から届く件数にも使うので、形を厳しく確かめる (docs/release-1.7.1.md の D-SC-04)。
+  // 知らない種類は「その他」、整数でない件数や負の件数は数えない
+  const MAX_COUNT = 9999;
+  const countOf = (n) => (Number.isInteger(n) && n > 0 ? Math.min(n, MAX_COUNT) : 0);
+  function summarizeCounts(perCategory, confidential) {
+    const perName = new Map();
+    let count = 0;
+    if (perCategory && typeof perCategory === "object") {
+      for (const key of Object.keys(perCategory)) {
+        const n = countOf(perCategory[key]);
+        if (!n) continue;
+        const name = Object.prototype.hasOwnProperty.call(CATEGORY_JA, key) ? CATEGORY_JA[key] : CATEGORY_JA.OTHER;
+        perName.set(name, (perName.get(name) || 0) + n);
+        count += n;
+      }
+    }
+    const conf = countOf(confidential);
     if (conf > 0) {
       perName.set(CONFIDENTIAL_JA, (perName.get(CONFIDENTIAL_JA) || 0) + conf);
       count += conf;
@@ -59,7 +77,7 @@
     return { count, items };
   }
 
-  const api = { summarizeWarning };
+  const api = { summarizeWarning, summarizeCounts };
   if (typeof module === "object" && module.exports) module.exports = api;
   if (typeof window === "undefined" || typeof document === "undefined" || typeof chrome === "undefined" || !chrome.storage) return;
   // content.js (同じ isolated world) が保存の確認を頼むための公開点
@@ -72,13 +90,24 @@
   const DEBOUNCE_MS = 400;
   const MAX_CHARS = 20000;
   const TICK_MS = 1000;
+  // 拡張機能との連絡が切れたか (読み込み直し・更新・オフのあと、開いたままのタブに残った古い部品)。
+  // 切れたらオン/オフを切り替えたふりをせず、読み込み直すよう知らせる (docs/release-1.7.1.md の D-SC-22)
+  let stale = false;
+  const STALE_LABEL = "PII Guard が更新か停止されました。このタブを読み込み直してください";
+  const STALE_NOTICE = "PII Guard が更新か停止されたので、切り替えられないよ。このタブを読み込み直してね。";
+  function contextAlive() {
+    try { return !!(chrome.runtime && chrome.runtime.id); } catch (_) { return false; }
+  }
   const REVIEW_TIMEOUT_MS = 10 * 60 * 1000;
-  const LOG = (...a) => console.debug("[pii-guard] composer:", ...a);
+  // 動作ログ (docs/diagnostic-log.md)。コンソールには何も書かない
+  const DL = window.PiiGuardDiagLog;
+  const dlog = (code, d) => { if (DL) DL.log(code, d); };
+  const errorFields = (err, where) => (DL ? DL.errorFields(err, where) : {});
   const NS = window.__localMaskMCP; // isolated world のエンジン
   const T = window.PiiGuardTint;    // tint.js (色の計算)
   const STABLE_MS = 500;            // アイコンが動いてからクリックを受け付けるまで (D-22)
   const FLOAT_SIZE = 28;            // 浮かせるときのアイコンの一辺 (px)
-  const HOST_CSS = "position:fixed;top:0;left:0;z-index:2147483647;isolation:isolate;margin:0;padding:0;border:0;opacity:1;visibility:visible;filter:none;clip-path:none;transform:none;pointer-events:auto;";
+  const HOST_CSS = "position:fixed;inset:auto;top:0;left:0;z-index:2147483647;isolation:isolate;margin:0;padding:0;border:0;overflow:visible;background:transparent;opacity:1;visibility:visible;filter:none;clip-path:none;transform:none;pointer-events:auto;";
 
   // ---- クリックジャッキングへの防御 ----------------------------------------------
   // ホスト要素はページの DOM にあるので、サイトのスクリプトはホストを透明にしたり
@@ -116,7 +145,7 @@
     return cs.opacity === "1" && cs.visibility === "visible" && cs.filter === "none" && cs.clipPath === "none" && cs.pointerEvents !== "none";
   }
   // ホストの属性 (style など) がこのスクリプト以外から変えられたら元に戻す
-  function guardHost(host, baseCss, onTamper) {
+  function guardHost(host, baseCss, onTamper, uiName) {
     // MutationObserver の通知は非同期なので、自分の書き込みかどうかはフラグではなく
     // 「今の属性が期待どおりか」で判断する (フラグ方式だと自分の書き込みに反応して無限に繰り返した)
     const expected = () => baseCss + (host.__pos || "");
@@ -130,15 +159,124 @@
     mo = new MutationObserver((muts) => {
       const tampered = muts.some((m) => m.type === "attributes" && (
         (m.attributeName === "style" && host.getAttribute("style") !== expected()) ||
-        m.attributeName === "class" || m.attributeName === "hidden"));
+        m.attributeName === "class" || m.attributeName === "hidden" ||
+        (m.attributeName === "popover" && TOP_LAYER && host.getAttribute("popover") !== "manual")));
       if (!tampered) return;
-      LOG("host attributes were changed by the page; restoring");
+      dlog("ui.tampered", { ui: uiName, what: "attributes" });
       host.removeAttribute("class");
       host.removeAttribute("hidden");
       apply();
+      if (TOP_LAYER) raise(host);
       if (onTamper) onTamper();
     });
     mo.observe(host, { attributes: true });
+  }
+
+  // ---- トップレイヤー (docs/composer-toggle.md の D-31〜D-34) ------------------------
+  // サイトがポップオーバーやモーダルをトップレイヤーに出すと、その透明な ::backdrop が画面全体を
+  // 覆い、z-index で重ねた外枠は Intersection Observer v2 で「覆われている」と判定される
+  // (ChatGPT でファイルを開いたときのパネルのつまみ)。そこで外枠自体をポップオーバーにして
+  // トップレイヤーに出し、サイトが後から別の要素を出したら、その上に出し直す。
+  // ただし、入力欄の上を覆うつもりの表示 (モーダル、全画面、外枠に重なる要素) があるときは
+  // 出し直さず、その下に残る。クリックの判定 (clickIsSafe) は変えない
+  const TOP_LAYER = typeof HTMLElement === "function" && typeof HTMLElement.prototype.showPopover === "function";
+  const LAYER_CSS = '[data-pii-guard="composer-toggle"]::backdrop,[data-pii-guard="persist-confirm"]::backdrop{display:none!important}';
+  let layerStyle = null;
+  let othersOpenedSinceRaise = false; // 前に出し直してから、ページが別の要素をトップレイヤーに出したか
+  let tickRaiseSpent = false;         // 見回りで出し直したのに見えるようにならなかった (画面の外に出ているなど)。次の変化まで繰り返さない
+  // 自分の外枠の ::backdrop を消す (D-32)。消さないと、自分の膜がページや埋め込みを覆う
+  function ensureLayerStyle() {
+    if (!TOP_LAYER) return;
+    if (layerStyle && layerStyle.isConnected && layerStyle.textContent === LAYER_CSS) return;
+    if (!layerStyle) {
+      layerStyle = document.createElement("style");
+      layerStyle.setAttribute("data-pii-guard", "layer-style");
+    }
+    layerStyle.textContent = LAYER_CSS;
+    (document.head || document.documentElement).appendChild(layerStyle);
+  }
+  // 外枠をトップレイヤーのいちばん上に出す (出し直す)
+  function raise(el) {
+    if (!TOP_LAYER || !el || !el.isConnected) return;
+    ensureLayerStyle();
+    try {
+      if (el.getAttribute("popover") !== "manual") el.setAttribute("popover", "manual");
+      if (el.matches(":popover-open")) el.hidePopover();
+      el.showPopover();
+    } catch (_) { /* 切り離された直後など。次の見回りでやり直す */ }
+  }
+  const isOurHost = (el) => !!el && (el === host || el === persistHost);
+  // 今見えている自分の部品の位置 (アイコンと、保留中の保存の確認)
+  function ourRects() {
+    const rs = [];
+    if (host && ui && host.__pos !== "display:none;") rs.push(ui.toggle.getBoundingClientRect());
+    if (persistCurrent && persistUi && !persistUi.box.hidden) rs.push(persistUi.box.getBoundingClientRect());
+    return rs;
+  }
+  function overlapsUs(el) {
+    const r = el.getBoundingClientRect();
+    if (r.width === 0 && r.height === 0) return false;
+    return ourRects().some((o) => r.left < o.right + 4 && o.left < r.right + 4 && r.top < o.bottom + 4 && o.top < r.bottom + 4);
+  }
+  // サイトが入力欄の上を覆うつもりの表示か (D-33): モーダル、全画面、または自分の部品に重なる要素
+  const coversUs = (el) => el.matches(":modal, :fullscreen") || overlapsUs(el);
+  const othersInTopLayer = () => [...document.querySelectorAll(":popover-open, :modal, :fullscreen")].filter((el) => !isOurHost(el));
+  // 動作ログ用: トップレイヤーにある自分以外の要素の説明 (タグ名、popover の値、role、モーダルか、重なっていたか)。文字は入れない
+  function describeLayers() {
+    try {
+      return othersInTopLayer().slice(0, 6).map((el) => ({
+        tag: el.tagName.toLowerCase(),
+        popover: el.hasAttribute("popover") ? (el.getAttribute("popover") || "auto") : "",
+        role: el.getAttribute("role") || "",
+        modal: el.matches(":modal"),
+        overlap: overlapsUs(el),
+      }));
+    } catch (_) { return []; }
+  }
+  // 自分の外枠を、覆うつもりの表示が無ければいちばん上に出し直す
+  function raiseIfClear(force) {
+    if (!TOP_LAYER) return;
+    if (!force && !othersOpenedSinceRaise) return;
+    const others = othersInTopLayer();
+    if (others.some(coversUs)) return;
+    othersOpenedSinceRaise = false;
+    if (host && ui) raise(host);
+    if (persistCurrent && persistHost) raise(persistHost);
+  }
+  // 1 秒ごとの見回り: 外されていたら戻す (D-34)。見えていないと判定されているのに、
+  // 覆うつもりの表示が無ければ出し直す (toggle イベントを握りつぶされた場合など、D-33)
+  function checkLayers() {
+    if (!TOP_LAYER) return;
+    ensureLayerStyle();
+    if (host && ui && host.__pos !== "display:none;" && !host.matches(":popover-open")) {
+      dlog("ui.tampered", { ui: "icon", what: "top-layer" });
+      raise(host);
+    }
+    if (persistCurrent && persistHost && !persistHost.matches(":popover-open")) {
+      dlog("ui.tampered", { ui: "confirm", what: "top-layer" });
+      finishPersist(false);
+    }
+    if (host && ui && visibility.get(ui.toggle) === false) {
+      if (!tickRaiseSpent) { tickRaiseSpent = true; raiseIfClear(true); }
+    } else {
+      tickRaiseSpent = false;
+    }
+  }
+  function onToggleEvent(e) {
+    const t = e.target;
+    if (!TOP_LAYER || !t || t.nodeType !== 1) return;
+    if (isOurHost(t)) {
+      // 自分で出し直したときは開いたまま。閉じたままなら、サイトが閉じた (D-34)
+      if (t.matches(":popover-open")) return;
+      if (t === persistHost && persistCurrent) { dlog("ui.tampered", { ui: "confirm", what: "top-layer" }); finishPersist(false); return; }
+      raise(t);
+      return;
+    }
+    // 開いたら、覆うつもりの表示が無ければ上に戻る。閉じたら、覆っていた表示が消えて
+    // 上に戻れるようになったかもしれない (開いたまま残っている別の要素の下にいる場合)
+    othersOpenedSinceRaise = othersOpenedSinceRaise || e.newState === "open";
+    tickRaiseSpent = false;
+    raiseIfClear(false);
   }
 
   // サービスごとの入力欄のヒント。外れていても下の汎用の判定で拾う
@@ -224,7 +362,10 @@
     el: null, enabled: true, interactive: true, allowlist: [], forceList: [], tint: null,
     summary: { count: 0, items: [] }, reviewing: false, scanSeq: 0,
     scMaskNotice: { count: 0, at: 0 }, // F-SC-10: 確認 OFF のとき SC がマスクした件数 (一定時間だけ黄色)
-    attachNotice: { masked: 0, blocked: 0, unmasked: 0, reason: "", at: 0 }, // F-SC-08: 添付のマスク/ブロック/未マスク通知
+    // F-SC-08: 添付の警告。マスクしていない添付と止めた添付は、送るか、会話が替わるか、「確認した」まで
+    // 出し続ける (docs/release-1.7.1.md の D-SC-25)。名前は内訳に出すだけ (20 件まで)
+    attachRisk: { unmasked: [], unmaskedCount: 0, blocked: [], blockedCount: 0, reason: "", path: "" },
+    attachInfo: { masked: 0, at: 0 }, // 確認がオフのときにマスクした添付の知らせ。危険ではないので 6 秒だけ
     dock: null,          // { spacer, anchor, slot, where } 下の段に置いているとき
     size: FLOAT_SIZE,    // アイコンの一辺 (px)。下の段では「+」に合わせる
     haloColor: "",       // アイコンの縁取り (入力欄の箱の色)
@@ -282,7 +423,7 @@
     .wrap.dark .actions button { background: #374151; border-color: #4b5563; color: #e5e7eb; }
     .actions button.primary { background: #6366f1; border-color: #6366f1; color: #fff; font-weight: 600; }
     .notice { position: absolute; right: 0; bottom: calc(100% + 6px); padding: 6px 10px; border-radius: 8px; background: #dc2626; color: #fff;
-      white-space: nowrap; box-shadow: 0 2px 8px rgba(0,0,0,.2); }
+      width: max-content; max-width: min(300px, calc(100vw - 16px)); line-height: 1.4; box-shadow: 0 2px 8px rgba(0,0,0,.2); }
     .wrap.below .notice { bottom: auto; top: calc(100% + 6px); }
     .notice[hidden] { display: none; }
   `;
@@ -303,7 +444,7 @@
     host = document.createElement("div");
     host.setAttribute("data-pii-guard", "composer-toggle");
     host.__pos = "display:none;";
-    guardHost(host, HOST_CSS, () => place(true));
+    guardHost(host, HOST_CSS, () => place(true), "icon");
     // 閉じた Shadow DOM。ページのスクリプトは中の要素を取得も操作もできない。
     // 中身は固定の雛形だけで、入力欄の文章などの外部の値は入れない
     const shadow = host.attachShadow({ mode: "closed" });
@@ -318,6 +459,7 @@
             <button type="button" data-action="close">閉じる</button>
             <button type="button" data-action="mask-once">マスキングする</button>
             <button type="button" class="primary" data-action="turn-on">オンにする</button>
+            <button type="button" class="primary" data-action="ack" hidden>確認した</button>
           </div>
         </div>
         <div class="notice" hidden></div>
@@ -329,21 +471,26 @@
       items: shadow.querySelector(".items"),
       notice: shadow.querySelector(".notice"),
       turnOn: shadow.querySelector('[data-action="turn-on"]'),
+      ack: shadow.querySelector('[data-action="ack"]'),
+      title: shadow.querySelector(".popover .title"),
+      sub: shadow.querySelector(".popover .sub"),
       maskOnce: shadow.querySelector('[data-action="mask-once"]'),
       close: shadow.querySelector('[data-action="close"]'),
     };
     applyTheme();
-    for (const el of [ui.toggle, ui.turnOn, ui.maskOnce, ui.close]) watchVisibility(el);
+    for (const el of [ui.toggle, ui.turnOn, ui.maskOnce, ui.close, ui.ack]) watchVisibility(el);
     // 本物の入力で、部品が完全に見えていて、アイコンが動いてから 0.5 秒以上たったときだけ
     const safe = (el, fn) => (e) => {
-      if (!clickIsSafe(e, el, host)) { LOG("ignored a click on a control that is not fully visible"); return; }
-      if (Date.now() - state.lastMovedAt < STABLE_MS) { LOG("ignored a click: the control has just moved"); return; }
+      if (!e || e.isTrusted !== true) return; // ページが作ったクリックは黙って捨てる
+      if (!clickIsSafe(e, el, host)) { ignoredClick("occluded"); return; }
+      if (Date.now() - state.lastMovedAt < STABLE_MS) { ignoredClick("moved"); return; }
       fn(e);
     };
     // 黄色 (オフで個人情報の可能性あり) のときは内訳を開く。それ以外はオン/オフの切り替え (D-29)
     ui.toggle.addEventListener("click", safe(ui.toggle, () => {
+      if (stale) { notice(STALE_NOTICE, "stale"); return; } // 保存できないので切り替えない
       if (warning()) {
-        if (ui.popover.hidden) renderItems();
+        if (ui.popover.hidden) renderPopover();
         ui.popover.hidden = !ui.popover.hidden;
         ui.toggle.setAttribute("aria-expanded", ui.popover.hidden ? "false" : "true");
         exportLayout();
@@ -352,9 +499,18 @@
       setEnabled(!state.enabled);
     }));
     ui.close.addEventListener("click", safe(ui.close, () => { ui.popover.hidden = true; exportLayout(); }));
-    ui.maskOnce.addEventListener("click", safe(ui.maskOnce, () => { ui.popover.hidden = true; exportLayout(); reviewDraft(); }));
-    ui.turnOn.addEventListener("click", safe(ui.turnOn, () => { ui.popover.hidden = true; setEnabled(true); reviewDraft(); }));
+    // 添付の警告の「確認した」(D-SC-25)。マスクしていない添付と止めた添付の黄色を消す
+    ui.ack.addEventListener("click", safe(ui.ack, () => { clearAttachRisk(); exportLayout(); }));
+    // Secure Composer が下書きを受け持つ間は、下書きは iframe の中にある。「マスキングする」は iframe に
+    // 伏せてもらい、「オンにする」はオンにするだけ (送るときに iframe が伏せる) (D-SC-05)
+    ui.maskOnce.addEventListener("click", safe(ui.maskOnce, () => {
+      ui.popover.hidden = true;
+      exportLayout();
+      if (scOwnsDraft()) window.__piiGuardSC.adapter.maskDraft(); else reviewDraft();
+    }));
+    ui.turnOn.addEventListener("click", safe(ui.turnOn, () => { ui.popover.hidden = true; setEnabled(true); if (!scOwnsDraft()) reviewDraft(); }));
     document.documentElement.appendChild(host);
+    raise(host);
   }
 
   // 色を { r, g, b, a } にする。getComputedStyle が oklch() などで返す色は、
@@ -402,7 +558,7 @@
   function exportLayout() {
     if (!host || !ui) return;
     if (!exposeForTests) {
-      for (const k of ["enabled", "warn", "layout", "docked", "tone"]) delete host.dataset[k];
+      for (const k of ["enabled", "warn", "layout", "docked", "tone", "popover"]) delete host.dataset[k];
       return;
     }
     host.dataset.enabled = state.enabled ? "true" : "false";
@@ -416,7 +572,11 @@
     };
     host.dataset.layout = JSON.stringify({
       toggle: rect(ui.toggle),
-      turnOn: rect(ui.turnOn), maskOnce: rect(ui.maskOnce), close: rect(ui.close),
+      turnOn: rect(ui.turnOn), maskOnce: rect(ui.maskOnce), close: rect(ui.close), ack: rect(ui.ack),
+    });
+    host.dataset.popover = ui.popover.hidden ? "" : JSON.stringify({
+      kind: ui.popover.dataset.kind || "", title: ui.title.textContent,
+      items: Array.from(ui.items.querySelectorAll("li")).map((li) => li.textContent),
     });
   }
 
@@ -425,26 +585,50 @@
   const scMaskWarning = () =>
     state.enabled && scActive && !state.interactive &&
     state.scMaskNotice.count > 0 && (Date.now() - state.scMaskNotice.at) < SC_NOTICE_MS;
-  // F-SC-08: 添付を止めた / マスクせずに通した (マスキング OFF) / 確認 OFF でマスクした、のどれか。
-  // 添付ガードは ChatGPT 以外 (Claude/Gemini/Manus) でも動くので、SC の有無に関係なく出す (F-EG-05)
-  const attachWarning = () =>
-    (Date.now() - state.attachNotice.at) < SC_NOTICE_MS &&
-    (state.attachNotice.blocked > 0 || state.attachNotice.unmasked > 0 ||
-      (state.attachNotice.masked > 0 && !state.interactive));
-  function attachMsg(n) {
-    if (n.blocked > 0 && n.reason === "dialog") return "ダイアログへのドロップは止めました。ファイル選択から追加してね";
-    if (n.blocked > 0 && n.reason === "no-target") return `添付先が見つからず ${n.blocked} 件止めました`;
-    if (n.blocked > 0) return `マスクできない添付を ${n.blocked} 件止めました`;
-    if (n.unmasked > 0) return `マスクしていない添付が ${n.unmasked} 件あります`;
-    return `添付を ${n.masked} 件マスクしました`;
+  // F-SC-08: 添付を止めた / マスクせずに通した (マスキング OFF、またはオンで確認して添付) / 確認 OFF でマスクした、のどれか。
+  // 添付ガードは ChatGPT 以外 (Claude/Gemini/Manus) でも動くので、SC の有無に関係なく出す (F-EG-05)。
+  // マスクしていない添付と止めた添付は時間では消さない (D-SC-25)
+  const attachRiskOn = () => state.attachRisk.unmaskedCount > 0 || state.attachRisk.blockedCount > 0;
+  const attachInfoOn = () => state.attachInfo.masked > 0 && !state.interactive && (Date.now() - state.attachInfo.at) < SC_NOTICE_MS;
+  const attachWarning = () => attachRiskOn() || attachInfoOn();
+  const BLOCKED_SUB = {
+    binary: "伏せられないので添付しませんでした。",
+    "no-target": "添付先が見つからなかったので添付しませんでした。",
+    dialog: "ダイアログへのドロップは止めました。ファイル選択から追加してね。",
+  };
+  // マスクしていない添付を先に出す (送ると中身が出ていくほうを優先する)
+  function attachMsg() {
+    const r = state.attachRisk;
+    if (r.unmaskedCount > 0) return `マスクしていない添付が ${r.unmaskedCount} 件あります`;
+    if (r.blockedCount > 0 && r.reason === "dialog") return "ダイアログへのドロップは止めました。ファイル選択から追加してね";
+    if (r.blockedCount > 0 && r.reason === "no-target") return `添付先が見つからず ${r.blockedCount} 件止めました`;
+    if (r.blockedCount > 0) return `マスクできない添付を ${r.blockedCount} 件止めました`;
+    return `添付を ${state.attachInfo.masked} 件マスクしました`;
+  }
+  const emptyRisk = () => ({ unmasked: [], unmaskedCount: 0, blocked: [], blockedCount: 0, reason: "", path: "" });
+  function clearAttachRisk() {
+    if (!attachRiskOn()) return;
+    state.attachRisk = emptyRisk();
+    if (ui) ui.popover.hidden = true;
+    render();
   }
   const warning = () => offWarning() || scMaskWarning() || attachWarning();
   function render() {
     if (!ui) return;
     const t = ui.toggle;
-    if (attachWarning() && !offWarning()) {
+    if (stale) {
+      // 連絡が切れた: 黄色にして、押すと読み込み直すよう知らせる (D-SC-22)
+      t.setAttribute("data-state", "warning");
+      t.setAttribute("role", "button");
+      t.removeAttribute("aria-checked");
+      t.removeAttribute("aria-haspopup");
+      t.removeAttribute("aria-expanded");
+      t.setAttribute("aria-label", STALE_LABEL);
+      t.title = STALE_LABEL;
+      ui.popover.hidden = true;
+    } else if (attachWarning() && !offWarning()) {
       // 添付の通知。止めた / マスクせずに通した / 確認 OFF でマスクした。
-      const msg = attachMsg(state.attachNotice);
+      const msg = attachMsg();
       t.setAttribute("data-state", "warning");
       t.setAttribute("role", "button");
       t.removeAttribute("aria-checked");
@@ -484,22 +668,80 @@
     }
     place(false);
   }
-  function renderItems() {
+  // 内訳の吹き出しの中身を、出している警告の種類に合わせる (D-SC-26)。名前や件数は textContent で入れる
+  function popoverKind() {
+    if (offWarning()) return "off";
+    if (state.attachRisk.unmaskedCount > 0) return "unmasked";
+    if (state.attachRisk.blockedCount > 0) return "blocked";
+    if (scMaskWarning()) return "scmask";
+    if (attachInfoOn()) return "attach-info";
+    return "";
+  }
+  function renderPopover() {
+    const kind = popoverKind();
+    const r = state.attachRisk;
+    const names = (list, total) => {
+      const rows = list.slice(0, 5).map((n) => [n, ""]);
+      if (total > rows.length) rows.push([`ほか ${total - rows.length} 件`, ""]);
+      return rows;
+    };
+    let title = "", sub = "", rows = [], offActions = false, ack = false;
+    if (kind === "off") {
+      title = "個人情報の可能性があります";
+      sub = "PII Guard はオフです。このまま送ると伏せられません。";
+      rows = state.summary.items.map((it) => [it.name, `${it.count} 件`]);
+      offActions = true;
+    } else if (kind === "unmasked") {
+      title = "マスクしていない添付があります";
+      sub = "次の添付は伏せずに添付しました。このまま送ると、中身はそのまま送られます。";
+      rows = names(r.unmasked, r.unmaskedCount);
+      ack = true;
+    } else if (kind === "blocked") {
+      title = "添付を止めました";
+      sub = BLOCKED_SUB[r.reason] || BLOCKED_SUB.binary;
+      rows = names(r.blocked, r.blockedCount);
+      ack = true;
+    } else if (kind === "scmask") {
+      title = "マスキングされたデータがあります";
+      sub = `送った文の ${state.scMaskNotice.count} 件を伏せ字にしました。`;
+    } else if (kind === "attach-info") {
+      title = "添付をマスクしました";
+      sub = `${state.attachInfo.masked} 件を伏せ字にしました。`;
+    }
+    ui.title.textContent = title;
+    ui.sub.textContent = sub;
     ui.items.textContent = "";
-    for (const it of state.summary.items) {
+    for (const [a, b] of rows) {
       const li = document.createElement("li");
-      const a = document.createElement("span"); a.textContent = it.name;
-      const b = document.createElement("span"); b.textContent = `${it.count} 件`;
-      li.append(a, b);
+      const x = document.createElement("span"); x.textContent = a;
+      li.appendChild(x);
+      if (b) { const y = document.createElement("span"); y.textContent = b; li.appendChild(y); }
       ui.items.appendChild(li);
     }
+    ui.items.hidden = rows.length === 0;
+    ui.maskOnce.hidden = !offActions;
+    ui.turnOn.hidden = !offActions;
+    ui.ack.hidden = !ack;
+    ui.popover.setAttribute("aria-label", title || "PII Guard");
+    ui.popover.dataset.kind = kind;
   }
-  function notice(text) {
+  // kind はテスト用の目印 (data-notice)。テスト用のフラグがあるときだけ出す
+  function notice(text, kind) {
     if (!ui) return;
     ui.notice.textContent = text;
     ui.notice.hidden = false;
+    if (exposeForTests && host) host.dataset.notice = kind || "";
     clearTimeout(noticeTimer);
-    noticeTimer = setTimeout(() => { ui.notice.hidden = true; }, 4000);
+    noticeTimer = setTimeout(() => { ui.notice.hidden = true; if (host) delete host.dataset.notice; }, 4000);
+  }
+  // クリックを受け付けなかったことを、アイコンの吹き出しで知らせる (D-35)
+  const IGNORED_TEXT = {
+    occluded: "ほかの表示と重なっているため、切り替えませんでした。拡張機能のメニューからも切り替えられます",
+    moved: "アイコンが動いた直後のため、受け付けませんでした。もう一度押してください",
+  };
+  function ignoredClick(reason) {
+    dlog("toggle.click_ignored", { reason, layers: describeLayers() });
+    notice(IGNORED_TEXT[reason], reason);
   }
 
   function setHostPos(pos) {
@@ -574,11 +816,12 @@
   }
 
   // 入力欄を囲む箱 (背景か枠線があり、入力欄より少しだけ大きい祖先)。浮かせる位置の基準。
-  // 見つからなければ入力欄そのもの
+  // 見つからなければ入力欄そのもの。Gemini では箱が入力欄の 9 段上にあるので、12 段まで探す (D-37)。
+  // 大きさの上限で、画面全体のような大きな祖先は選ばない
   function composerBox(el) {
     const er = el.getBoundingClientRect();
     let a = el.parentElement;
-    for (let i = 0; a && i < 8 && a !== document.body && a !== document.documentElement; i++, a = a.parentElement) {
+    for (let i = 0; a && i < 12 && a !== document.body && a !== document.documentElement; i++, a = a.parentElement) {
       const r = a.getBoundingClientRect();
       if (r.width === 0 && r.height === 0) continue; // display: contents
       if (r.height > er.height + 160 || r.width > er.width + 480) break;
@@ -645,13 +888,19 @@
     if (state.enabled) state.summary = { count: 0, items: [] };
     render();
     applyTint(false);
-    chrome.storage.local.set({ enabled: !!value }).catch((e) => LOG("storage write failed:", e && e.message));
+    dlog("settings.enabled", { value: value ? "on" : "off", via: "icon" });
+    chrome.storage.local.set({ enabled: !!value }).catch((e) => dlog("error", errorFields(e, "storage")));
     if (!state.enabled) scheduleScan(0);
   }
   function applyStored(stored) {
     const prevEnabled = state.enabled;
     let tintChanged = false;
-    if ("secureComposerEnabled" in stored) scActive = SC_HOST && stored.secureComposerEnabled !== false;
+    let scChanged = false;
+    if ("secureComposerEnabled" in stored) {
+      const next = SC_HOST && stored.secureComposerEnabled !== false;
+      // 下書きの持ち主 (iframe かネイティブ入力欄か) が変わったら、警告は調べ直す
+      if (next !== scActive) { scActive = next; scChanged = true; state.summary = { count: 0, items: [] }; }
+    }
     if ("interactive" in stored) state.interactive = stored.interactive !== false;
     if ("enabled" in stored) state.enabled = stored.enabled !== false;
     if ("chatTint" in stored) {
@@ -668,7 +917,7 @@
     if (state.enabled) state.summary = { count: 0, items: [] };
     render();
     applyTint(tintChanged);
-    if (!state.enabled && (prevEnabled !== state.enabled || "maskAllowlist" in stored || "maskForceList" in stored)) scheduleScan(0);
+    if (!state.enabled && (prevEnabled !== state.enabled || scChanged || "maskAllowlist" in stored || "maskForceList" in stored)) scheduleScan(0);
   }
   chrome.storage.local.get(["enabled", "interactive", "maskAllowlist", "maskForceList", "chatTint", "secureComposerEnabled", E2E_FLAG]).then((s) => {
     exposeForTests = s[E2E_FLAG] === true;
@@ -698,20 +947,37 @@
   });
 
   // F-SC-08: 添付のマスク/ブロックを attachment-guard から受け取り、ピルに知らせる。
-  let attachNoticeTimer = null;
+  // マスクしていない添付と止めた添付は足していき、時間では消さない (D-SC-25)。吹き出しの一言は数秒で消える
+  let attachInfoTimer = null;
   window.addEventListener("mask-mcp:attachment", (ev) => {
     const d = (ev && ev.detail) || {};
     const masked = Number(d.maskedCount) || 0;
-    const blocked = Array.isArray(d.blocked) ? d.blocked.length : 0;
-    const unmasked = Array.isArray(d.unmasked) ? d.unmasked.length : 0;
+    const names = (a) => (Array.isArray(a) ? a : []).filter((x) => typeof x === "string");
+    const blocked = names(d.blocked);
+    const unmasked = names(d.unmasked);
     const reason = typeof d.reason === "string" ? d.reason : "";
-    if (masked <= 0 && blocked <= 0 && unmasked <= 0) return;
-    state.attachNotice = { masked, blocked, unmasked, reason, at: Date.now() };
+    if (masked <= 0 && blocked.length === 0 && unmasked.length === 0) return;
+    if (blocked.length || unmasked.length) {
+      const r = state.attachRisk;
+      state.attachRisk = {
+        unmasked: r.unmasked.concat(unmasked).slice(-20), unmaskedCount: r.unmaskedCount + unmasked.length,
+        blocked: r.blocked.concat(blocked).slice(-20), blockedCount: r.blockedCount + blocked.length,
+        reason: blocked.length ? reason : r.reason, path: location.pathname,
+      };
+    }
+    if (masked > 0 && !state.interactive) {
+      state.attachInfo = { masked, at: Date.now() };
+      clearTimeout(attachInfoTimer);
+      attachInfoTimer = setTimeout(() => { state.attachInfo = { masked: 0, at: 0 }; render(); }, SC_NOTICE_MS);
+    }
+    if (ui && !ui.popover.hidden) renderPopover();
     render();
-    if (blocked > 0 || unmasked > 0 || !state.interactive) notice(attachMsg(state.attachNotice));
-    clearTimeout(attachNoticeTimer);
-    attachNoticeTimer = setTimeout(() => { state.attachNotice = { masked: 0, blocked: 0, unmasked: 0, reason: "", at: 0 }; render(); }, SC_NOTICE_MS);
+    if (blocked.length || unmasked.length || (masked > 0 && !state.interactive)) notice(attachMsg());
   });
+
+  // ChatGPT の保護入力欄から送ったとき (D-SC-25)。添付は送った文と一緒に出ていったので、添付の警告を消す。
+  // アダプタ (同じ isolated world) が直接呼ぶ。ページのイベントでは届かないので、ページは警告を消せない
+  api.noteSent = function noteSent() { clearAttachRisk(); };
 
   // F-EG-03/04: 原文の持ち出しガード (MAIN world の injected.js) が通信を止めた・伏せたとき。
   // detail は JSON 文字列 (MAIN world のオブジェクトはこの world から読めないため)。
@@ -729,9 +995,9 @@
   }
   async function scan() {
     if (state.enabled || !state.el) return;
-    // Secure Composer が有効なホストでは、下書きは iframe 側。ネイティブ入力欄を走査しても
-    // 空なので警告は出さない (SC が入力隔離を担う)。
-    if (scActive) { if (state.summary.count) { state.summary = { count: 0, items: [] }; render(); } return; }
+    // Secure Composer が有効なホストでは、下書きは iframe 側にあり、ネイティブ入力欄は空。
+    // 警告の件数は iframe が調べて届ける (setScDraftInfo)。ここでは調べず、届いた件数も消さない
+    if (scActive) return;
     const engine = NS.engine;
     if (!engine || typeof engine.maskAggregated !== "function" || engine.ready === false) { scheduleScan(1000); return; }
     const text = readText(state.el);
@@ -742,10 +1008,26 @@
       if (seq !== state.scanSeq) return;
       state.summary = summarizeWarning(res && res.aggregated, state.allowlist, res && res.confidential);
     } catch (err) {
-      LOG("scan failed:", err && err.message);
+      dlog("error", errorFields(err, "draft-scan"));
       state.summary = { count: 0, items: [] };
     }
     render();
+  }
+
+  // F-SC-16: Secure Composer の下書きの、オフのときの検出結果 (種類ごとの件数と、機密と思われる文の件数)。
+  // アダプタ (同じ isolated world) が直接呼ぶ。ページのイベントでは届かないので、ページは警告を消せない
+  api.setScDraftInfo = function setScDraftInfo(p) {
+    if (!scActive) return;
+    state.summary = state.enabled || !p || typeof p !== "object"
+      ? { count: 0, items: [] }
+      : summarizeCounts(p.categories, p.confidential);
+    if (ui && !ui.popover.hidden) renderPopover();
+    render();
+  };
+  // Secure Composer が今、下書きを受け持っているか (保護入力欄が出ている)
+  function scOwnsDraft() {
+    const a = scActive && window.__piiGuardSC && window.__piiGuardSC.adapter;
+    return !!(a && a.active && a.hasOverlay && typeof a.maskDraft === "function");
   }
 
   // ---- 下書きの確認 (ページ側にサイドバーを開いてもらい、承認結果を書き戻す) ---------
@@ -787,12 +1069,12 @@
       if (masked === text) return;
       writeBack(el, masked);
       if (norm(readText(el)) !== norm(masked)) {
-        LOG("write-back mismatch; restoring the original text");
+        dlog("error", { where: "review", name: "InvalidStateError" });
         writeBack(el, text);
         notice("入力欄に書き戻せませんでした");
       }
     } catch (err) {
-      LOG("review failed:", err && err.message);
+      dlog("error", errorFields(err, "review"));
       notice("確認画面でエラーが起きました");
     } finally {
       state.reviewing = false;
@@ -940,8 +1222,7 @@
     if (persistHost) return;
     persistHost = document.createElement("div");
     persistHost.setAttribute("data-pii-guard", "persist-confirm");
-    guardHost(persistHost, HOST_CSS,
-      () => { if (persistCurrent) { LOG("cancelling the pending confirmation after tampering"); finishPersist(false); } });
+    guardHost(persistHost, HOST_CSS, () => { if (persistCurrent) finishPersist(false); }, "confirm");
     const shadow = persistHost.attachShadow({ mode: "closed" });
     shadow.innerHTML = `<style>${PERSIST_STYLE}</style>
       <div class="box" hidden role="dialog" aria-label="PII Guard の確認">
@@ -962,8 +1243,9 @@
     watchVisibility(persistUi.confirm);
     watchVisibility(persistUi.cancel);
     persistUi.confirm.addEventListener("click", (e) => {
-      if (!clickIsSafe(e, persistUi.confirm, persistHost)) { LOG("ignored a confirm click: the dialog is not fully visible"); return; }
-      if (Date.now() - persistShownAt < PERSIST_MIN_VISIBLE_MS) { LOG("ignored a confirm click: the dialog has just appeared"); return; }
+      if (!e || e.isTrusted !== true) return;
+      if (!clickIsSafe(e, persistUi.confirm, persistHost)) { dlog("confirm.click_ignored", { reason: "occluded", layers: describeLayers() }); return; }
+      if (Date.now() - persistShownAt < PERSIST_MIN_VISIBLE_MS) { dlog("confirm.click_ignored", { reason: "too-soon" }); return; }
       finishPersist(true);
     });
     persistUi.cancel.addEventListener("click", (e) => { if (e.isTrusted) finishPersist(false); });
@@ -993,6 +1275,7 @@
     persistUi.sub.textContent = text.sub;
     persistUi.confirm.textContent = text.ok;
     persistUi.box.hidden = false;
+    raise(persistHost);
     persistShownAt = Date.now();
     exportPersistLayout();
     clearTimeout(persistTimer);
@@ -1006,7 +1289,7 @@
     persistUi.box.hidden = true;
     exportPersistLayout();
     if (accepted) {
-      try { await persist(req); } catch (e) { LOG("persist failed:", e && e.message); }
+      try { await persist(req); } catch (e) { dlog("error", errorFields(e, "persist")); }
     }
     showNextPersist();
   }
@@ -1054,9 +1337,11 @@
     render();
     place(true);
     if (!state.enabled) scheduleScan(0);
-    LOG("attached to", el.tagName.toLowerCase() + (el.id ? "#" + el.id : ""));
   }
   function tick() {
+    if (!stale && !contextAlive()) { stale = true; render(); }
+    // 会話が替わったら、前の下書きの添付の警告は消す (D-SC-25)
+    if (attachRiskOn() && location.pathname !== state.attachRisk.path) clearAttachRisk();
     if (!state.el || !state.el.isConnected || !isVisible(state.el)) {
       const el = findComposer();
       if (el !== state.el) attachTo(el);
@@ -1064,6 +1349,7 @@
     } else {
       place(true);
     }
+    checkLayers();
     checkTint();
   }
   let mutationTimer = null;
@@ -1075,6 +1361,7 @@
     tick();
     observer.observe(document.documentElement, { childList: true, subtree: true });
     setInterval(tick, TICK_MS);
+    document.addEventListener("toggle", onToggleEvent, true);
     window.addEventListener("scroll", () => place(false), { passive: true, capture: true });
     window.addEventListener("resize", () => place(false), { passive: true });
     if (window.ResizeObserver) {

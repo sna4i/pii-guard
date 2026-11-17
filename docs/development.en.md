@@ -21,9 +21,11 @@ If you only want to use the extension, see the [README](../README.en.md) at the 
 
 A lightweight gateway and Chrome extension that detect and mask PII on the local machine before it is sent to generative AI services. The browser extension (Chrome MV3) intercepts outbound traffic on Claude.ai, ChatGPT, Gemini, and Manus and detects PII. Optionally, a FastAPI gateway (Docker) can be used for multi-stage analyzers based on Presidio, SudachiPy, and preset regular expressions; connecting a local LLM (Ollama, LM Studio, or llama.cpp) adds context-aware detection and an AI-replace mode (v0.5.0+). Detections are surfaced in a sidebar right before the send fires, and only confirmed items are transmitted as a masked payload. Nothing is sent to a third-party server.(This does not guarantee 100% detection. Please use it solely as a supplementary tool.)
 
-The extension is distributed on the Chrome Web Store, and there is a separate development build. See the [CHANGELOG](../browser-extension/CHANGELOG.md) for what changed in each version and [TODO.md](../TODO.md) for the roadmap.
+The extension is distributed on the Chrome Web Store, and there is a separate development build. See the [CHANGELOG](../browser-extension/CHANGELOG.md) for what changed in each version.
 
 Every push is checked for machine-specific paths, personal data and secrets; see [prepush-check.md](./prepush-check.md) (Japanese). After cloning, run `git config core.hooksPath .githooks` once.
+
+Design documents, research notes, plans and release runbooks live in the private repository `sna4i/pii-guard-internal`. The paths that code and test comments cite — `docs/release-1.7.1.md`, `docs/composer-toggle.md`, `docs/diagnostic-log.md`, `docs/security/…`, `TODO.md` — point there, as do the decision ids (`D-…`, `T-…`). `.gitignore` ignores those paths, so keeping them locally never puts them in the public repository.
 
 ## Table of contents
 
@@ -547,7 +549,7 @@ docker exec -it ollama ollama pull qwen3:4b
 
 ### Recommended models (v0.5.0+)
 
-The system prompt for assist mode is the same for every input. It has examples in both Japanese and English, and one example shows that instructions written inside the input are ignored. The model returns only values and labels, without reasons. Tailoring the prompt to the model size or to the regex findings was tried and lowered accuracy, so it is not used. The design and the evaluation results are in [llm-prompt-optimization.md](./llm-prompt-optimization.md) (Japanese).
+The system prompt for assist mode is the same for every input. It has examples in both Japanese and English, and one example shows that instructions written inside the input are ignored. The model returns only values and labels, without reasons. Tailoring the prompt to the model size or to the regex findings was tried and lowered accuracy, so it is not used.
 
 After changing the prompt, compare it with the current one on a real LLM:
 
@@ -749,12 +751,11 @@ pii-guard/
 │   ├── mcp-stdio.sh            MCP stdio wrapper (Docker-backed)
 │   └── generate-icons.py       extension icon generator
 ├── tests/                      pytest suite
-├── docs/                       requirements and design docs
+├── docs/                       developer guide, pre-push check, privacy policy, store screenshots
 ├── docker-compose.yml
 ├── Dockerfile
 ├── pyproject.toml
 ├── uv.lock                     dependency lockfile (committed)
 ├── CHANGELOG.md                root CHANGELOG (gateway side)
-├── TODO.md                     roadmap
 └── README.md                   this file
 ```

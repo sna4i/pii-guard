@@ -136,33 +136,41 @@
   /**
    * 文字列フィールドの中身を書き換える。値 (バイト列) を含むフィールドについて、入れ子として読めて
    * 中で書き換わればそれを使い、だめなら文字列として書き換える。長さの入れ子は直して組み直す。
+   * ただし、飛ばしたフィールドを中に持つフィールドは、文字列として書き換えない (D-EG-09)。文字列として
+   * 書き換えると、飛ばしたフィールド (確認画面で決めた本文) の値まで伏せ、中の長さを壊すため。
    * @param {Uint8Array} u8
    * @param {{mayContain:(Uint8Array)=>boolean, rewrite:(string)=>string}} rw
    * @param {(path:number[])=>boolean} [skip] この道筋のフィールドは触らない (確認画面で決めた本文など)
-   * @returns {{bytes:Uint8Array, changed:boolean, stuck:boolean}|null} 全体が protobuf で読めなければ null。
-   *   stuck = 値を含むのに書き換えられない (文字列でないバイト列) フィールドがあった
+   * @returns {{bytes:Uint8Array, changed:boolean, stuck:boolean, skipped:boolean}|null} 全体が protobuf で読めなければ null。
+   *   stuck = 値を含むのに書き換えられない (文字列でないバイト列) フィールドがあった。
+   *   skipped = skip に当たって飛ばしたフィールドが、調べた中 (入れ子を含む) にあった
    */
   function rewriteProto(u8, rw, skip, path = [], depth = 0) {
     const fields = parseMessage(u8);
     if (!fields) return null;
     let changed = false;
     let stuck = false;
+    let skipped = false;
     const parts = [];
     let last = 0;
     for (const f of fields) {
       if (f.wt !== 2) continue;
       const p = path.concat(f.num);
       const val = u8.subarray(f.valStart, f.end);
-      if ((skip && skip(p)) || !rw.mayContain(val)) continue;
+      if (skip && skip(p)) { skipped = true; continue; }
+      if (!rw.mayContain(val)) continue;
       let next = null;
       let fieldStuck = false;
+      let innerSkipped = false;
       if (depth < 24 && val.length >= 2) {
         const inner = rewriteProto(val, rw, skip, p, depth + 1);
         if (inner && inner.changed) next = inner.bytes;
         if (inner && inner.stuck) fieldStuck = true;
+        if (inner && inner.skipped) innerSkipped = true;
       }
-      if (!next) {
-        // 入れ子の中で書き換えられなかった: このフィールドを文字列として書き換える
+      if (innerSkipped) skipped = true;
+      if (!next && !innerSkipped) {
+        // 入れ子の中で書き換えられず、飛ばしたフィールドも中に無い: このフィールドを文字列として書き換える
         const t = asText(val);
         if (t !== null) {
           const t2 = rw.rewrite(t);
@@ -177,9 +185,9 @@
         last = f.end;
       }
     }
-    if (!changed) return { bytes: u8, changed: false, stuck };
+    if (!changed) return { bytes: u8, changed: false, stuck, skipped };
     parts.push(u8.subarray(last));
-    return { bytes: concat(parts), changed: true, stuck };
+    return { bytes: concat(parts), changed: true, stuck, skipped };
   }
 
   // ---- Base64 ---------------------------------------------------------------------
@@ -440,14 +448,20 @@
   }
 
   // ---- 送信アダプタ (形を知っている送信は、本文を取り出して確認画面とマスクに載せる) ----------
-  // 取り出し: 決まった道筋の文字列 + (形が変わったとき用に) 下書きと同じ中身の文字列フィールド
+  // 取り出し: 決まった道筋の文字列 + (形が変わったとき用に) 下書きと同じ中身の文字列フィールド (救済の道)。
+  // 救済の道は、道筋の各段を {n, k} (n 番の k 番目の出現。pick() と同じ数え方) で記録する。番号だけだと、
+  // 繰り返しの 2 つ目以降で見つけた欄でも 1 つ目の出現を指し、伏せた本文を書く先も、写しで空にする欄も
+  // 確認に出ていない別の欄になる (D-EG-09)
   function findTextFieldsEqual(u8, wanted, path = [], depth = 0, out = []) {
     const fields = parseMessage(u8);
     if (!fields || depth > 24) return out;
+    const seen = new Map(); // 番号 → この階層で、ここまでに出た長さ付きの欄の数
     for (const f of fields) {
       if (f.wt !== 2) continue;
+      const k = seen.get(f.num) || 0;
+      seen.set(f.num, k + 1);
       const val = u8.subarray(f.valStart, f.end);
-      const p = path.concat(f.num);
+      const p = path.concat({ n: f.num, k });
       const t = asText(val);
       if (t !== null && wanted.has(squash(t))) { out.push({ path: p, text: t }); continue; }
       if (val.length >= 2) findTextFieldsEqual(val, wanted, p, depth + 1, out);
@@ -481,7 +495,23 @@
 
   // 本文 (確認画面で利用者が決めたもの) 以外のフィールドに残る検出済みの値を伏せる
   const rwOf = (sens) => ({ mayContain: (v) => sens.mayContainBytes(v), rewrite: (t) => sens.scrubText(t) });
-  const skipOf = (fields) => { const set = new Set(fields.map((f) => f.path.join("."))); return (p) => set.has(p.join(".")); };
+  // rewriteProto() の道筋は番号だけなので、本文の欄の道筋 (数の段も {n, k} の段も) を番号だけにして比べる。
+  // 本文の欄と番号の道筋が同じ欄は、繰り返しのどの出現も書き換えずに飛ばす (確認に出ていない出現も)
+  const numbersOf = (path) => path.map((s) => (typeof s === "number" ? s : s.n)).join(".");
+  const skipOf = (fields) => { const set = new Set(fields.map((f) => numbersOf(f.path))); return (p) => set.has(p.join(".")); };
+  // 伏せたあと、本文の欄を空にした写しに検出済みの値が残っているか (D-EG-09)。空にするのは、利用者が決めた
+  // 出現だけ (道筋の数の段は最初の出現、{n, k} の段は n 番の k 番目の出現。pick() と同じ)。本文と同じ番号の
+  // ほかの出現 (確認に出ていない欄) は rewriteProto() に飛ばされたまま写しに残るので、値があれば止める。
+  // 決まった道筋でも救済の道でも同じ。長さ付きでない欄の値も伏せられないので、残っていれば止める。
+  // 本文の欄が見つからなければ、調べられないので止める
+  function leftOutside(u8, fields, sens) {
+    let rest = u8;
+    for (const f of fields) {
+      rest = setAtPath(rest, f.path, new Uint8Array(0));
+      if (!rest) return true;
+    }
+    return sens.mayContainBytes(rest);
+  }
 
   const adapters = {
     // Claude: Connect の unary (application/proto)。2026-10-18 実測で本文は root.2.3
@@ -518,7 +548,8 @@
       scrubOthers(m, sens) {
         if (!sens || !sens.size || !sens.mayContainBytes(m.bytes)) return { model: m, stuck: false };
         const r = rewriteProto(m.bytes, rwOf(sens), skipOf(m.fields));
-        return { model: r && r.changed ? { ...m, bytes: r.bytes } : m, stuck: !r || r.stuck };
+        const model = r && r.changed ? { ...m, bytes: r.bytes } : m;
+        return { model, stuck: !r || r.stuck || leftOutside(model.bytes, m.fields, sens) };
       },
     },
     // Gemini: WebChannel のフォーム。各 reqN___data__ が Base64 の protobuf。2026-10-18 実測で本文は root.2.9.1
@@ -548,9 +579,10 @@
         if (!sens || !sens.size) return { model: m, stuck };
         m.wc.items.forEach((it, k) => {
           if (!sens.mayContainBytes(it.bytes)) return;
-          const r = rewriteProto(it.bytes, rwOf(sens), skipOf(m.fields.filter((f) => f.item === k)));
+          const decided = m.fields.filter((f) => f.item === k);
+          const r = rewriteProto(it.bytes, rwOf(sens), skipOf(decided));
           if (r && r.changed) it.bytes = r.bytes;
-          if (!r || r.stuck) stuck = true;
+          if (!r || r.stuck || leftOutside(it.bytes, decided, sens)) stuck = true;
         });
         return { model: m, stuck };
       },

@@ -67,8 +67,10 @@
   // ``data-row-key`` on each checkbox AND as the entry in the
   // ``maskedEntityKeys`` set the caller receives so a downstream
   // consumer can correlate UI selections with the aggregated rows.
+  // Pro のカスタムルールの行 (custom の印) は、LLM の同じ値の行と並ぶことがあるので、鍵を分ける (同じ鍵だと、まとめての
+  // 切り替えで片方の行のチェックの表示だけが古いまま残る)。印の無い行の鍵は今のまま
   function rowKeyOf(entity) {
-    return `${String(entity.category || "")}|${String(entity.value || "")}`;
+    return `${String(entity.category || "")}|${String(entity.value || "")}${entity.custom === true ? "|custom" : ""}`;
   }
 
   // Pure function — used both at build-time (initial preview) and on
@@ -434,6 +436,18 @@
       font-size: 10px;
       line-height: 1.5;
       opacity: 0.6;
+    }
+    /* 確認の画面の上に出す一文 (show の opts.notice)。検出が全部は終わっていないことなどを、
+       一覧より先に読ませる。機密の警告と同じく、操作するものではなく読むもの */
+    .notice {
+      flex: 0 0 auto;
+      margin: 0 0 10px;
+      padding: 8px 12px;
+      border-left: 3px solid var(--sev-high);
+      border-radius: 4px;
+      background: var(--sev-high-bg, rgba(217, 119, 6, 0.08));
+      font-size: 12px;
+      line-height: 1.5;
     }
 
     .categories {
@@ -1399,12 +1413,15 @@
     const confidentialHits = Array.isArray(aggregatedResponse?.confidential)
       ? aggregatedResponse.confidential
       : [];
+    // 確認の画面の上に出す一文 (injected.js が渡す。例: Pro のカスタムルールの時間切れ)。文字としてだけ出す
+    const notice = typeof opts.notice === "string" ? opts.notice : "";
 
     // Short-circuit only when nothing to review AND no background LLM
     // work in flight — otherwise we'd miss entities the LLM will add.
     // 機密警告だけがある場合も開く: マスクすべき span はゼロでも
     // 「この文は送っていいのか」を問う価値があるのがこの機能の要点。
-    if (aggregated.length === 0 && confidentialHits.length === 0 && !llmPending) {
+    // 一文 (notice) があるときも開く: 調べきれていないことを知らせずに送らない
+    if (aggregated.length === 0 && confidentialHits.length === 0 && !llmPending && !notice) {
       return {
         accepted: true,
         maskedEntityKeys: new Set(),
@@ -1586,6 +1603,14 @@
 
       const body = document.createElement("div");
       body.className = "body";
+
+      if (notice) {
+        const noticeEl = document.createElement("div");
+        noticeEl.className = "notice";
+        noticeEl.setAttribute("role", "status");
+        noticeEl.textContent = notice;
+        body.appendChild(noticeEl);
+      }
 
       const bulkBar = document.createElement("div");
       bulkBar.className = "bulk-bar";
@@ -2536,7 +2561,9 @@
         // keeps the sidebar visually coherent so the user knows
         // the analysis actually completed rather than silently
         // vanishing.
-        if (categoryOrder.length === 0) {
+        // 一文 (notice) があるとき (Pro のカスタムルールを当て終えられなかった) は出さない。調べきれていないのに
+        // 「検出されませんでした — そのまま送信できます」と言わない
+        if (categoryOrder.length === 0 && !notice) {
           const emptyMsg = document.createElement("div");
           emptyMsg.className = "empty";
           emptyMsg.textContent = isDraft ? "✓ PII は検出されませんでした" : "✓ PII は検出されませんでした — そのまま送信できます";
@@ -2780,6 +2807,11 @@
       let previousForcelist = [];
       let previousForceKeys = null; // V-02: 直前の「常に伏せる語」の検出 (label|value)
 
+      // Pro のカスタムルールの行 (ISOLATED world が custom の印を付けた行) から組み直す検出には、同じ印を付ける。
+      // 集める所 (aggregate.js の aggregateDetections) は、印のある検出を人名の絞り込みで落とさない。印が無いと、
+      // 組み直すたびに「佐々木 ことみ」のような名前が PERSON のルールの行が消え、原文のまま送られる。印の無い行は今のまま
+      const customMark = (row) => (row.custom === true ? { custom: true } : {});
+
       // V-02: 「常に伏せる語」のリストは MAIN world に来ないので、ISOLATED world が返した
       // 「この文の中の位置」(ufmDets) で再計算する。
       function recomputeWithDetections(ufmDets) {
@@ -2793,7 +2825,7 @@
           if (!row || typeof row.label !== "string" || row.label.startsWith("USER_DEFINED_")) continue;
           for (const pos of Array.isArray(row.positions) ? row.positions : []) {
             if (!Array.isArray(pos) || pos.length < 2) continue;
-            baselineDets.push({ entity_type: row.label, start: Number(pos[0]), end: Number(pos[1]), text: String(row.value || ""), score: 1.0, action: row.masked === false ? "allowed" : "masked" });
+            baselineDets.push({ entity_type: row.label, start: Number(pos[0]), end: Number(pos[1]), text: String(row.value || ""), score: 1.0, action: row.masked === false ? "allowed" : "masked", ...customMark(row) });
           }
         }
         const dets = (Array.isArray(ufmDets) ? ufmDets : []).filter((d) => d && typeof d.entity_type === "string" && Number.isInteger(d.start) && Number.isInteger(d.end));
@@ -2849,6 +2881,7 @@
               text: String(row.value || ""),
               score: 1.0,
               action: row.masked === false ? "allowed" : "masked",
+              ...customMark(row),
             });
           }
         }

@@ -20,9 +20,11 @@
       load("userForceMask", "./user-force-mask");
       load("onnxDetector", "./onnx-detector");
       load("confidential", "./confidential");
+      load("proRules", "./pro-rules");
+      load("customRules", "./custom-rules");
     }
     const ns = (root && root.__localMaskMCP && root.__localMaskMCP.engine) || {};
-    for (const k of ["patterns","classification","severity","categories","aggregate","forceMask","blocklist","userForceMask","onnxDetector","confidential"]) {
+    for (const k of ["patterns","classification","severity","categories","aggregate","forceMask","blocklist","userForceMask","onnxDetector","confidential","proRules","customRules"]) {
       d[k] = d[k] || ns[k];
     }
     return d;
@@ -120,22 +122,63 @@
     return { norm, map };
   }
 
+  // Pro かどうか (docs/pro-license.md の D-PRO-06、D-PRO-07)。決めるのは Service Worker のライセンス管理で、
+  // エンジンが動く場所 (content script・ページの世界・保護入力欄) が、その結果を setProEnabled() で渡す。
+  // 真偽値の true だけを Pro として扱う
+  let proEnabled = false;
+  function setProEnabled(on) { proEnabled = on === true; }
+  function isProEnabled() { return proEnabled; }
+
+  // Pro のカスタムルール (Pro Phase 2 の設計 (P1))。engine/custom-rules.js の compileRules で組み立てたものを持つ。
+  // 組み立てと温め (下) は上限いっぱいで数百ミリ秒かかるので、送るたびではなく、ルールが変わったときに
+  // setCustomRules で 1 回だけ行う。持つのは、有効で正しいものを先頭から上限の数まで (オフのもの・正しくないものは
+  // 持たない)。返すのは持った数。当てるのは Pro のときだけ (collectCustom)
+  //
+  // 温め: V8 は正規表現を、初めの照合ではバイトコードにして解釈し、次の照合で機械語に組み立てる。どちらも 1 バイトの
+  // 文字列 (ASCII だけ) と 2 バイトの文字列 (日本語を含む) で別々に作る。上限いっぱいでは、この組み立てだけで
+  // 送信の時間の上限 (100 ミリ秒) を超えるので、持つときに済ませる。ASCII で解釈 (日本語の語は 1 バイトの文字列に
+  // 当たりえないので軽い)、日本語で 2 バイトの機械語、ASCII で 1 バイトの機械語の順。送るときは、温めた正規表現を
+  // 作り直さずに使う (作り直すと、GC のあとで組み立て直しになる。matchNormalized の reuse)
+  const WARM_SUBJECTS = ["a", "あ", "a"];
+  let customPatterns = [];
+  function setCustomRules(rules) {
+    const deps = resolveDeps();
+    if (!deps.customRules) throw new Error("mask-mcp engine: custom-rules missing");
+    const compiled = deps.customRules.compileRules(rules);
+    for (const { pattern } of compiled) {
+      for (const subject of WARM_SUBJECTS) { pattern.lastIndex = 0; pattern.test(subject); }
+    }
+    customPatterns = compiled;
+    return customPatterns.length;
+  }
+  function getCustomRuleCount() { return customPatterns.length; }
+
   function collectDetections(text, options) {
     const deps = resolveDeps();
     if (!deps.patterns) throw new Error("mask-mcp engine: patterns missing");
     const disabled = new Set((options && options.disabledCategories) || []);
-    return matchPatterns(text, deps.patterns.getPresetPatterns(disabled));
+    const preset = deps.patterns.getPresetPatterns(disabled);
+    // ルールを読む所で Pro のルールパックを足す。Pro でなければ今と同じ配列をそのまま使う
+    const pro = proEnabled && deps.proRules ? deps.proRules.getProPatterns(disabled) : [];
+    return matchPatterns(text, pro.length ? preset.concat(pro) : preset);
   }
 
   // 与えられたパターン群を NFKC 正規化テキストに当て、元テキストの座標で返す。
   // collectDetections と、機密文の中だけで使う数値パターンが共有する。
   function matchPatterns(text, patternList) {
-    const { norm, map } = nfkcWithMap(text);
+    return matchNormalized(text, nfkcWithMap(text), patternList);
+  }
+
+  // matchPatterns の照合の部分。整えた本文 (nfkcWithMap の { norm, map }) を受けるので、整えるのを 1 回にしたまま
+  // パターンを分けて当てられる (カスタムルールは、1 本ごとに時間を見る)。reuse が true なら、渡した正規表現を
+  // 作り直さずに使う (エンジンだけが持つカスタムルールの正規表現。setCustomRules で温めた機械語を保つため)
+  function matchNormalized(text, { norm, map }, patternList, reuse) {
     const identity = norm === text;
     const out = [];
     for (const { entity_type, pattern, validate } of patternList) {
       // Clone so module-level regex lastIndex is never mutated.
-      const re = new RegExp(pattern.source, pattern.flags);
+      const re = reuse ? pattern : new RegExp(pattern.source, pattern.flags);
+      if (reuse) re.lastIndex = 0; // 前の照合が途中で止まっていても、頭から当てる
       let m;
       while ((m = re.exec(norm)) !== null) {
         if (m.index === re.lastIndex) { re.lastIndex += 1; continue; }
@@ -247,40 +290,124 @@
     return dets;
   }
 
+  // Pro のカスタムルールの検出と、その状態 ("off" / "ok" / "partial")。検出は今の検出と分けて finishPipeline に渡し
+  // (普通名詞のブロックリストで落とさないため)、状態は今の ml と同じく maskSanitize・maskAggregated の結果まで運ぶ。
+  // Pro でないか、ルールが 0 個なら、カスタムの処理を通らず (時計も見ない)、検出は空で "off"
+  function collectCustom(text, opts, deps) {
+    if (!proEnabled || customPatterns.length === 0) return { dets: [], status: "off" };
+    return collectCustomDetections(text, opts, deps);
+  }
+
+  const nowMs = () => (typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now());
+
+  // カスタムルールを当てる。collectDetections の中で当てないのは、途中で時間を見るため (Pro のルールパックの口は、
+  // 今のルールとつなげて 1 回で当てる)。正規表現の 1 回の照合は途中で止められないので、時間はルールとルールの
+  // あいだで見る: 1 本目を含め、各ルールの前に、始めからの時間が上限 (opts.customBudgetMs、既定は
+  // custom-rules.js の LIMITS.sendBudgetMs) に届いていたら (>=)、残りを当てずに "partial" を返す。上限 0 なら 1 本も当てない。
+  // 本文を整える (nfkcWithMap) のは 1 回だけで、その時間も上限に数える。組み立てた正規表現は、この整えた本文に
+  // 当てる前提で作ってある (engine/custom-rules.js)。止めた分類 (disabledCategories) は、ルールの名前 (category) で外す。
+  // opts.clock はミリ秒の時計 (テスト用。既定は performance.now)
+  // 検出には custom: true の印を付ける。集める所 (aggregate.js) が、名前で行を捨てる絞り込み (人名の絞り込み) から外すため。
+  // 印は真偽値だけで、Pro でルールが当たったときにだけ付く (無料版の検出の形は変わらない)
+  function collectCustomDetections(text, opts, deps) {
+    const disabled = new Set(opts.disabledCategories || []);
+    const rules = customPatterns.filter((p) => !disabled.has(p.category));
+    const clock = typeof opts.clock === "function" ? opts.clock : nowMs;
+    const budget = Number.isFinite(opts.customBudgetMs) ? opts.customBudgetMs : deps.customRules.LIMITS.sendBudgetMs;
+    const start = clock();
+    const normalized = nfkcWithMap(text);
+    let dets = [];
+    for (const rule of rules) {
+      if (clock() - start >= budget) return { dets, status: "partial" };
+      dets = dets.concat(matchNormalized(text, normalized, [rule], true).map((d) => ({ ...d, custom: true })));
+    }
+    return { dets, status: "ok" };
+  }
+
   // Apply the post-collection filters in a fixed order: blocklist →
   // minScore → enabledPiiClasses → overlap resolver. Idempotent enough
   // that calling it after merging in async ML detections still yields
   // the right answer.
-  function finishPipeline(dets, opts, deps) {
+  // Pro のカスタムルールの検出 (customDets) は、ブロックリストの絞り込みのあとで足す。ブロックリストは自動の検出の
+  // 誤検出を抑えるためのもので、利用者が書いたルールを黙って無効にしない (サイドバーから足す「常に伏せる語」は、
+  // 誤って足すことがあるので、これまでどおりブロックリストに負ける)。minScore・enabledPiiClasses・重なりの解消は、
+  // 今の検出と同じく効く。重なりの解消の前に、カスタムの検出がまたがる組をまとめる (mergeStraddlingCustom)
+  function finishPipeline(dets, opts, deps, customDets, text) {
     const minScore = typeof opts.minScore === "number" ? opts.minScore : 0.0;
     const bl = opts.commonNounBlocklist instanceof Set ? opts.commonNounBlocklist
       : new Set(opts.commonNounBlocklist || deps.blocklist.DEFAULT_COMMON_NOUN_BLOCKLIST);
     if (bl.size > 0) dets = dets.filter((d) => !bl.has(d.text));
+    if (customDets.length > 0) dets = dets.concat(customDets);
     if (minScore > 0.0) dets = dets.filter((d) => d.score >= minScore);
     if (opts.enabledPiiClasses) {
       const en = new Set(opts.enabledPiiClasses);
       dets = dets.filter((d) => en.has(deps.classification.classificationFor(d.entity_type)));
     }
+    if (customDets.length > 0) dets = mergeStraddlingCustom(dets, new Set(customDets), text);
     return resolveOverlaps(dets);
   }
 
+  // カスタムの検出が、今の検出とまたがって重なるときは、重なりでつながった組を、全体を合わせた 1 つの範囲にまとめる。
+  // resolveOverlaps は左端、次に長さの順に取り、負けた範囲を丸ごと捨てるので、まとめないと、カスタムが今の検出の頭に
+  // 食い込むと今の検出の尻尾が残り (「注文 ORD123-4567」に ORD\d+ で「<ORDER_1>-4567」)、尻尾からはみ出すとカスタムが
+  // 捨てられる。Pro が無料版より弱く伏せないように、つながった組 (A と B、B と C が重なれば A・B・C) のうち、カスタムを
+  // 含み、1 つがほかを全部包んではいないものだけをまとめる。名前は、組の中でいちばん左から始まるカスタムの検出の名前。
+  // カスタムを含まない組と、1 つがほかを全部包む組は、そのまま resolveOverlaps に任せる (包むものが残るので、かけらは
+  // 出ない)。custom は、カスタムの検出 (オブジェクトそのもの) の集合。範囲は半開区間で、接するだけなら重ならない。
+  // まとめた検出にも、カスタムの検出の印 (custom: true) を付ける
+  function mergeStraddlingCustom(dets, custom, text) {
+    const sorted = dets.slice().sort((a, b) => a.start - b.start || b.end - a.end);
+    const out = [];
+    for (let i = 0; i < sorted.length;) {
+      // i から始まる、重なりでつながった組 [i, j) と、その全体の範囲 [start, end)
+      const start = sorted[i].start;
+      let end = sorted[i].end;
+      let j = i + 1;
+      while (j < sorted.length && sorted[j].start < end) { end = Math.max(end, sorted[j].end); j += 1; }
+      const group = sorted.slice(i, j);
+      const first = group.find((d) => custom.has(d)); // 左から (同じ位置なら長い順に) 並べてあるので、いちばん左のカスタム
+      if (first && !group.some((d) => d.start === start && d.end === end)) {
+        out.push({ ...first, start, end, text: text.slice(start, end), custom: true });
+      } else {
+        out.push(...group);
+      }
+      i = j;
+    }
+    return out;
+  }
+
+  // Returns { dets, custom }; custom.status is "off" / "ok" / "partial"
+  // (collectCustom) so callers can tell when custom rules ran out of time.
   function runPipeline(text, opts, deps) {
-    return finishPipeline(collectRawDetections(text, opts, deps), opts, deps);
+    const dets = collectRawDetections(text, opts, deps);
+    const custom = collectCustom(text, opts, deps);
+    return { dets: finishPipeline(dets, opts, deps, custom.dets, text), custom: { status: custom.status } };
   }
 
   // Async variant: same as runPipeline but also invokes the ML detector
   // (transformers.js NER via the service worker) when opts.mlEnabled is
-  // truthy. ML failures degrade silently — regex/dict detections always
-  // survive even if the SW is asleep / WASM hasn't loaded yet.
-  async function runPipelineAsync(text, opts, deps) {
+  // truthy. ML failures degrade — regex/dict detections always survive
+  // even if the SW is asleep / WASM hasn't loaded yet — and the wait is
+  // capped (opts.mlTimeoutMs, docs/release-1.7.1.md D-SC-09) so a model
+  // that is still loading can never stall a send. Returns { dets, ml, custom };
+  // ml.status is "off" / "ok" / "timeout" / "error" / "unavailable"
+  // (onnx-detector.js) so callers can tell the user when ML was skipped.
+  async function runPipelineWithMl(text, opts, deps) {
     let dets = collectRawDetections(text, opts, deps);
+    const custom = collectCustom(text, opts, deps);
+    let ml = { status: "off" };
     if (opts.mlEnabled && deps.onnxDetector) {
       try {
-        const mlDets = await deps.onnxDetector.detectViaMl(text);
+        const r = await deps.onnxDetector.detectViaMl(text, { timeoutMs: opts.mlTimeoutMs });
+        ml = { status: r && typeof r.status === "string" ? r.status : "error" };
+        const mlDets = r && Array.isArray(r.detections) ? r.detections : [];
         if (mlDets.length > 0) dets = dets.concat(mlDets);
-      } catch (_) { /* fall through with regex-only */ }
+      } catch (_) { ml = { status: "error" }; /* fall through with regex-only */ }
     }
-    return finishPipeline(dets, opts, deps);
+    return { dets: finishPipeline(dets, opts, deps, custom.dets, text), ml, custom: { status: custom.status } };
+  }
+  async function runPipelineAsync(text, opts, deps) {
+    return (await runPipelineWithMl(text, opts, deps)).dets;
   }
 
   // 「意味として機密」な文の警告。**検出 span とは別枠で返す**。
@@ -320,9 +447,9 @@
     }
     const kws = opts.forceMaskKeywords || deps.forceMask.DEFAULT_KEYWORDS;
     const cats = opts.forceMaskCategories || deps.forceMask.DEFAULT_CATEGORIES;
-    const dets = opts.mlEnabled
-      ? await runPipelineAsync(text, opts, deps)
-      : runPipeline(text, opts, deps);
+    const { dets, ml, custom } = opts.mlEnabled
+      ? await runPipelineWithMl(text, opts, deps)
+      : { ...runPipeline(text, opts, deps), ml: { status: "off" } };
     let agg = deps.aggregate.aggregateDetections(dets);
     const fired = deps.forceMask.detectForceMaskTrigger(text, kws);
     const forced = deps.forceMask.resolveForcedCategories(fired, cats);
@@ -331,6 +458,8 @@
       original_text: text, aggregated: agg, audit_id: generateAuditId(),
       force_masked_categories: forced,
       confidential: collectConfidential(text, opts, deps),
+      ml,
+      custom,
     };
   }
 
@@ -338,9 +467,9 @@
   async function maskSanitize(text, options) {
     const opts = options || {};
     const deps = resolveDeps();
-    const dets = opts.mlEnabled
-      ? await runPipelineAsync(text, opts, deps)
-      : runPipeline(text, opts, deps);
+    const { dets, ml, custom } = opts.mlEnabled
+      ? await runPipelineWithMl(text, opts, deps)
+      : { ...runPipeline(text, opts, deps), ml: { status: "off" } };
     const sanitized = deps.aggregate.applyTagMask(text, dets);
     const enriched = dets.map((d) => ({
       entity_type: d.entity_type, start: d.start, end: d.end, score: d.score,
@@ -352,10 +481,12 @@
       original_length: text.length, sanitized_text: sanitized,
       detections: enriched, forwarded: false,
       confidential: collectConfidential(text, opts, deps),
+      ml,
+      custom,
     };
   }
 
-  const api = { maskAggregated, maskSanitize, collectDetections, resolveOverlaps, runPipeline, runPipelineAsync };
+  const api = { maskAggregated, maskSanitize, collectDetections, resolveOverlaps, runPipeline, runPipelineAsync, setProEnabled, isProEnabled, setCustomRules, getCustomRuleCount };
   if (typeof module === "object" && module.exports) module.exports = api;
   if (root && typeof root === "object") {
     root.__localMaskMCP = root.__localMaskMCP || {};

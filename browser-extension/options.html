@@ -11,7 +11,109 @@
       <span class="version" id="version">v0.4.0</span>
     </header>
 
-    <main>
+    <nav class="tabs" role="tablist" aria-label="設定画面のタブ">
+      <button type="button" class="tab" role="tab" id="tabbtn-settings" aria-controls="tab-settings" aria-selected="true">設定</button>
+      <button type="button" class="tab" role="tab" id="tabbtn-log" aria-controls="tab-log" aria-selected="false" tabindex="-1">ログ</button>
+    </nav>
+
+    <main id="tab-settings" role="tabpanel" aria-labelledby="tabbtn-settings">
+      <!-- Pro 版 (docs/pro-license.md の F-PRO-07)。出す文とボタンは license/license-view.js が決める。
+           ExtensionPay に登録する前 (ID が仮) は、まるごと出さない (D-PRO-12) -->
+      <section class="card" id="pro-card" hidden>
+        <h2>PII Guard Pro</h2>
+        <p class="hint">
+          「Pro にアップグレード」か「ログイン」を押したとき (API キーを作ります) と、そのあと購入状態を確かめるときに、決済サービス (ExtensionPay) と通信します (Chrome の同期で、同じアカウントの別の端末も含みます)。入力した文章や検出結果は送りません。
+          購入したあとは「購入状態を更新」を押してください。
+        </p>
+        <div class="form-row">
+          <span class="form-label">今のプラン</span>
+          <span id="pro-status" class="pro-status" aria-live="polite"></span>
+        </div>
+        <p id="pro-note" class="pro-note" hidden></p>
+        <div class="bulk-actions">
+          <button id="pro-upgrade" type="button" class="btn-primary" hidden>Pro にアップグレード</button>
+          <button id="pro-login" type="button" class="btn-secondary" hidden>購入済みの方はこちら (ログイン)</button>
+          <button id="pro-refresh" type="button" class="btn-secondary" hidden>購入状態を更新</button>
+        </div>
+      </section>
+
+      <!-- Pro のカスタムルール (Pro Phase 2 の設計 (P1))。動きは options-custom-rules.js。出し方は #pro-card と同じ
+           (options.js の renderProLicense から渡す): ExtensionPay に登録する前 (ID が仮) は、まるごと出さない。
+           Pro でないときは案内を出して、足す・変える操作を止める (書き出しと削除は使える)。一覧・エラー・結果は textContent だけで組む。
+           確かめは options-rules-worker.js (Worker) で走る -->
+      <section class="card" id="custom-rules-card" hidden>
+        <h2>カスタムルール</h2>
+        <p class="hint">自社の ID・プロジェクト名・顧客名など、ふつうの検出では拾えない語を、単語リストか正規表現で足せます。当たった部分は、伏せ字の名前が PROJECT なら &lt;PROJECT_1&gt; のように置き換わります。ルールはこの端末の中だけに保存し、外には送りません。</p>
+        <p id="cr-pro-note" class="pro-note" hidden>カスタムルールは Pro の機能です</p>
+        <p class="hint">カスタムルールを使っているあいだは、LLM の置き換えモードは使わず、いつもの伏せ方で送ります</p>
+
+        <div class="list-header">
+          <span>登録済みのルール</span>
+          <span id="cr-count" class="count-badge">0 / 50 件</span>
+        </div>
+        <div id="cr-list" class="entries-list"></div>
+
+        <h3 id="cr-form-title" class="cr-subtitle">ルールを追加</h3>
+        <div class="form-row cr-field">
+          <label class="form-label" for="cr-kind">種類</label>
+          <select id="cr-kind" class="cr-input">
+            <option value="words">単語リスト</option>
+            <option value="regex">正規表現</option>
+          </select>
+        </div>
+        <div class="form-row cr-field">
+          <label class="form-label" for="cr-label">伏せ字の名前</label>
+          <input type="text" id="cr-label" class="cr-input cr-mono" placeholder="CUSTOM" maxlength="32" autocomplete="off" spellcheck="false" />
+          <small class="hint-inline">英大文字で始め、英大文字・数字・_ だけで 32 文字までです。空なら CUSTOM になります</small>
+        </div>
+        <div id="cr-regex-fields" hidden>
+          <div class="form-row cr-field">
+            <label class="form-label" for="cr-pattern">正規表現</label>
+            <input type="text" id="cr-pattern" class="cr-input cr-mono" placeholder="例: ACME-\d{4}" autocomplete="off" spellcheck="false" />
+            <small class="hint-inline">200 文字までです。本文は、全角の英数字を半角に直してから照合します</small>
+          </div>
+          <div class="form-row">
+            <label class="form-label" for="cr-ignore-case">大文字と小文字を区別しない</label>
+            <input type="checkbox" id="cr-ignore-case" />
+          </div>
+        </div>
+        <div id="cr-words-fields">
+          <div class="form-row cr-field">
+            <label class="form-label" for="cr-words">語 (1 行に 1 つ)</label>
+            <textarea id="cr-words" class="cr-input cr-mono" rows="5" placeholder="例: アルファ計画" spellcheck="false"></textarea>
+            <small class="hint-inline">500 語まで、1 語 100 文字までです。ACME と書けば、本文の全角の ＡＣＭＥ にも当たります</small>
+            <small class="hint-inline">大文字と小文字は区別します (区別しないときは正規表現で ignoreCase を使ってください)</small>
+          </div>
+          <div class="form-row cr-field">
+            <label class="form-label" for="cr-match">一致のしかた</label>
+            <select id="cr-match" class="cr-input">
+              <option value="exact">完全一致</option>
+              <option value="partial">部分一致</option>
+            </select>
+            <small class="hint-inline">完全一致は、語の前後が、記号・空白・文の端か、別の種類の文字 (英数字・ひらがな・カタカナ・漢字) のときだけ当たります。「アルファ計画は」には当たり、「アルファ計画書」には当たりません。部分一致は、どこにあっても当たります</small>
+          </div>
+          <p id="cr-advice" class="cr-advice" hidden></p>
+        </div>
+
+        <div id="cr-errors" class="cr-errors" role="alert"></div>
+        <p id="cr-status" class="hint cr-status" role="status"></p>
+        <div class="bulk-actions">
+          <button id="cr-save" type="button" class="btn-primary">保存</button>
+          <button id="cr-cancel" type="button" class="btn-secondary" hidden>編集をやめる</button>
+        </div>
+
+        <h3 class="cr-subtitle">書き出しと読み込み</h3>
+        <div class="bulk-actions">
+          <button id="cr-export" type="button" class="btn-secondary">JSON で書き出し</button>
+        </div>
+        <p id="cr-export-note" class="hint cr-note">書き出したファイルには、顧客名などが入ることがあります。扱いに気を付けてください</p>
+        <div class="form-row cr-field">
+          <label class="form-label" for="cr-import">JSON から読み込み (今のルールに足します)</label>
+          <input type="file" id="cr-import" class="cr-file" accept=".json,application/json" />
+        </div>
+        <div id="cr-import-result" class="cr-import-result" role="status"></div>
+      </section>
+
       <section class="card">
         <h2>マスキング除外リスト</h2>
         <p class="hint">
@@ -88,7 +190,7 @@
       <section class="card">
         <h2>
           ローカル LLM 連携
-          <span class="badge-experimental">v0.5.0 dev</span>
+          <span class="badge-experimental">v1.2.0</span>
         </h2>
         <p class="hint">
           Ollama / llama.cpp / LM Studio 等の OpenAI 互換 API を指定すると、
@@ -195,10 +297,58 @@
           <strong>あなたが指定したローカル/LAN 内の Ollama サーバーのみ</strong>に送信されます。
           第三者サーバーへの自動送信はありません。
         </p>
+        <p class="hint" style="margin-top:8px">
+          同梱しているほかの作者のソフトウェアとライセンス:
+          <a href="THIRD_PARTY_NOTICES.txt" target="_blank" rel="noopener">THIRD_PARTY_NOTICES.txt</a>
+        </p>
       </section>
     </main>
 
+    <!-- 動作ログ (docs/diagnostic-log.md の D-LG-07)。表示は options.js が textContent だけで組む -->
+    <main id="tab-log" role="tabpanel" aria-labelledby="tabbtn-log" hidden>
+      <section class="card">
+        <h2>動作ログ</h2>
+        <p class="hint">
+          PII Guard が何をしたかの記録です。たとえば、送信を伏せ字にした、通信を止めた、入力欄のアイコンへのクリックを受け付けなかった、など。
+          端末の中に 14 日分だけ残し、それより古いものは自動で消します。外部には送りません。
+        </p>
+        <p class="hint">
+          入力した文章、見つけた値、ファイル名、送信の中身は記録しません。不具合を伝えるときは「コピー」を押して、その内容を貼り付けてください。
+        </p>
+        <div class="log-tools">
+          <label class="log-filter">期間
+            <select id="log-days">
+              <option value="1">今日</option>
+              <option value="7">7 日</option>
+              <option value="14" selected>14 日</option>
+            </select>
+          </label>
+          <label class="log-filter">種類
+            <select id="log-level">
+              <option value="all" selected>すべて</option>
+              <option value="warn">注意とエラー</option>
+            </select>
+          </label>
+          <span class="log-spacer"></span>
+          <button type="button" id="log-copy" class="btn-secondary">コピー</button>
+          <button type="button" id="log-clear" class="btn-danger">すべて消す</button>
+        </div>
+        <p id="log-status" class="hint log-status" role="status" aria-live="polite"></p>
+        <div class="log-table-wrap">
+          <table class="log-table">
+            <thead><tr><th scope="col">日時</th><th scope="col">種類</th><th scope="col">場所</th><th scope="col">内容</th></tr></thead>
+            <tbody id="log-rows"></tbody>
+          </table>
+        </div>
+        <p id="log-empty" class="hint" hidden>この期間の記録はありません。</p>
+      </section>
+    </main>
+
+    <script src="diag-log.js"></script>
     <script src="tint.js"></script>
+    <script src="license/license-view.js"></script>
+    <script src="engine/custom-rules.js"></script>
+    <script src="options-custom-rules.js"></script>
     <script src="options.js"></script>
   </body>
 </html>

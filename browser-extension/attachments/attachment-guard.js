@@ -22,7 +22,9 @@
 //   - ファイルの貼り付け: 同じく止めて、マスク済みの File (と一緒に貼られた文字) で投げ直す。
 //   - ダイアログ (プロジェクトのファイル追加など) への drop は、行き先を取り違えないよう止めて知らせる。
 //   - マスキング ON: テキストは中身とファイル名をマスクする。バイナリ/巨大/マスク失敗/文字コード不明は
-//     fail-closed で止め、ピルに警告。マスキング OFF: 利用者の選択どおり通し、「未マスク」を知らせる。
+//     伏せられないので、ブラウザの確認で聞き、選んだときだけ元のまま通して「未マスク」を知らせる。選ばなければ
+//     fail-closed で止め、ピルに警告 (1.7.1 の D-SC-24。1.7.0 は聞かずに止めていた)。
+//     マスキング OFF: 利用者の選択どおり通し、「未マスク」を知らせる。
 //   - エンジンも除外リスト等の機密も ISOLATED world 側を使う (MAIN world に出さない, V-02)。
 "use strict";
 
@@ -42,14 +44,17 @@
   const IS_CHATGPT = /(^|\.)chatgpt\.com$|(^|\.)openai\.com$/.test(HOST);
 
   // 設定が読めるまでは「マスク ON」として扱う (読み込み前の添付も素通しさせない)。
-  const settings = { enabled: true, maskForceList: [], mlEnabled: false };
+  // customBudgetMs: E2E のときだけ (E2E_FLAG が true)、カスタムルールの時間の上限を上書きする値 (時間切れを起こして確かめるため)
+  const settings = { enabled: true, maskForceList: [], mlEnabled: false, customBudgetMs: null };
+  const E2E_BUDGET_KEY = "__pii_guard_e2e_custom_budget_ms";
   let exposeForTests = false;
   async function loadSettings() {
     try {
-      const s = await chrome.storage.local.get(["enabled", "maskForceList", "mlEnabled", E2E_FLAG]);
+      const s = await chrome.storage.local.get(["enabled", "maskForceList", "mlEnabled", E2E_FLAG, E2E_BUDGET_KEY]);
       settings.enabled = s.enabled !== false;
       settings.mlEnabled = s.mlEnabled === true;
       exposeForTests = s[E2E_FLAG] === true;
+      settings.customBudgetMs = exposeForTests && Number.isFinite(s[E2E_BUDGET_KEY]) ? s[E2E_BUDGET_KEY] : null;
       settings.maskForceList = Array.isArray(s.maskForceList)
         ? s.maskForceList.map((e) => (typeof e === "string" ? { value: e, category: "OTHER" }
             : e && typeof e.value === "string" ? { value: e.value, category: typeof e.category === "string" ? e.category : "OTHER" } : null)).filter(Boolean)
@@ -60,8 +65,29 @@
 
   const engineReady = () => !!(NS.engine && NS.engine.ready && typeof NS.engine.maskSanitize === "function");
   const isText = (file) => TEXT_EXT.test(file.name || "") || TEXT_MIME.test(file.type || "");
-  const opts = () => ({ userForceMaskEntries: settings.maskForceList, mlEnabled: settings.mlEnabled });
-  const LOG = (...a) => console.debug("[pii-guard] attachment-guard:", ...a); // 値は出さない (件数と経路だけ)
+  // Pro のカスタムルールの時間の上限は、ファイルごとに custom-rules.js の LIMITS.fileBudgetMs (送る前の文より長い)
+  const fileBudgetMs = () => {
+    if (settings.customBudgetMs !== null) return settings.customBudgetMs;
+    const cr = NS.engine && NS.engine.customRules;
+    return cr && cr.LIMITS ? cr.LIMITS.fileBudgetMs : undefined;
+  };
+  const opts = () => ({ userForceMaskEntries: settings.maskForceList, mlEnabled: settings.mlEnabled, customBudgetMs: fileBudgetMs() });
+  // 動作ログ (docs/diagnostic-log.md)。件数と経路だけを残し、ファイル名は残さない
+  const DL = window.PiiGuardDiagLog;
+  const dlog = (code, d) => { if (DL) DL.log(code, d); };
+  // カスタムルールを当て終えられなかったときの、確認の一文 (ページの送信の injected.js、保護入力欄の secure-composer.js と
+  // 同じ文)。時間の上限に届いた (timeout) か、ルールがあるのに Pro かどうか分からず、1 本も当てなかった (pro-unknown) か
+  const CUSTOM_PARTIAL_NOTICES = {
+    timeout: "カスタムルールの一部を時間内に調べきれませんでした。伏せられていない語が残っているかもしれません。送る前に確かめてください。",
+    "pro-unknown": "Pro の状態を確かめられないため、カスタムルールを当てていません。送る前に確かめてください。",
+  };
+  // カスタムルールを時間内に当て終えられなかった結果は、伏せ切れていないので使わない (伏せられない添付として確認に回す)。
+  // 投げる例外の customPartial で、読めない文字コードなどのほかの失敗と見分ける (確認の文を分けるため)
+  function rejectIncomplete(res) {
+    if (!res || !res.custom || res.custom.status !== "partial") return;
+    dlog("custom.partial", { via: "attachment", cause: "timeout" });
+    throw Object.assign(new Error("custom rules incomplete"), { customPartial: true });
+  }
 
   // 日本の CSV は Shift_JIS、Windows のツールは UTF-16 で書くことが多い。UTF-8 決め打ちだと
   // 文字化けで検出できず、UTF-16 は数字の間に NUL が挟まってパターンをすり抜ける。
@@ -87,6 +113,7 @@
     if (!base) return { name, count: 0 };
     const res = await NS.engine.maskSanitize(base, opts());
     if (!res || typeof res.sanitized_text !== "string") throw new Error("mask produced no name");
+    rejectIncomplete(res);
     const count = Array.isArray(res.detections) ? res.detections.length : 0;
     return { name: count ? res.sanitized_text.replace(/</g, "[").replace(/>/g, "]") + ext : name, count };
   }
@@ -95,6 +122,7 @@
     const text = decodeText(await file.arrayBuffer());
     const res = await NS.engine.maskSanitize(text, opts());
     if (!res || typeof res.sanitized_text !== "string") throw new Error("mask produced no text");
+    rejectIncomplete(res);
     const nm = await maskName(file.name);
     const count = (Array.isArray(res.detections) ? res.detections.length : 0) + nm.count;
     // 出力は UTF-8。元が Shift_JIS/UTF-16 でも、サイトは UTF-8 のほうが確実に読める。
@@ -102,28 +130,71 @@
     return { file: out, count };
   }
 
+  // 伏せられないファイルを、マスキングがオンでも添付するかを利用者に聞く (docs/release-1.7.1.md の D-SC-24)。
+  // ブラウザの確認 (window.confirm) はページの外の表示で、ページのスクリプトからは答えられず偽れない。
+  // ファイル名は確認の中に出すだけで、どこにも送らない。出せない・例外・キャンセルは止める (fail-closed)。
+  // notice: カスタムルールを当て終えられなかったファイルがあるときの一文。そのときは「(画像・PDF など)」の代わりに一文を出す。
+  // ほかの理由で伏せられないファイル (画像・PDF・読めない文字コードなど。otherKinds) も混ざるときは、両方を出す
+  const CONFIRM_NAMES = 5;
+  function confirmUnmaskable(files, notice, otherKinds) {
+    if (typeof window.confirm !== "function") return false;
+    const names = files.slice(0, CONFIRM_NAMES).map((f) => "・" + String(f.name || "(名前なし)").slice(0, 60));
+    if (files.length > CONFIRM_NAMES) names.push(`ほか ${files.length - CONFIRM_NAMES} 件`);
+    const why = `${!notice || otherKinds ? " (画像・PDF など)" : ""}。${notice || ""}`;
+    const msg = `PII Guard: 次のファイルは中身を伏せられません${why}\n${names.join("\n")}\n\n` +
+      "マスキングはオンですが、伏せずにこのまま添付しますか?";
+    try { return window.confirm(msg) === true; } catch (_) { return false; }
+  }
+
   // 元ファイル群 → { masked: File[] (渡すもの), blocked: string[], unmasked: string[], maskedCount }。
   async function processFiles(fileList) {
+    const files = Array.from(fileList || []);
     const masked = [];
     const blocked = [];
     const unmasked = [];
+    const unmaskable = [];
     let maskedCount = 0;
-    for (const f of Array.from(fileList || [])) {
+    // 確認の文を選ぶための数え: カスタムルールを当て終えられなかったファイルの理由 (timeout / pro-unknown) と、
+    // ほかの理由 (画像・PDF・読めない文字コードなど) で伏せられないファイルがあるか
+    let partialCause = null;
+    let otherKinds = false;
+    // 保存した Pro のカスタムルールを content.js がエンジンに渡し終えてから伏せる (読んだのにまだ渡していない状態で、伏せない)。
+    // ルールがあるのに Pro かどうか分からないと true (ルールを当てられないので、時間切れと同じに扱う)
+    const customUnknown = settings.enabled && typeof NS.__customRulesReady === "function" ? await NS.__customRulesReady() : false;
+    for (const f of files) {
       if (!settings.enabled) {
         // マスキング OFF: 中身はそのまま通す (利用者の選択)。未マスクであることだけ知らせる。
         masked.push(f); unmasked.push(f.name);
+      } else if (isText(f) && f.size <= MAX_TEXT_BYTES && engineReady() && customUnknown) {
+        dlog("custom.partial", { via: "attachment", cause: "pro-unknown" });
+        partialCause = "pro-unknown";
+        unmaskable.push(f); // 伏せられない添付として確認に回す
       } else if (isText(f) && f.size <= MAX_TEXT_BYTES && engineReady()) {
         try { const m = await maskOneFile(f); masked.push(m.file); maskedCount += m.count; }
-        catch (_) { blocked.push(f.name); }
+        catch (e) { // カスタムルールの時間切れ / 読めない文字コード / マスクの失敗
+          if (e && e.customPartial === true) partialCause = partialCause || "timeout"; else otherKinds = true;
+          unmaskable.push(f);
+        }
       } else {
-        blocked.push(f.name); // バイナリ/巨大/エンジン不在 → マスク不能なのでブロック
+        otherKinds = true;
+        unmaskable.push(f); // バイナリ/巨大/エンジン不在
       }
+    }
+    // 伏せられないファイルは、1 回の添付につき 1 回だけ聞く。選んだら元のまま渡し、「未マスク」として知らせる
+    if (unmaskable.length) {
+      if (confirmUnmaskable(unmaskable, partialCause ? CUSTOM_PARTIAL_NOTICES[partialCause] : "", otherKinds)) for (const f of unmaskable) { masked.push(f); unmasked.push(f.name); }
+      else for (const f of unmaskable) blocked.push(f.name);
     }
     return { masked, blocked, unmasked, maskedCount };
   }
 
-  function notifyPill(r, reason) {
+  // how: picker (ファイルの選択) / drop (ドラッグ) / paste (貼り付け)
+  function notifyPill(r, reason, how) {
     const detail = { maskedCount: r.maskedCount, blocked: r.blocked.slice(), unmasked: r.unmasked.slice(), reason: reason || "" };
+    const maskedFiles = Array.isArray(r.masked) ? r.masked.length - r.unmasked.length : 0;
+    if (maskedFiles > 0) dlog("attach.masked", { count: maskedFiles, how });
+    if (r.blocked.length) dlog("attach.blocked", { count: r.blocked.length, reason: reason === "dialog" || reason === "no-target" ? reason : "binary", how });
+    if (r.unmasked.length) dlog("attach.unmasked", { count: r.unmasked.length });
     try { window.dispatchEvent(new CustomEvent("mask-mcp:attachment", { detail })); } catch (_) {}
     if (exposeForTests) NS.__lastAttachment = { ...detail, at: Date.now() };
   }
@@ -169,7 +240,7 @@
     reentrant.add(input);
     setInputFiles(input, r.masked); // ブロック分は除外。マスク済み (OFF なら元のまま) だけを渡す
     input.dispatchEvent(new Event("change", { bubbles: true }));
-    notifyPill(r);
+    notifyPill(r, "", "picker");
   }
 
   // ---- ドラッグ&ドロップ (F-SC-13 / F-EG-05) ------------------------------------------
@@ -192,7 +263,7 @@
     const files = Array.from(e.dataTransfer.files || []);
     if (!settings.enabled) {
       // マスキング OFF: ページの drop 処理にそのまま任せる (行き先もページのまま)。未マスクだけ知らせる。
-      if (files.length) notifyPill({ maskedCount: 0, blocked: [], unmasked: files.map((f) => f.name) });
+      if (files.length) notifyPill({ maskedCount: 0, blocked: [], unmasked: files.map((f) => f.name) }, "", "drop");
       return;
     }
     // ページに元ファイルを渡さない。ブラウザの既定動作 (ファイルを開く) も止める。
@@ -204,7 +275,7 @@
     if (t && t.closest && t.closest('[role="dialog"], dialog')) {
       // 行き先 (プロジェクトのファイル等) を入力欄の添付と取り違えないよう止める。
       closePageDropUi(t);
-      notifyPill({ maskedCount: 0, blocked: files.map((f) => f.name), unmasked: [] }, "dialog");
+      notifyPill({ maskedCount: 0, blocked: files.map((f) => f.name), unmasked: [] }, "dialog", "drop");
       return;
     }
     const r = await processFiles(files);
@@ -217,15 +288,12 @@
         reentrant.add(input);
         setInputFiles(input, r.masked);
         input.dispatchEvent(new Event("change", { bubbles: true }));
-        LOG(`drop → file input (${r.masked.length} file(s))`);
       } else if (!IS_CHATGPT && t && t.isConnected) {
         // input の無いサイト: マスク済みの File を載せた drop を、落とした場所へ投げ直す
         const ev = new DragEvent("drop", { bubbles: true, cancelable: true, composed: true, ...point, dataTransfer: dataTransferOf(r.masked) });
         ours.add(ev);
         const accepted = !t.dispatchEvent(ev);
-        LOG(`drop → re-dispatched on <${t.tagName.toLowerCase()}> (${r.masked.length} file(s), page ${accepted ? "accepted" : "did not cancel"})`);
       } else {
-        LOG(`drop → no target (target ${t ? (t.isConnected ? "connected" : "detached") : "none"})`);
         // 渡し先が見つからない: 送らない (fail-closed)
         closePageDropUi(t);
         r.blocked.push(...r.masked.map((f) => f.name));
@@ -233,7 +301,7 @@
         reason = "no-target";
       }
     }
-    notifyPill(r, reason);
+    notifyPill(r, reason, "drop");
   }
 
   // ---- ファイルの貼り付け (F-EG-05) ---------------------------------------------------
@@ -243,7 +311,7 @@
     const cd = e.clipboardData;
     const files = cd && cd.files ? Array.from(cd.files) : [];
     if (!files.length) return;
-    if (!settings.enabled) { notifyPill({ maskedCount: 0, blocked: [], unmasked: files.map((f) => f.name) }); return; }
+    if (!settings.enabled) { notifyPill({ maskedCount: 0, blocked: [], unmasked: files.map((f) => f.name) }, "", "paste"); return; }
     const text = cd.getData("text/plain");
     const html = cd.getData("text/html");
     const target = e.target;
@@ -263,7 +331,29 @@
         try { document.execCommand("insertText", false, text); } catch (_) {}
       }
     }
-    if (r.maskedCount || r.blocked.length) notifyPill(r);
+    if (r.maskedCount || r.blocked.length) notifyPill(r, "", "paste");
+  }
+
+  // ---- ChatGPT の保護入力欄に貼られたファイル (docs/release-1.7.1.md の D-SC-23) ----------------
+  // 保護入力欄 (iframe) が拡張機能の中の連絡路でアダプタに渡し、アダプタがここを呼ぶ (同じ ISOLATED world)。
+  // drop と同じく、伏せて (オン) からページのファイルの入力に載せる。渡し先が無ければ送らない (fail-closed)
+  async function attachFiles(files, how) {
+    const r = await processFiles(files);
+    let reason = "";
+    if (r.masked.length) {
+      const input = findUploadInput(r.masked);
+      if (input) {
+        reentrant.add(input);
+        setInputFiles(input, r.masked);
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      } else {
+        r.blocked.push(...r.masked.map((f) => f.name));
+        r.masked = [];
+        reason = "no-target";
+      }
+    }
+    notifyPill(r, reason, how);
+    return { attached: r.masked.length, blocked: r.blocked.length, reason };
   }
 
   // document_start で、ページのスクリプトより先に window の capture に付ける。
@@ -274,5 +364,5 @@
 
   // テスト用の最小公開
   if (typeof module === "object" && module.exports) module.exports = { isText, processFiles, decodeText, _internal: { settings } };
-  NS.attachmentGuard = { isText };
+  NS.attachmentGuard = { isText, attachFiles };
 })();

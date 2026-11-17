@@ -46,3 +46,19 @@ tests/integration/.tmp-profile-*/
 # ゲートウェイが実行時に作るファイル。管理トークンは初回起動時に乱数で生成される。
 # (2026-09-28 まで data/admin_token が追跡されていて、トークンが公開されていた)
 /data/
+
+# 内部の設計・調査・計画の文書は、非公開のリポジトリ (sna4i/pii-guard-internal) に置く。公開のリポジトリには入れない
+/TODO.md
+/plans/
+/experiments/README.md
+/store-assets/README.md
+/browser-extension/STORE.md
+/docs/superpowers/
+/docs/security/
+/docs/release-*.md
+/docs/composer-toggle.md
+/docs/diagnostic-log.md
+/docs/llm-prompt-optimization.md
+/docs/requirements_and_design.md
+/docs/research_notes.md
+/docs/pro-license.md
