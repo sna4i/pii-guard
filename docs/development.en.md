@@ -25,6 +25,8 @@ The extension is distributed on the Chrome Web Store, and there is a separate de
 
 Every push is checked for machine-specific paths, personal data and secrets; see [prepush-check.md](./prepush-check.md) (Japanese). After cloning, run `git config core.hooksPath .githooks` once.
 
+Design documents, research notes, plans and release runbooks live in the private repository `sna4i/pii-guard-internal`. The paths that code and test comments cite — `docs/release-1.7.1.md`, `docs/composer-toggle.md`, `docs/diagnostic-log.md`, `docs/security/…`, `TODO.md` — point there, as do the decision ids (`D-…`, `T-…`). `.gitignore` ignores those paths, so keeping them locally never puts them in the public repository.
+
 ## Table of contents
 
 - [Overview](#overview)

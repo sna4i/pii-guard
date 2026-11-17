@@ -17,3 +17,13 @@ description = "同梱の推論ライブラリ (minify 済み)。トークナイ�
 paths = [
   '''^browser-extension/vendor/''',
 ]
+
+[[allowlists]]
+description = "模擬サイトの宛先の一覧。api2.amplitude.com が generic-api-key の形 (英数・ドット・エントロピー) に当たるだけ"
+paths = [
+  '''^tests/fixtures/mock-sites/server\.mjs$''',
+]
+regexTarget = "line"
+regexes = [
+  '''api2\.amplitude\.com''',
+]

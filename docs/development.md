@@ -25,6 +25,8 @@ Chrome ウェブストアで配布している拡張機能と、開発用のビ�
 
 push する前の検査 (端末のパス・個人情報・秘密情報) は [prepush-check.md](./prepush-check.md) にまとめています。クローンしたら最初に `git config core.hooksPath .githooks` を実行してください。
 
+設計書・調査の記録・計画・リリースの手順は、公開していないリポジトリ `sna4i/pii-guard-internal` に置いています。コードとテストのコメントにある `docs/release-1.7.1.md`、`docs/composer-toggle.md`、`docs/diagnostic-log.md`、`docs/security/…`、`TODO.md` などは、そちらの文書を指します (決定の番号 `D-…`、`T-…` の一覧もそちらにあります)。`.gitignore` はこれらの経路を無視するので、ローカルに置いても公開側には入りません。
+
 ## 目次
 
 - [概要](#概要)
