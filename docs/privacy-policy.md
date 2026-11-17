@@ -1,6 +1,6 @@
 # Privacy Policy — PII Guard (formerly Local Mask MCP)
 
-**Last updated:** 2026-04-18 (updated for v0.5.0 local-LLM integration)
+**Last updated:** 2026-11-17 (Pro licensing via ExtensionPay, custom rules)
 
 ## Summary (English)
 
@@ -10,6 +10,11 @@ ChatGPT, Gemini, Manus — **before** that text leaves your browser.
 
 By default we collect nothing and transmit nothing. Every byte of
 processing happens on your own computer.
+
+**Pro licensing (ExtensionPay)**: the paid tier is checked through
+ExtensionPay. Nothing you type is involved — only the extension id and
+an API key are sent, and only when you press the upgrade or login
+button and when the purchase state is re-checked (see §10).
 
 **Optional local-LLM augmentation (v0.5.0+)**: If *you* explicitly
 enable it in the options page and enter a server URL, the extension
@@ -31,6 +36,8 @@ PII Guard は、Claude / ChatGPT / Gemini / Manus などの AI チャット
 - **v0.5.0+: ユーザーが自発的に有効化した場合のみ** — オプション画面で
   指定した**ローカル/LAN 上の LLM サーバー** (例: `http://localhost:11434`)
   にテキストを POST。拡張機能の開発者や第三者には届きません。
+- **Pro 版の課金 (ExtensionPay)** — 課金の確認だけは拡張機能の外と通信します。
+  送るのは拡張機能の ID と API キーだけで、入力した文章は通りません (§10)。
 - **収集データなし** — 拡張機能は開発者が運営するサーバーに何も送りません。
 - **保存データ: ローカルブラウザストレージのみ** — 設定と、v1.7.1 からの動作ログ
   (日時・出来事の種類・件数・ホスト名だけ。14 日で自動削除) を `chrome.storage.local` に保存。
@@ -49,6 +56,9 @@ Specifically:
   information of any site you visit is read or transmitted.
 - No analytics, telemetry, error reporting, or usage statistics are
   collected.
+- Pro licensing sends no content: only the extension id and an API key
+  go to ExtensionPay (§10). The purchaser email stays on ExtensionPay
+  and in local storage.
 
 ## 2. Data we store
 
@@ -69,10 +79,17 @@ Local Mask MCP persists a small number of user preferences to
 | `localLlmTimeoutMs` *(v0.5.0+)* | Timeout in ms (default 120000) |
 | `localLlmKind` *(v0.5.0+)* | `"ollama"` or `"openai-compat"` API shape |
 | `diagLog:YYYY-MM-DD`, `diagLogDays` *(v1.7.1+)* | Activity log shown in the options page "ログ" tab: time, event type, counts, reason and host names only. Never the typed text, detected values, file names, request bodies, or URL paths and queries. Entries older than 14 days are deleted automatically |
+| `licenseState` *(Pro)* | Last verified licence answer: paid flag, plan name, purchaser email, check time, trial end. Displayed in the popup and options page |
+| `proCustomRules` *(Pro)* | Custom rules (`{ version, rules: [...] }`): regular expressions and word lists, evaluated locally and sent nowhere |
 
 `chrome.storage.local` data stays in your browser profile; it is not
 synced to Google or transmitted anywhere by the extension. From v1.7.1
 the extension writes nothing to the browser console.
+
+**Exception, Pro only:** ExtensionPay writes its own keys (API key,
+purchaser record including email, install time) to `chrome.storage.sync`
+so a purchase follows you across signed-in devices. Those keys are not
+managed by the extension and are not among the settings above.
 
 ## 3. Data flow (what actually happens on the page)
 
@@ -132,8 +149,10 @@ account identifiers, or any content from other tabs.
 
 ## 5. Third-party sharing
 
-None. We do not sell, share, license, rent, or otherwise disclose any
-information to anyone.
+None, except for the Pro purchase: if you buy Pro, ExtensionPay (and
+its payment processor, Stripe) handle the purchase record and the email
+address you enter on the payment page. Card details are handled between
+ExtensionPay and Stripe; the extension never receives them.
 
 ## 6. Host permissions
 
@@ -152,35 +171,86 @@ supports plus the user-configured local LLM endpoint:
   at runtime.
 
 The extension does not request `<all_urls>` or any broader access
-than the above.
+than the above. Pro licensing adds the `alarms` permission (one alarm,
+run every 60 minutes to re-check the purchase state) and needs no host
+permission for extensionpay.com: the payment and login pages open as a
+separate window, and the licence queries go out from the service worker.
 
 ## 7. Your rights and choices
 
 - **Disable any time.** Toggle the extension off from the popup, or
   uninstall it from `chrome://extensions`.
 - **Data deletion.** Uninstalling the extension removes all its
-  `chrome.storage.local` data automatically.
+  `chrome.storage.local` data automatically. ExtensionPay's own keys in
+  `chrome.storage.sync` go with it; the purchase record stays on
+  ExtensionPay and can be restored with the login button.
 - **Inspect the code.** The extension is open source; you can audit
   exactly what it does at
   [`github.com/…/local-mask-mcp`](https://github.com/) (replace with
   your actual repo URL before publishing to the Chrome Web Store).
-- **No account.** There is no registration, no login, no account to
-  create or delete.
+- **No account required.** The free tier has no registration, no
+  login, no account. Pro uses an ExtensionPay purchase (identified by
+  the email address you enter there); you can log in on another device
+  to restore it, and deleting the extension's data only means pressing
+  the login button again.
 
 ## 8. Children's privacy
 
 The extension does not intentionally collect or process data from
-users under 13. Because we collect no data at all, there is no child-
-specific data flow to address.
+users under 13. No content is collected at all; the only identifier
+anywhere is the email address a Pro purchase leaves on ExtensionPay.
 
 ## 9. Changes to this policy
 
 If this policy changes, the updated version will be published in the
 same repository. The "Last updated" date at the top reflects the most
-recent revision. Because there is no data to collect, changes will
-generally be clarifications rather than scope expansions.
+recent revision. Most changes are clarifications or additions (the Pro
+licensing section was added this way); nothing already collected gets
+used for a new purpose without a note here.
 
-## 10. Contact
+## 10. Pro licensing in detail (ExtensionPay)
+
+This section is the prose counterpart of the summary above; it exists so
+the store listing can link to one place.
+
+**What triggers traffic.** Only two things:
+
+1. Pressing *Upgrade to Pro* or *Already bought? Log in* in the popup or
+   options page. The extension first calls `POST
+   https://extensionpay.com/api/new-key` to obtain an API key, then opens
+   the payment or login page in a separate window.
+2. Re-checking the purchase state: `GET
+   https://extensionpay.com/api/v2/user?api_key=…`, every 60 minutes,
+   on install/update of the extension or of Chrome, on the background
+   check done when the popup, the options page, a supported chat page or
+   the protected composer is opened, and when *Refresh purchase state*
+   is pressed.
+
+**What is sent.** The extension id (in the path) and the API key. No
+text you typed, no detected values, no page URLs. The email address
+entered on the payment page is the purchase identifier ExtensionPay
+keeps.
+
+**What is stored where.** The extension keeps the last verified licence
+answer (`licenseState`: paid flag, plan name, purchaser email, check
+time, trial end) in `chrome.storage.local`. ExtensionPay itself writes
+the API key, the purchaser record (including the email) and the install
+time to `chrome.storage.sync`, which replicates through Chrome Sync to
+other signed-in devices — so those devices re-check the purchase state
+without you pressing anything. Uninstalling clears the extension's own
+storage; the purchase record remains on ExtensionPay.
+
+**Custom rules.** Pro rules (regular expressions and word lists) live
+only in `chrome.storage.local` (`proCustomRules`) and are evaluated
+locally. Nothing about them leaves the device, including to
+ExtensionPay. They stay readable and exportable as JSON after Pro ends.
+
+**No content script on extensionpay.com.** The window opens as a
+separate page, so the install-time warning does not gain an
+"extensionpay.com — read and change data" entry. The `alarms`
+permission is the only manifest addition.
+
+## 11. Contact
 
 Questions, concerns, or false-positive reports:
 
