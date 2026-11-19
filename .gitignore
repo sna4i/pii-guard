@@ -38,6 +38,14 @@ tests/integration/.tmp-profile-*/
 # 別リポジトリへ移した実験。モデルとデータで数 GB あるので、git add -A で巻き込まない。
 /experiments/privacy-filter-ja/
 
+# ML 判定層のモデル本体。onnx_data は 1.0 GB で GitHub の 1 ファイル 100 MB 制限を超え、
+# model.onnx (8.4 MB) と tokenizer.json (20 MB) も fetch-model.sh の生成物なので git に置かない。
+# 追跡するのは config.json と tokenizer_config.json だけ (model_type の書き換えなど、
+# 読み取りの前提が読めるようにするため)。
+/browser-extension/model/jev-0.8b/model.onnx
+/browser-extension/model/jev-0.8b/model.onnx_data
+/browser-extension/model/jev-0.8b/tokenizer.json
+
 # Claude Code が作る端末ローカルのファイル (worktree・会話の記録・個人設定)。
 /.claude/worktrees/
 /.claude/projects/

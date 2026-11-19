@@ -169,6 +169,37 @@
           <code class="endpoint" id="ml-model-id">Xenova/distilbert-base-multilingual-cased-ner-hrl</code>
         </div>
 
+        <div class="form-row">
+          <label class="form-label" for="decision-enabled">
+            判定モデルで NER・LLM 呼び出しを省略
+            <span class="badge-experimental">実験的</span>
+          </label>
+          <label class="switch">
+            <input type="checkbox" id="decision-enabled" />
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <div class="form-row">
+          <span class="form-label">判定ステータス</span>
+          <span id="decision-status" class="status-pill status-unknown">未有効</span>
+        </div>
+
+        <p class="hint" style="margin-top:8px">
+          端末内の判定モデル (Jev-Style-0.8B-Decision, int8) に「この文は個人情報を含むか」を 1 回の推論で判定させ、
+          <strong>「含まない」と出たら NER と LLM への呼び出しを省きます</strong>。
+          regex / 辞書の検出は判定より前に走るので影響を受けません。
+          曖昧な出方は省かないで LLM に渡します。長い文 (250 字超) は判定せず、そのまま NER・LLM に渡します。
+          判定モデルが落ちた場合はこれまで通り NER が走ります。
+        </p>
+
+        <p class="hint" style="margin-top:8px">
+          実測 (CPU・短文): 判定は 1 回 0.66 秒 + 1 トークン 3ms。省く相手は NER が 0.014〜0.208 秒、
+          LLM が何も出さないとき 0.215 秒なので、<strong>この環境では判定は省く相手より高い</strong>。
+          元を取れるのは LLM が 1 秒以上かかる場合 (考えるモデル・大きなモデル・リモート) だけ。
+          見逃しは 42 件中 1 件 (2.4%)。既定はオフ。
+        </p>
+
         <p class="hint" style="margin-top:8px">
           初回有効化時に Hugging Face Hub からモデル (約 135 MB) を取得します。
           ブラウザの IndexedDB にキャッシュされるため 2 回目以降は秒で起動します。

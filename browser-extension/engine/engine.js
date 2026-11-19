@@ -19,10 +19,11 @@
       load("blocklist", "./blocklist");
       load("userForceMask", "./user-force-mask");
       load("onnxDetector", "./onnx-detector");
+      load("decisionClient", "./decision-client");
       load("confidential", "./confidential");
     }
     const ns = (root && root.__localMaskMCP && root.__localMaskMCP.engine) || {};
-    for (const k of ["patterns","classification","severity","categories","aggregate","forceMask","blocklist","userForceMask","onnxDetector","confidential"]) {
+    for (const k of ["patterns","classification","severity","categories","aggregate","forceMask","blocklist","userForceMask","onnxDetector","decisionClient","confidential"]) {
       d[k] = d[k] || ns[k];
     }
     return d;
@@ -232,10 +233,34 @@
   async function runPipelineAsync(text, opts, deps) {
     let dets = collectRawDetections(text, opts, deps);
     if (opts.mlEnabled && deps.onnxDetector) {
-      try {
-        const mlDets = await deps.onnxDetector.detectViaMl(text);
-        if (mlDets.length > 0) dets = dets.concat(mlDets);
-      } catch (_) { /* fall through with regex-only */ }
+      // F-ML-003 gate. Its target is the LLM call, not the NER: the gate
+      // costs ~600 ms fixed + 3 ms/token while the NER it used to protect
+      // is 14–208 ms, so running the gate to save an NER call is a net
+      // loss. The NER skip here is only the free by-product of the pass
+      // the LLM path already paid for (decision-client caches one answer
+      // per text), and the gate is only consulted on inputs short enough
+      // for that pass to stay under its budget.
+      //
+      // Gate failure (empty results) or a too-long input -> the NER path
+      // runs unchanged, so a dead decision layer never loses detections.
+      let skip = false;
+      if (opts.decisionEnabled && deps.decisionClient) {
+        try {
+          if (deps.decisionClient.gateApplicable(text)) {
+            const gate = await deps.decisionClient.callDecide(
+              text,
+              deps.decisionClient.gateQuestion()
+            );
+            skip = gate.length > 0 && deps.decisionClient.gateSkip(gate[0]);
+          }
+        } catch (_) { /* gate failure -> NER path unchanged */ }
+      }
+      if (!skip) {
+        try {
+          const mlDets = await deps.onnxDetector.detectViaMl(text);
+          if (mlDets.length > 0) dets = dets.concat(mlDets);
+        } catch (_) { /* fall through with regex-only */ }
+      }
     }
     return finishPipeline(dets, opts, deps);
   }

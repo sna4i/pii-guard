@@ -26,6 +26,8 @@
     "service_worker": "background.js",
     "type": "module"
   },
+  "cross_origin_embedder_policy": { "value": "require-corp" },
+  "cross_origin_opener_policy": { "value": "same-origin" },
   "content_security_policy": {
     "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
   },
@@ -39,7 +41,24 @@
         "https://gemini.google.com/*",
         "https://*.manus.im/*"
       ],
-      "js": ["engine/dictionaries.js", "engine/patterns.js", "engine/classification.js", "engine/severity.js", "engine/categories.js", "engine/aggregate.js", "engine/force-mask.js", "engine/blocklist.js", "engine/user-force-mask.js", "engine/confidential.js", "engine/engine.js", "engine/bundle.js", "content.js", "tint.js", "composer-toggle.js"],
+      "js": [
+        "engine/dictionaries.js",
+        "engine/patterns.js",
+        "engine/classification.js",
+        "engine/severity.js",
+        "engine/categories.js",
+        "engine/aggregate.js",
+        "engine/force-mask.js",
+        "engine/blocklist.js",
+        "engine/user-force-mask.js",
+        "engine/decision-client.js",
+        "engine/confidential.js",
+        "engine/engine.js",
+        "engine/bundle.js",
+        "content.js",
+        "tint.js",
+        "composer-toggle.js"
+      ],
       "run_at": "document_start"
     }
   ],
@@ -66,7 +85,10 @@
         "engine/confidential.js",
         "vendor/transformers/transformers.min.js",
         "vendor/transformers/ort-wasm-simd-threaded.jsep.mjs",
-        "vendor/transformers/ort-wasm-simd-threaded.jsep.wasm"
+        "vendor/transformers/ort-wasm-simd-threaded.jsep.wasm",
+        "engine/decision-client.js",
+        "engine/decision-config.json",
+        "model/*"
       ],
       "matches": [
         "https://claude.ai/*",

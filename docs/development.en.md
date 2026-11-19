@@ -38,6 +38,7 @@ Every push is checked for machine-specific paths, personal data and secrets; see
 - [Browser extension](#browser-extension)
 - [Local LLM proxy (v0.5.0)](#local-llm-proxy-v050)
 - [Claude Code / Claude Desktop integration](#claude-code--claude-desktop-integration)
+- [In-browser ML decision layer (System One style decision model)](#in-browser-ml-decision-layer-system-one-style-decision-model)
 - [Chrome Web Store build](#chrome-web-store-build)
 - [Tests](#tests)
 - [Directory layout](#directory-layout)
@@ -659,6 +660,66 @@ Setup:
 3. Restart Claude Desktop. `sanitize_text` and the other tools appear in the tool list.
 
 Option 1 (Base URL) masks every request automatically, whereas MCP masks only when Claude calls the tool. Pick option 1 for "always safe", option 2 for "on demand".
+
+## In-browser ML decision layer (System One style decision model)
+
+`browser-extension/engine/decision.js` (offscreen side) and `engine/decision-client.js` (content
+leaf). One forward pass, no generation: the answer comes from `logit(' yes') − logit(' no')` at the
+` ->` token ending each option's readout line, put through the calibrated temperature softmax.
+Model: `chaoliangUNSW/Jev-Style-0.8B-Decision-v3` (Qwen3.5-0.8B, int8 ONNX + external data). Export
+parity is within 2.3e-5 of the PyTorch reference with matching argmax at every position (T-ML-002).
+
+### Measured (2026-11-19, dev extension, CPU WASM)
+
+| input | NER (distilbert q8) | decision, 1 pass | LLM detect (qwen3:1.7b, `format:"json"` + `think:false`) |
+|---|---|---|---|
+| 26 chars | 14 ms | 747 ms | 215 ms (nothing to return) / 1.2 s (when it extracts) |
+| 88 chars | 30 ms | 923 ms | 223 ms |
+| 482 chars | 279 ms | 2649 ms | 4058 ms |
+| 1442 chars | 208 ms (capped at 512 tokens) | 5379 ms | 6075 ms |
+
+Cost model: **decision = 600 ms fixed + 3 ms/token**. The fixed part is the 0.8B forward pass
+itself (574–770 ms with an empty state); shortening the question only saves about 100 ms.
+
+- onnxruntime-web forces `numThreads = 1` whenever `crossOriginIsolated` is false, because WASM
+  pthreads need SharedArrayBuffer. `cross_origin_embedder_policy: require-corp` plus
+  `cross_origin_opener_policy: same-origin` in the manifest restores 4 threads, and the 4-sentence
+  message went 3544 ms → 789 ms (4.5x)
+- WebGPU has no adapter on this WSL2 box (no GPU passthrough), so thread count is the ceiling here
+- `require-corp` requires CORS success or a CORP header on cross-origin subresources; the NER model
+  fetched from HF is a CORS-mode fetch, so it still resolves (10 ms with COI on)
+
+### Where the gate sits (F-ML-003)
+
+As a pre-NER gate the decision layer loses on the same ground every time (NER is capped at 512
+tokens, the decision grows with input length). Its value is on the LLM side. But with
+`format:"json"` + `think:false` the LLM answers a message it finds nothing in within 215 ms, so on
+CPU WASM the gate costs more than the call it skips.
+
+Current implementation (`decisionEnabled`, default off):
+
+- inputs over 250 chars are not gated — one pass would exceed the plan's Q4 target (< 1 s on CPU
+  WASM)
+- skip only when `p(true) < 0.03`; ambiguous scores (0.03–0.5) are not skipped, the LLM runs
+- the engine and the LLM path share one answer through the decision-client cache (16 entries), so
+  the same text never pays for a second forward pass
+
+Quality (T-ML-003: 56 labelled cases + 14 negatives, on the graph the extension actually loads):
+
+- 1 of 42 true positives is missed (2.4%) — a skip loses whatever the LLM would have found
+- 8 of 14 FP traps and 13 of 14 plain negatives are correctly skipped
+- the question's scope is narrower than the LLM's label set (DEPARTMENT / PROJECT_CODE /
+  SENSITIVE_FACT), and "personally identifiable information?" is read as a compliance term: it
+  answers false even on obvious PII. The fitted wording (names, addresses or company names) is
+  guarded against drift by `tests/integration/test-decision.mjs`
+
+### Package size (T-ML-004)
+
+`browser-extension/model/jev-0.8b/` is 989 MB (graph 8.4 MB + external data 1,008 MB + tokenizer
+20 MB). `scripts/build-store-zip.sh` does not exclude `model/`, so the store zip measures 823 MB.
+`model.onnx_data` is not tracked (GitHub's 100 MB per-file limit) and `scripts/fetch-model.sh`
+fetches it. Shipping this to the Store still needs a decision between excluding it and fetching it
+at runtime (open).
 
 ## Chrome Web Store build
 

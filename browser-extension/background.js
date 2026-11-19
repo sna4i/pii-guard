@@ -106,6 +106,7 @@ chrome.runtime.onInstalled.addListener(async () => {
     "localLlmEnabled",
     "localLlmMode",
     "localLlmTimeoutMs",
+    "decisionEnabled",
   ]);
   const patch = {};
   if (typeof stored.enabled !== "boolean") patch.enabled = true;
@@ -118,6 +119,9 @@ chrome.runtime.onInstalled.addListener(async () => {
     patch.localLlmMode = "detect";
   }
   if (typeof stored.localLlmTimeoutMs !== "number") patch.localLlmTimeoutMs = 120000;
+  // F-ML-003 gate. Off by default: it only pays off once the decision
+  // model is present, and it is an extra download on top of the NER one.
+  if (typeof stored.decisionEnabled !== "boolean") patch.decisionEnabled = false;
   if (Object.keys(patch).length > 0) {
     await chrome.storage.local.set(patch);
   }
@@ -229,7 +233,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // re-targeted at itself (target:"offscreen") so the relay doesn't
   // bounce in a loop.
   if (
-    (message.type === "ML_DETECT" || message.type === "ML_PREWARM") &&
+    (message.type === "ML_DETECT" ||
+      message.type === "ML_PREWARM" ||
+      message.type === "ML_DECIDE" ||
+      message.type === "ML_DECIDE_PREWARM") &&
     message.target !== "offscreen"
   ) {
     (async () => {
@@ -241,6 +248,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const resp = await relayToOffscreen({
           type: message.type,
           text: typeof message.text === "string" ? message.text : "",
+          state: typeof message.state === "string" ? message.state : "",
+          questions: Array.isArray(message.questions) ? message.questions : [],
+          family: message.family || "other",
         });
         sendResponse(resp || { ok: false, error: "no response from offscreen" });
       } catch (err) {

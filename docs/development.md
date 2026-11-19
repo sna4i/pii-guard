@@ -38,6 +38,7 @@ push する前の検査 (端末のパス・個人情報・秘密情報) は [pre
 - [ブラウザ拡張](#ブラウザ拡張)
 - [ローカル LLM 連携 (v0.5.0)](#ローカル-llm-連携-v050)
 - [Claude Code / Claude Desktop 連携](#claude-code--claude-desktop-連携)
+- [ブラウザ内 ML 判定層 (System One 型 decision model)](#ブラウザ内-ml-判定層-system-one-型-decision-model)
 - [Chrome Web Store 公開ビルド](#chrome-web-store-公開ビルド)
 - [テスト](#テスト)
 - [ディレクトリ構成](#ディレクトリ構成)
@@ -673,6 +674,64 @@ Claude Desktop は MCP (Model Context Protocol) でツールを提供するサ�
 3. Claude Desktop を再起動すると、ツール一覧に `sanitize_text` 等が現れます。
 
 方法 1 (Base URL) が全リクエストを自動的にマスクするのに対し、MCP は Claude がツールを呼ぶタイミングでだけマスクされる違いがあります。必ずマスクしたいなら方法 1、必要なときだけマスクしたいなら方法 2 が向いています。
+
+## ブラウザ内 ML 判定層 (System One 型 decision model)
+
+`browser-extension/engine/decision.js` (offscreen 側) と `engine/decision-client.js` (content leaf)。
+生成しない 1 回の forward pass で、readout 行末の ` ->` スロットにある
+`logit(' yes') − logit(' no')` を温度 softmax にかけて確率を出す。モデルは
+`chaoliangUNSW/Jev-Style-0.8B-Decision-v3` (Qwen3.5-0.8B、int8 ONNX + 外部データ)。
+parity は fp32 エクスポートで PyTorch 参照と 2.3e-5 内、argmax 一致 (T-ML-002)。
+
+### 実測 (2026-11-19、dev 拡張、CPU WASM)
+
+| 入力 | NER (distilbert q8) | 判定 1 pass | LLM detect (qwen3:1.7b、`format:"json"` + `think:false`) |
+|---|---|---|---|
+| 26 字 | 14 ms | 747 ms | 215 ms (出すものがない) / 1.2 s (抽出するとき) |
+| 88 字 | 30 ms | 923 ms | 223 ms |
+| 482 字 | 279 ms | 2649 ms | 4058 ms |
+| 1442 字 | 208 ms (512 トークンで打ち止め) | 5379 ms | 6075 ms |
+
+コスト模型: **判定 = 600 ms 固定 + 3 ms/token**。固定分は 0.8B の 1 forward そのもの
+(状態が空でも 574–770 ms) で、質問文を縮めても 100 ms しか減らない。
+
+- `crossOriginIsolated` が false だと onnxruntime-web は無条件で `numThreads = 1` に落とす
+  (SharedArrayBuffer が無いと WASM の pthread を起動できない)。manifest の
+  `cross_origin_embedder_policy: require-corp` + `cross_origin_opener_policy: same-origin`
+  で 4 本になり、4 文のメッセージが 3544 ms → 789 ms (4.5 倍)
+- WebGPU はこの WSL2 に adapter が無い (GPU パススルー無し)。SwiftShader 指定でも同じ
+- `require-corp` はクロスオリジンのサブリソースに CORS 成功か CORP ヘッダを要求する。HF から
+  落とす NER モデルは `fetch` (CORS モード) なので通る (COI を有効化しても NER は 10 ms)
+
+### ゲートの位置 (F-ML-003)
+
+判定を NER の前段に置くと、同じ土俵で常に負ける (NER は 512 トークンで打ち止め、判定は文長に
+線形)。値打ちは LLM 呼び出しを省く側にある。ただし LLM は `format:"json"` + `think:false` で
+出すものがないとき 215 ms なので、この環境 (CPU WASM) では判定のほうが高い。
+
+現行の実装 (`decisionEnabled`、既定 false):
+
+- 入力が 250 字超は判定しない。1 pass が計画の Q4 目標 (CPU WASM で 1 s) を超える
+- `p(true) < 0.03` のときだけ省く。曖昧 (0.03〜0.5) は省かないで LLM に渡す。曖昧なときの
+  安全側は生成であり、同じモデルの 2 回目の読み直しではない
+- engine と LLM 経路は同じ答えを共有する (decision-client のキャッシュ、16 件)。同じ文で
+  2 回目の forward pass を走らせない
+
+品質 (T-ML-003: ラベル付き 56 件 + negatives 14 件、実グラフ = int8):
+
+- 真の positive 42 件の見逃し 1 件 (2.4%)。省くと LLM が拾うはずの語を失う
+- FP trap 14 件は 8 件、negatives 14 件は 13 件を正しく省いた
+- 質問文の口径が LLM のラベル集合 (DEPARTMENT / PROJECT_CODE / SENSITIVE_FACT) より狭い。
+  「personally identifiable information?」はコンプライアンス語として読まれ、 obvious な PII にも
+  false を返す。現行の文面 (names, addresses or company names) が fitted 文面であり、
+  `tests/integration/test-decision.mjs` が文面とのズレを guard している
+
+### 同梱サイズ (T-ML-004)
+
+`browser-extension/model/jev-0.8b/` は 989 MB (graph 8.4 MB + external data 1,008 MB +
+tokenizer 20 MB)。`scripts/build-store-zip.sh` は model/ を除外しないので store zip は 823 MB。
+GitHub の 1 ファイル 100 MB 制限で `model.onnx_data` は追跡せず、`scripts/fetch-model.sh`
+が落とす。Store に載せるなら除外か実行時取得の判断が要る (未決定)。
 
 ## Chrome Web Store 公開ビルド
 

@@ -127,6 +127,7 @@
     "engine/blocklist.js",
     "engine/user-force-mask.js",
     "engine/onnx-detector.js",
+    "engine/decision-client.js",
     "engine/confidential.js",
     "engine/surrogates.js",
     "engine/llm-prompts.js",
@@ -156,11 +157,13 @@
     let maskForceList = [];
     let enabled = true;
     let mlEnabled = false;
+    let decisionEnabled = false;
     try {
       const stored = await chrome.storage.local.get([
-        "interactive", "uiMode", "maskAllowlist", "maskForceList", "mlEnabled", "enabled",
+        "interactive", "uiMode", "maskAllowlist", "maskForceList", "mlEnabled", "decisionEnabled", "enabled",
       ]);
       if (typeof stored.mlEnabled === "boolean") mlEnabled = stored.mlEnabled;
+      if (typeof stored.decisionEnabled === "boolean") decisionEnabled = stored.decisionEnabled;
       interactive = stored.interactive !== false;
       if (stored.uiMode === "modal" || stored.uiMode === "sidebar") {
         uiMode = stored.uiMode;
@@ -189,7 +192,7 @@
       {
         source: TAG_OUT,
         type: "settings",
-        settings: { interactive, uiMode, maskAllowlist, maskForceList, mlEnabled, enabled },
+        settings: { interactive, uiMode, maskAllowlist, maskForceList, mlEnabled, decisionEnabled, enabled },
       },
       "*"
     );
@@ -198,7 +201,7 @@
   try {
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area !== "local") return;
-      if ("interactive" in changes || "uiMode" in changes || "maskAllowlist" in changes || "maskForceList" in changes || "mlEnabled" in changes || "enabled" in changes) {
+      if ("interactive" in changes || "uiMode" in changes || "maskAllowlist" in changes || "maskForceList" in changes || "mlEnabled" in changes || "decisionEnabled" in changes || "enabled" in changes) {
         broadcastSettings();
       }
     });

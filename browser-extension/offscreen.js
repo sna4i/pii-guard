@@ -26,11 +26,17 @@ import {
   pipeline as transformersPipeline,
   env as transformersEnv,
 } from "./vendor/transformers/transformers.min.js";
+import decisionApi from "./engine/decision.js";
 
 transformersEnv.backends.onnx.wasm.wasmPaths =
   chrome.runtime.getURL("vendor/transformers/");
 transformersEnv.allowRemoteModels = true;
-transformersEnv.allowLocalModels = false;
+// The decision layer's weights ship inside the package. Local resolution
+// goes through localModelPath (joined with the model id, so this must be
+// the package root, not model/). The NER model is not under the root,
+// misses, and falls back to HF Hub exactly as before.
+transformersEnv.allowLocalModels = true;
+transformersEnv.localModelPath = chrome.runtime.getURL("");
 
 const ML_MODEL_ID = "Xenova/distilbert-base-multilingual-cased-ner-hrl";
 
@@ -158,6 +164,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
       try {
         const ner = await getMlPipeline();
+        const t0 = performance.now();
         // transformers.js v3 does not honour aggregation_strategy and
         // its tokenizer call doesn't return offset_mapping, so we
         // run inference per-token and reconstruct character offsets
@@ -170,7 +177,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const pieces = ner.tokenizer.tokenize(text);
         const offsets = buildOffsetsFromPieces(text, pieces);
         const entities = aggregateBioSpans(text, Array.isArray(raw) ? raw : [], offsets);
-        sendResponse({ ok: true, entities, modelId: ML_MODEL_ID });
+        // T-ML-001: inference-only latency (excludes pipeline build /
+        // model load) plus the backend actually used (webgpu vs wasm).
+        sendResponse({
+          ok: true,
+          entities,
+          modelId: ML_MODEL_ID,
+          elapsedMs: Math.round(performance.now() - t0),
+          device: ner.device || "unknown",
+        });
       } catch (err) {
         sendResponse({ ok: false, error: err?.message || String(err) });
       }
@@ -183,6 +198,42 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       try {
         await getMlPipeline();
         sendResponse({ ok: true, modelId: ML_MODEL_ID });
+      } catch (err) {
+        sendResponse({ ok: false, error: err?.message || String(err) });
+      }
+    })();
+    return true;
+  }
+
+  // Load the decision graph without running it, so the first gate on a
+  // page doesn't pay the 1 GB fetch + session build.
+  if (message.type === "ML_DECIDE_PREWARM") {
+    (async () => {
+      try {
+        await decisionApi.prewarm();
+        sendResponse({ ok: true });
+      } catch (err) {
+        sendResponse({ ok: false, error: err?.message || String(err) });
+      }
+    })();
+    return true;
+  }
+
+  // F-ML-002: one forward pass + logits readout, no generation.
+  if (message.type === "ML_DECIDE") {
+    (async () => {
+      try {
+        const t0 = performance.now();
+        const results = await decisionApi.decide(
+          typeof message.state === "string" ? message.state : "",
+          Array.isArray(message.questions) ? message.questions : [],
+          message.family || "other"
+        );
+        sendResponse({
+          ok: true,
+          results,
+          elapsedMs: Math.round(performance.now() - t0),
+        });
       } catch (err) {
         sendResponse({ ok: false, error: err?.message || String(err) });
       }

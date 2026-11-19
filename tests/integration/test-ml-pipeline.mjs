@@ -49,7 +49,7 @@ async function main() {
   // Ensure fresh profile so prior runs don't affect this.
   if (existsSync(USER_DATA_DIR)) rmSync(USER_DATA_DIR, { recursive: true, force: true });
 
-  logStep("1/6", "Launching Chromium with extension loaded");
+  logStep("1/7", "Launching Chromium with extension loaded");
   const context = await chromium.launchPersistentContext(USER_DATA_DIR, {
     headless: false,                 // extensions need a real display
     channel: "chromium",
@@ -76,19 +76,19 @@ async function main() {
   // with no context).
   sw.on("console", (m) => console.log(`   [sw] ${m.type()}: ${m.text()}`));
 
-  logStep("2/6", "Opening extension options page");
+  logStep("2/7", "Opening extension options page");
   const page = await context.newPage();
   page.on("console", (m) => console.log(`   [page] ${m.type()}: ${m.text()}`));
   page.on("pageerror", (err) => console.log(`   [page error] ${err.message}`));
   await page.goto(`chrome-extension://${extId}/options.html`);
   await page.waitForLoadState("domcontentloaded");
 
-  logStep("3/6", "Setting mlEnabled=true via chrome.storage.local");
+  logStep("3/7", "Setting mlEnabled=true via chrome.storage.local");
   await page.evaluate(async () => {
     await chrome.storage.local.set({ mlEnabled: true });
   });
 
-  logStep("4/6", "Sending ML_PREWARM (model download + WASM init, ~30-90s)");
+  logStep("4/7", "Sending ML_PREWARM (model download + WASM init, ~30-90s)");
   const prewarmStart = Date.now();
   const prewarm = await page.evaluate(
     () =>
@@ -105,7 +105,7 @@ async function main() {
     );
   }
 
-  logStep("5/6", "Sending ML_DETECT for sample text");
+  logStep("5/7", "Sending ML_DETECT for sample text (cold inference)");
   console.log(`   text: ${SAMPLE_TEXT}`);
   const detect = await page.evaluate(
     (text) =>
@@ -120,8 +120,21 @@ async function main() {
   if (!detect || detect.ok !== true || !Array.isArray(detect.entities)) {
     throw new Error("ML_DETECT returned invalid shape");
   }
+  console.log(`   T-ML-001 cold inference: ${detect.elapsedMs}ms on ${detect.device}`);
 
-  logStep("6/6", "Verifying required hits in detection output");
+  logStep("6/7", "Warm inference latency (second ML_DETECT, same pipeline)");
+  const warm = await page.evaluate(
+    (text) =>
+      new Promise((resolve) => {
+        chrome.runtime.sendMessage({ type: "ML_DETECT", text }, (resp) =>
+          resolve(resp)
+        );
+      }),
+    SAMPLE_TEXT
+  );
+  console.log(`   T-ML-001 warm inference: ${warm.elapsedMs}ms on ${warm.device}`);
+
+  logStep("7/7", "Verifying required hits in detection output");
   const hits = detect.entities.map(
     (e) =>
       `${(e.entity_group || "").toString()}:${SAMPLE_TEXT.slice(e.start, e.end)}`

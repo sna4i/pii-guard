@@ -193,6 +193,60 @@ function setMlStatus(state, text) {
   el.className = "status-pill status-" + state;
 }
 
+function setDecisionStatus(state, text) {
+  const el = $("decision-status");
+  if (!el) return;
+  el.textContent = text;
+  el.className = "status-pill status-" + state;
+}
+
+// The decision model ships inside the package, so there is nothing to
+// download. The prewarm only loads the graph once so the first gate
+// doesn't pay a cold start (1 GB of weights + a 10s session build).
+function prewarmDecision() {
+  return new Promise((resolve) => {
+    try {
+      chrome.runtime.sendMessage({ type: "ML_DECIDE_PREWARM" }, (resp) => {
+        if (chrome.runtime.lastError) {
+          setDecisionStatus("err", "通信エラー: " + chrome.runtime.lastError.message);
+          resolve(false);
+          return;
+        }
+        if (resp && resp.ok === true) {
+          setDecisionStatus("ok", "✓ 準備完了");
+          resolve(true);
+          return;
+        }
+        setDecisionStatus("err", "失敗: " + ((resp && resp.error) || "不明なエラー"));
+        resolve(false);
+      });
+    } catch (e) {
+      setDecisionStatus("err", "送信エラー: " + (e?.message || e));
+      resolve(false);
+    }
+  });
+}
+
+async function loadDecisionSetting() {
+  const toggle = $("decision-enabled");
+  if (!toggle) return;
+  const stored = await chrome.storage.local.get("decisionEnabled");
+  const enabled = stored.decisionEnabled === true;
+  toggle.checked = enabled;
+  if (!enabled) {
+    setDecisionStatus("unknown", "未有効");
+    return;
+  }
+  const mlOn = (await chrome.storage.local.get("mlEnabled")).mlEnabled === true;
+  if (!mlOn) {
+    // The gate only skips an NER call, so with NER off it does nothing.
+    setDecisionStatus("unknown", "ML 検出が無効です");
+    return;
+  }
+  setDecisionStatus("checking", "判定モデル準備中…");
+  prewarmDecision();
+}
+
 // Three Hugging Face Hub origins the bundled NER model fetches its
 // weights from. Listed in the manifest as `optional_host_permissions`
 // for the Store build (request at runtime via chrome.permissions.request).
@@ -933,6 +987,32 @@ document.addEventListener("DOMContentLoaded", () => {
       await chrome.storage.local.set({ mlEnabled: true });
       setMlStatus("checking", "モデルを取得中… (初回 10-90 秒)");
       prewarmMl();
+      // The gate is meaningless without NER (it only skips an NER call).
+      loadDecisionSetting();
     });
   }
+
+  // Decision-gate toggle. Nothing to download — the model is in the
+  // package — so ON is unconditional. It is only offered while ML is on.
+  const decisionToggle = $("decision-enabled");
+  if (decisionToggle) {
+    decisionToggle.addEventListener("change", async (e) => {
+      if (!e.target.checked) {
+        await chrome.storage.local.set({ decisionEnabled: false });
+        setDecisionStatus("unknown", "未有効");
+        return;
+      }
+      const mlOn = (await chrome.storage.local.get("mlEnabled")).mlEnabled === true;
+      if (!mlOn) {
+        e.target.checked = false;
+        setDecisionStatus("unknown", "ML 検出を先に有効化してください");
+        return;
+      }
+      await chrome.storage.local.set({ decisionEnabled: true });
+      setDecisionStatus("checking", "判定モデル準備中…");
+      prewarmDecision();
+    });
+  }
+
+  loadDecisionSetting();
 });

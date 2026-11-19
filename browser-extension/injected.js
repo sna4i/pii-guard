@@ -285,7 +285,8 @@
       ? NS.settings.maskForceList
       : [];
     const mlEnabled = !!(NS.settings && NS.settings.mlEnabled);
-    return { userForceMaskEntries: list, mlEnabled };
+    const decisionEnabled = !!(NS.settings && NS.settings.decisionEnabled);
+    return { userForceMaskEntries: list, mlEnabled, decisionEnabled };
   }
 
   async function sanitizeAggregated(text, service, sourceUrl) {
@@ -444,6 +445,26 @@
         LOG(`llm detect: SKIPPED (mode="${cfg.mode}", not detect/replace)`);
         aggResp._llmStatus = "failed";
         return aggResp;
+      }
+      // F-ML-003 gate — placed on the path it can actually pay for. The
+      // engine already asked this question for the same text when the NER
+      // ran, so this reuses the cached answer instead of paying a second
+      // forward pass. Only short inputs are gated (see decision-client.js
+      // for the cost model), and a score that is not a confident "no PII"
+      // still runs the generator: an ambiguous gate is always the safe
+      // side, because skipping the LLM is what can lose a detection.
+      const client = NS.engine && NS.engine.decisionClient;
+      if (NS.settings && NS.settings.decisionEnabled && client && client.gateApplicable(text)) {
+        const gate = await client.callDecide(text, client.gateQuestion());
+        if (gate.length > 0 && client.gateSkip(gate[0])) {
+          LOG(
+            `llm detect: SKIPPED by gate p(true)=${gate[0].probs.true.toFixed(3)} ` +
+              `(below ${client.SKIP_BELOW})`
+          );
+          aggResp._llmStatus = "skipped_by_gate";
+          aggResp._gateProb = gate[0].probs.true;
+          return aggResp;
+        }
       }
       LOG(`llm detect: querying ${cfg.kind} model="${cfg.model || "(default)"}"`);
       // No showLoading() here — the sidebar's centered overlay is now
