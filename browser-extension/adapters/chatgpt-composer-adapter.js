@@ -22,10 +22,15 @@
 
   const EXT = chrome.runtime.getURL("secure-composer/secure-composer.html");
   const Z = "2147483646";
-  // ChatGPT の送信の入力欄は id で見分ける (D-SC-42)。class (div.ProseMirror[contenteditable="true"]) では探さない。
-  // 回答の中の文章の欄 (writing block) も同じ class の編集欄で、会話は入力欄より前にあるので、class で探すとそちらを取る
-  const COMPOSER_SEL = "#prompt-textarea, textarea#mobile-composer-prompt";
+  // ChatGPT の送信の入力欄は id で見分ける (D-SC-42)。回答の中の文章の欄 (writing block) も同じ class
+  // (div.ProseMirror[contenteditable="true"]) の編集欄で、会話は入力欄より前にあるため、class だけで探すとそちらを取る
+  //
+  // 2026-11-19: ChatGPT が入力欄から id を外した (#prompt-textarea も textarea#mobile-composer-prompt も 0 件)。
+  // そこで class でも探し、会話の中を除いたうえで、aria-label が送信の欄の言い方のときだけ採る。id は付いている版のために残す
+  const COMPOSER_SEL = "#prompt-textarea, textarea#mobile-composer-prompt, div.ProseMirror[contenteditable='true']";
   const COMPOSER_IDS = new Set(["prompt-textarea", "mobile-composer-prompt"]);
+  // 送信の欄の言い方。aria-label が無ければ class だけで通す (読み上げの題を持たない版のため)
+  const COMPOSER_LABEL = /ChatGPT に聞く|Ask ChatGPT|Message ChatGPT|メッセージを送信/i;
   // 会話の中 (回答・メッセージ)。ここにある編集欄は、id が同じでも送信の入力欄ではない (部品を使い回したときのため)
   const IN_THREAD_SEL = '[data-message-author-role], [data-message-id], [data-testid^="conversation-turn"]';
   const SEND_SEL = '#composer-submit-button, [data-testid="send-button"], button[data-composer-submit], button[type="submit"][aria-label*="送信"], button[aria-label*="Send"]';
@@ -81,8 +86,16 @@
     const cs = getComputedStyle(el);
     return cs.visibility !== "hidden" && cs.display !== "none";
   }
-  // 送信の入力欄か (D-SC-42)。見回り (findNative) とページ全体のフォーカスの見張り (onDocFocusIn) で同じ判定を使う
-  const isSendComposer = (el) => !!el && COMPOSER_IDS.has(el.id) && isEditable(el) && visible(el) && !el.closest(IN_THREAD_SEL);
+  // 送信の入力欄か (D-SC-42)。見回り (findNative) とページ全体のフォーカスの見張り (onDocFocusIn) で同じ判定を使う。
+  // 会話の中の編集欄は、id が同じでも送信の欄ではない (部品を使い回したときのため)
+  const isSendComposer = (el) => {
+    if (!el || !isEditable(el) || !visible(el) || el.closest(IN_THREAD_SEL)) return false;
+    if (COMPOSER_IDS.has(el.id)) return true;
+    // id の無い版: ProseMirror の編集欄で、aria-label が送信の欄の言い方のときだけ
+    if (!el.classList.contains("ProseMirror")) return false;
+    const label = (el.getAttribute("aria-label") || "").trim();
+    return !label || COMPOSER_LABEL.test(label);
+  };
   function findNative() {
     for (const el of document.querySelectorAll(COMPOSER_SEL)) if (isSendComposer(el)) return el;
     return null;

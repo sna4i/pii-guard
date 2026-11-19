@@ -55,6 +55,9 @@
     // 入力欄の form に送信ボタンを出さない (ChatGPT が送信ボタンの作りを変えたときを真似る。拡張機能は文書全体を探し、
     // 無ければ Enter で送る、D-SC-14 / T-SC-31d)
     noSendButton: q.get("noSendButton") === "1",
+    // 入力欄から id を外す (2026-11-19 の ChatGPT は #prompt-textarea が 0 件になり、aria-label だけが手掛かりになった。
+    // そのときを真似る。拡張機能は class と aria-label で送信の欄を見分ける、T-SC-32)
+    noComposerId: q.get("noComposerId") === "1",
   };
   const PREPARE_DEBOUNCE_MS = 350;
   const MODEL = "gpt-6-thinking";
@@ -186,7 +189,8 @@
 <button type="submit" id="composer-submit-button" data-testid="send-button" class="btn round dark" aria-label="プロンプトを送信する" hidden>↑</button>
 <button type="button" data-testid="stop-button" class="btn round dark" aria-label="ストリーミングの停止" hidden>■</button>
 </div></div></div></div></div></div></div></form>`;
-    editor = root.querySelector("#prompt-textarea");
+    if (FLAGS.noComposerId) root.querySelector("#prompt-textarea")?.removeAttribute("id");
+    editor = root.querySelector("#prompt-textarea") || root.querySelector("div.ProseMirror[contenteditable='true']");
     sendBtn = root.querySelector('[data-testid="send-button"]');
     stopBtn = root.querySelector('[data-testid="stop-button"]');
     voiceBtn = root.querySelector('[data-testid="voice-button"]');
