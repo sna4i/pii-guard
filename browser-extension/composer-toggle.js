@@ -289,11 +289,13 @@
 
   // 入力欄の下の段の置き場所 (D-19)。上から順に試す。ChatGPT のログイン後の画面だけ。
   // マイクはアイコン画像の名前で見分ける (読み上げ用の名前は表示の言語で変わる)。
+  // 2026-11-19 にアイコンの名前が #microphone から #codex-icon-microphone-light-16 へ変わり、
+  // 完全一致では当たらなくなったので、部分一致にした。
   // ログインなしの画面は入力欄の段が列の幅を決め打ちした CSS Grid で、場所取りを入れる
   // 隙間が無いので浮かせる
   const DOCKS = [
     { host: /(^|\.)(chatgpt\.com|openai\.com)$/, slots: [
-      { sel: 'button:has(svg use[href*="#microphone"])', where: "before" },   // 音声入力の左
+      { sel: 'button:has(svg use[href*="microphone"])', where: "before" },   // 音声入力の左
       { sel: '[data-composer-navigation-target="reasoning"]', where: "after" }, // モデル選択の右 (= 音声入力の左)
       { sel: '[data-composer-navigation-target="add-context"]', where: "after" }, // 「+」の右
     ] },

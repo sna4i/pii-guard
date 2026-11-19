@@ -79,11 +79,13 @@ main{flex:1;background:#fcfcfc;display:flex;flex-direction:column;justify-conten
 @media (prefers-color-scheme: dark){html,body,main{background:#000;color:#ececec}.surface{background:#303030;border-color:#444}}
 `;
 const MIC = '<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><use href="/cdn/assets/icons-9453d99f50597150.svg#microphone-light-16" fill="currentColor"></use></svg>🎤';
-const dockableComposer = () => `<div class="surface"><div class="ComposerLayoutFooter-_8IVRO" data-composer-footer-responsive="" data-composer-layout="single-line">
+// 2026-11-19 の実サイトのアイコン名 (codex-icon- が頭に付き、#microphone の完全一致では当たらない)
+const CODEX_MIC = '<svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><use href="/cdn/assets/icons-b3158574ba746bf6.svg#codex-icon-microphone-light-16" fill="currentColor"></use></svg>';
+const dockableComposer = (mic = MIC) => `<div class="surface"><div class="ComposerLayoutFooter-_8IVRO" data-composer-footer-responsive="" data-composer-layout="single-line">
 <div class="min-w-0"><div class="flex min-w-0 items-center gap5"><div class="flex items-center"><span data-state="closed" class="contents"><button type="button" class="btn" aria-label="ファイルなどを追加" data-composer-navigation-target="add-context">+</button></span></div></div></div>
 <div class="min-w-0"><div data-composer-input=""><div contenteditable="true" role="textbox" class="ProseMirror" aria-label="ChatGPT に聞く"><p><br></p></div></div></div>
 <div class="min-w-0"><div class="contents"><div class="flex min-w-0 items-center"><div class="flex min-w-0 justify-end"><div class="flex items-center"><span data-state="closed" class="contents"><button type="button" aria-label="ChatGPT モデルを選択" data-composer-navigation-target="reasoning" style="height:36px;border:0;background:transparent;color:inherit">思考量 中程度</button></span></div></div>
-<div class="flex items-center"><div class="flex items-center"><span data-state="closed" class="contents"><button type="button" class="btn" aria-label="音声入力">${MIC}</button></span></div><div class="flex items-center" style="margin-left:8px"><button type="button" class="btn" aria-label="音声会話を開始">◉</button></div></div></div></div></div>
+<div class="flex items-center"><div class="flex items-center"><span data-state="closed" class="contents"><button type="button" class="btn" aria-label="音声入力">${mic}</button></span></div><div class="flex items-center" style="margin-left:8px"><button type="button" class="btn" aria-label="音声会話を開始">◉</button></div></div></div></div></div>
 </div></div>`;
 // Gemini の入力欄の作り (2026-10-28 にログインなしの実サイトで調べたもの): 白い箱 (角の丸み 32px、影) は
 // 入力欄の 9 段上の祖先で、箱の中の入力欄の右にモード選択のボタンとマイクがある
@@ -101,8 +103,8 @@ main{height:100%;display:flex;flex-direction:column;justify-content:flex-end;pad
 </div></div></div></div></div></main>`;
 // 目印の無い入力欄 (下の段に置けないとき)
 const plainComposer = () => `<div class="surface"><div contenteditable="true" role="textbox" class="ProseMirror" aria-label="ChatGPT に聞く"><p><br></p></div></div>`;
-const footerPage = () => `<!doctype html><title>mock</title><style>${COMPOSER_CSS}</style>
-<main><h1 style="font-size:16px">mock chatgpt.com (logged-in composer)</h1>${dockableComposer()}</main>`;
+const footerPage = (mic) => `<!doctype html><title>mock</title><style>${COMPOSER_CSS}</style>
+<main><h1 style="font-size:16px">mock chatgpt.com (logged-in composer)</h1>${dockableComposer(mic)}</main>`;
 // 一回チャットした後の画面: 会話の下に注意書き、その下に入力欄 (利用者のスクリーンショットの並び)
 const chatPage = (composer) => `<!doctype html><title>mock</title><style>${COMPOSER_CSS}</style>
 <main><div class="msgs"><div class="bubble">この記事を要約して、価格がわかるサイトがあったら教えて</div><p>記事の仕様を確認し、公式情報と価格情報を照合します。</p></div>
@@ -160,7 +162,7 @@ const typeInto = async (p, text) => {
 };
 const layoutOf = (p) => p.evaluate((sel) => { const h = document.querySelector(sel); return h && h.dataset.layout ? JSON.parse(h.dataset.layout) : null; }, HOST);
 const dockState = (p) => p.evaluate((sel) => {
-  const mic = document.querySelector('button:has(svg use[href*="#microphone"])');
+  const mic = document.querySelector('button:has(svg use[href*="microphone"])');
   const sp = document.querySelector('span[data-pii-guard="dock"]');
   const h = document.querySelector(sel);
   const lay = h && h.dataset.layout ? JSON.parse(h.dataset.layout) : null;
@@ -203,6 +205,7 @@ try {
       return;
     }
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+    if (req.url.startsWith("/footer-codex")) { res.end(footerPage(CODEX_MIC)); return; }
     if (req.url.startsWith("/footer")) { res.end(footerPage()); return; }
     if (req.url.startsWith("/gemini-like")) { res.end(geminiLikePage()); return; }
     if (req.url.startsWith("/chat-plain")) { res.end(chatPage(plainComposer())); return; }
@@ -433,6 +436,12 @@ try {
   await p.waitForTimeout(1800);
   d = await dockState(p);
   check(d.spacer && d.beforeMic, "場所取りの要素を消されても入れ直す");
+
+  console.log("T-13b マイクのアイコン名が変わった画面 (2026-11-19 の実サイトの名前):");
+  await p.goto("https://chatgpt.com/footer-codex"); await p.waitForTimeout(3500);
+  d = await dockState(p);
+  check(d.spacer && d.beforeMic, `アイコン名が #codex-icon-microphone-light-16 でもマイクの直前に入る (${JSON.stringify(d.spacer)})`);
+  check(d.docked === "true", `浮かせずに下の段へ置く (docked=${d.docked})`);
 
   console.log("T-14 警告はアイコンを黄色にする:");
   await clickInPill(p, "toggle"); await p.waitForTimeout(800);
