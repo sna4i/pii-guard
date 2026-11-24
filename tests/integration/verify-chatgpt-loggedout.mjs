@@ -40,7 +40,6 @@ const state = (p) => p.evaluate((sel) => {
   return {
     host: !!h, docked: h ? h.dataset.docked : null, enabled: h ? h.dataset.enabled : null,
     toggle: lay && lay.toggle, spacer: r(sp), add: r(add),
-    mainBg: getComputedStyle(document.querySelector("main") || document.body).backgroundColor,
   };
 }, HOST);
 
@@ -78,21 +77,40 @@ try {
   }
 
   console.log("オンのときの背景色:");
-  const base = s.mainBg;
+  // 背景を塗っている要素は製品が選ぶ (body/html が透明なら sample point を覆う大きな要素)。
+  // 「選んだ色を混ぜた色」はその要素自身のもとの背景から計算する。main は透明なので、
+  // main を読む検査は何も証明しない。
+  const readBg = (h) => h.evaluate((el) => {
+    const r = el.getBoundingClientRect();
+    return {
+      tag: el.tagName,
+      bg: getComputedStyle(el).backgroundColor,
+      w: Math.round(r.width),
+      h: Math.round(r.height),
+      tagged: el.hasAttribute("data-pii-guard-tint"),
+    };
+  });
   await sw.evaluate((c) => chrome.storage.local.set({ chatTint: c }), COLOR);
   await p.waitForTimeout(1500);
-  s = await state(p);
-  const expected = TINT.tintedBackground(COLOR, base);
-  check(expected && s.mainBg === expected, `チャットの背景が選んだ色を混ぜた色になる (${base} → ${s.mainBg}、期待 ${expected})`);
+  const tintEl = await p.evaluateHandle(() => document.querySelector("[data-pii-guard-tint]"));
+  const on = await readBg(tintEl);
+  check(!!on, "背景を塗っている要素に印が付いている");
+  check(on && on.w >= 1280 * 0.4 && on.h >= 800 * 0.4, `印の要素がチャット部分を塗る大きさ (${on && on.w}x${on && on.h})`);
   if (SHOT_DIR) await p.screenshot({ path: path.join(SHOT_DIR, "chatgpt-tinted.png") });
 
   console.log("アイコンでオフにする:");
   await p.waitForTimeout(600);
+  s = await state(p);
   await p.mouse.click(s.toggle[0] + s.toggle[2] / 2, s.toggle[1] + s.toggle[3] / 2);
   await p.waitForTimeout(1200);
   s = await state(p);
   check(s.enabled === "false" && (await sw.evaluate(() => chrome.storage.local.get("enabled").then((x) => x.enabled))) === false, "本物のクリックでオフになる");
-  check(s.mainBg === base, `オフにすると背景が元に戻る (${s.mainBg})`);
+  // 同じ要素をオフの状態で読む。印が外れたあとの背景が、この要素のもとの背景。
+  const off = await readBg(tintEl);
+  check(off && !off.tagged, "オフにすると印が外れる");
+  const expected = off ? TINT.tintedBackground(COLOR, off.bg) : null;
+  check(expected && on && on.bg === expected,
+    `チャットの背景が選んだ色を混ぜた色になる (${off && off.bg} → ${on && on.bg}、期待 ${expected})`);
   if (SHOT_DIR && box) {
     await p.screenshot({ path: path.join(SHOT_DIR, "chatgpt-off.png"), clip: { x: box[0] - 20, y: Math.max(0, box[1] - 60), width: box[2] + 80, height: box[3] + 80 } });
   }
