@@ -65,6 +65,7 @@
   "web_accessible_resources": [
     {
       "resources": [
+        "hostmatch.js",
         "injected.js",
         "review-modal.js",
         "sidebar.js",

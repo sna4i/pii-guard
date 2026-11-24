@@ -35,11 +35,15 @@
     "session",
   ];
 
-  // Hosts whose sends we intercept. Used by the fetch/XHR adapters and by the
+  // Hosts whose sends we intercept. Used by the fetch/XHR adapters, the
   // worker-realm hook (it must not wrap workers of unrelated hosts, e.g.
-  // analytics or error-reporting workers).
-  const SUPPORTED_HOST_RE =
-    /(claude\.(ai|com)|\.claude\.com|chatgpt\.com|\.openai\.com|gemini\.google\.com|manus\.im|butterfly-effect\.dev)/i;
+  // analytics or error-reporting workers), and the provider diagnostic logs.
+  // T-22 (security review 2026-11-24): the old version was a substring regex over
+  // the whole URL, so path substrings and suffix lookalikes counted as trusted
+  // providers. Decisions now go through the structured predicate in hostmatch.js
+  // (exact host + subdomain root = the domains the README lists), injected
+  // before this script by content.js.
+  const HOST = globalThis.PiiGuardHostmatch;
 
   function redactUrl(raw) {
     try {
@@ -703,8 +707,10 @@
     // text (rename, feedback, share, etc.). The final authoritative
     // gate is extractInputs(): if the body has no messages[].content
     // / prompt / text, processBody early-returns without UI.
+    // host gate: parsed hostname, exact + subdomain root (T-22). Endpoint path
+    // regexes below are the match itself, so the host clause stays with them.
     match: (url) =>
-      /(^https?:\/\/claude\.(ai|com)|\.claude\.com)/.test(url) &&
+      HOST.hostMatches(url, location.href, ["claude.ai", "claude.com"]) &&
       /\/(?:completion|append_message|retry_completion|chat_conversations|send_message|messages|send)(?=[/?#]|$)/.test(
         url
       ) &&
@@ -800,7 +806,7 @@
     // and the second turn put the text in `prompt`). `.../conversation/prepare`
     // carries no user text, so it is not matched.
     match: (url) =>
-      /(chatgpt\.com|chat\.openai\.com)/.test(url) &&
+      HOST.hostMatches(url, location.href, ["chatgpt.com", "chat.openai.com"]) &&
       (/\/backend-api\/(?:f\/)?conversation(?:\?[^#]*)?(?:#.*)?$/.test(url) ||
         /\/unauth-mweb\/conversation\/updates(?:\?[^#]*)?(?:#.*)?$/.test(url)),
     extractInputs(body) {
@@ -845,7 +851,7 @@
   const geminiAdapter = {
     name: "gemini",
     match: (url) =>
-      /gemini\.google\.com/.test(url) &&
+      HOST.hostMatches(url, location.href, ["gemini.google.com"]) &&
       /(StreamGenerate|GenerateContent|assistant\.lamda|BardFrontendService)/i.test(
         url
       ),
@@ -907,7 +913,7 @@
     // Socket.IO WebSocket, so the fetch/XHR matcher here is a safety
     // net only. extractInputs is the authoritative gate.
     match: (url) =>
-      /(manus\.im|butterfly-effect\.dev)/i.test(url) &&
+      HOST.hostMatches(url, location.href, ["manus.im", "butterfly-effect.dev"]) &&
       !/(sentry|amplitude|analytics|telemetry|segment\.io|datadog|newrelic)/i.test(
         url
       ) &&
@@ -991,6 +997,10 @@
 
   function pickAdapter(url) {
     if (typeof url !== "string") return null;
+    // [SECURITY] T-22: the trusted-provider decision goes through the parsed
+    // hostname, never through a URL substring. Path substrings like
+    // "https://evil.net/chatgpt.com/..." are not providers.
+    if (!HOST.isProviderUrl(url, location.href)) return null;
     for (const s of SERVICES) {
       try {
         if (s.match(url)) return s;
@@ -1469,14 +1479,14 @@
         // Malformed URL → keep the raw string; adapter will just miss.
       }
       const adapter = pickAdapter(url);
-      // Diagnostic: when ANY claude.ai / chatgpt / gemini / manus
-      // host POSTs, log once-per-unique URL so users can debug
-      // "sidebar never opens" by checking what endpoint the chat
+      // Diagnostic: when ANY provider host (T-22: exact host + subdomain root of
+      // the domains listed in the README) POSTs, log once-per-unique URL so users
+      // can debug "sidebar never opens" by checking what endpoint the chat
       // app actually hits. The log says whether the adapter matched
       // or not. Deduped so chat polling doesn't flood the console.
       try {
-        const h = new URL(url, location.href).host;
-        if (SUPPORTED_HOST_RE.test(h)) {
+        const h = new URL(url, location.href).hostname;
+        if (HOST.isProviderHost(h)) {
           logOnce(
             adapter ? "provider POST (adapter matched):" : "provider POST (NO adapter match):",
             url,
@@ -1641,7 +1651,7 @@
       try {
         workerUrl = new URL(workerUrl, location.href).toString();
       } catch (_) {}
-      if (!SUPPORTED_HOST_RE.test(workerUrl)) {
+      if (!HOST.isProviderUrl(workerUrl, location.href)) {
         return new NativeWorker(url, opts);
       }
       const shimCode = workerShim(workerUrl);
@@ -1727,8 +1737,8 @@
       // Diagnostic (deduped) for provider-host POSTs regardless of
       // adapter match, mirrors the fetch hook.
       try {
-        const h = new URL(url, location.href).host;
-        if (SUPPORTED_HOST_RE.test(h)) {
+        const h = new URL(url, location.href).hostname;
+        if (HOST.isProviderHost(h)) {
           logOnce(
             adapter ? "provider XHR (adapter matched):" : "provider XHR (NO adapter match):",
             url,
@@ -1792,12 +1802,8 @@
     const originalSendBeacon = navigator.sendBeacon.bind(navigator);
     navigator.sendBeacon = function patchedSendBeacon(url, data) {
       try {
-        const host = new URL(url, location.href).host;
-        if (
-          /(claude\.(ai|com)|\.claude\.com|chatgpt\.com|\.openai\.com|gemini\.google\.com|manus\.im|butterfly-effect\.dev)/i.test(
-            host
-          )
-        ) {
+        const host = new URL(url, location.href).hostname;
+        if (HOST.isProviderHost(host)) {
           // [SECURITY] Fail-closed sendBeacon: provider-host beacons
           // bypass fetch/XHR hooks entirely. Analytics payloads from
           // chat UIs can embed user text (draft buffers, error
@@ -1881,12 +1887,8 @@
       let asyncHandled = false;
       try {
         const url = this.url || "";
-        const host = new URL(url, location.href).host;
-        if (
-          /(claude\.(ai|com)|\.claude\.com|chatgpt\.com|\.openai\.com|gemini\.google\.com|manus\.im|butterfly-effect\.dev)/i.test(
-            host
-          )
-        ) {
+        const host = new URL(url, location.href).hostname;
+        if (HOST.isProviderHost(host)) {
           const size = (data && typeof data.length === "number") ? data.length : 0;
           LOG(
             "provider ws send:",

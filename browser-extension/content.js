@@ -137,6 +137,7 @@
   for (const f of ENGINE_FILES) injectScript(f);
   injectScript("review-modal.js");
   injectScript("sidebar.js");
+  injectScript("hostmatch.js");
   injectScript("injected.js");
   console.debug(
     "[pii-guard] injected",
