@@ -35,6 +35,12 @@
     "session",
   ];
 
+  // Hosts whose sends we intercept. Used by the fetch/XHR adapters and by the
+  // worker-realm hook (it must not wrap workers of unrelated hosts, e.g.
+  // analytics or error-reporting workers).
+  const SUPPORTED_HOST_RE =
+    /(claude\.(ai|com)|\.claude\.com|chatgpt\.com|\.openai\.com|gemini\.google\.com|manus\.im|butterfly-effect\.dev)/i;
+
   function redactUrl(raw) {
     try {
       const u = new URL(raw, location.href);
@@ -80,6 +86,7 @@
 
   const TAG_IN = "mask-mcp-inpage";   // outgoing to content script
   const TAG_OUT = "mask-mcp-content"; // incoming from content script
+  const TAG_WORKER = "mask-mcp-worker"; // worker-realm shim (see the worker hook)
 
   let sequence = 0;
   const pending = new Map();
@@ -150,6 +157,37 @@
   // 取りに行く (1.5.1)。content.js は起動直後にも設定を送るが、このスクリプトの
   // 読み込みより先に届くと失われ、除外リストも常に伏せる語も効かなかった
   window.postMessage({ source: TAG_IN, type: "request-settings" }, "*");
+
+  // A send issued from a worker realm is routed here. The shim answers over a
+  // MessagePort it handed us, because window.postMessage cannot reach into a
+  // worker realm; the reply has to go back on that same port. The masking
+  // pipeline itself is the same one the page-world fetch hook uses.
+  async function handleWorkerSend(data, port) {
+    const reply = (payload) => port.postMessage({ id: data.id, ...payload });
+    try {
+      const adapter = pickAdapter(data.url);
+      logOnce(
+        adapter
+          ? "provider POST from worker realm (adapter matched):"
+          : "provider POST from worker realm (NO adapter match):",
+        data.url
+      );
+      if (!adapter) return reply({ changed: false });
+      if (!(await isEnabled())) return reply({ changed: false });
+      const parsed = parseBody(data.body, data.contentType);
+      if (parsed === null) return reply({ changed: false });
+      const result = await processBody(adapter, parsed, data.url);
+      if (!result.changed) return reply({ changed: false });
+      LOG(`${adapter.name}: substituted masked body (worker realm)`);
+      return reply({ changed: true, body: serializeBody(result.body) });
+    } catch (err) {
+      // [SECURITY] Fail-closed, same rule as the page-world fetch hook: the
+      // original (PII-bearing) body never leaves the browser on a pipeline
+      // error or a user cancel.
+      WARN("worker realm send; ABORTING (fail-closed):", err?.message || err);
+      return reply({ aborted: true, reason: String((err && err.message) || err) });
+    }
+  }
 
   function request(type, extra, timeoutMs) {
     const id = `mcp-${++sequence}-${Date.now()}`;
@@ -754,10 +792,22 @@
     // sub-path like `.../{id}/title` or `.../{id}/feedback` is NOT a
     // send. We allow optional query/hash, and rely on extractInputs
     // as the final gate.
+    //
+    // The logged-out ("lightweight web") client uses another shape:
+    // `POST /unauth-mweb/conversation/updates` with an
+    // `application/x-www-form-urlencoded` body, and the typed text is the
+    // `prompt` field. Measured on the live site 2026-11-22 (both the first
+    // and the second turn put the text in `prompt`). `.../conversation/prepare`
+    // carries no user text, so it is not matched.
     match: (url) =>
       /(chatgpt\.com|chat\.openai\.com)/.test(url) &&
-      /\/backend-api\/(?:f\/)?conversation(?:\?[^#]*)?(?:#.*)?$/.test(url),
+      (/\/backend-api\/(?:f\/)?conversation(?:\?[^#]*)?(?:#.*)?$/.test(url) ||
+        /\/unauth-mweb\/conversation\/updates(?:\?[^#]*)?(?:#.*)?$/.test(url)),
     extractInputs(body) {
+      if (body instanceof URLSearchParams) {
+        const p = body.get("prompt");
+        return typeof p === "string" && p.trim() ? [p] : [];
+      }
       const out = [];
       if (Array.isArray(body?.messages)) {
         for (const m of body.messages) {
@@ -771,6 +821,11 @@
       return out;
     },
     replaceInputs(body, masked) {
+      if (body instanceof URLSearchParams) {
+        const out = new URLSearchParams(body);
+        if (body.get("prompt")) out.set("prompt", masked[0]);
+        return out;
+      }
       let i = 0;
       const next = (orig) => (i < masked.length ? masked[i++] : orig);
       const clone = JSON.parse(JSON.stringify(body));
@@ -1094,9 +1149,12 @@
       // Log once per adapter/URL so when a site adds a new body shape
       // that extractInputs doesn't recognise, the user can paste this
       // log line back to us for fixing.
+      const keys = bodyJson instanceof URLSearchParams
+        ? [...bodyJson.keys()]
+        : Object.keys(bodyJson || {});
       logOnce(
         `${adapter.name}: adapter matched but body had no user text —`
-          + " keys: " + Object.keys(bodyJson || {}).slice(0, 8).join(","),
+          + " keys: " + keys.slice(0, 8).join(","),
         url,
       );
       return { changed: false, body: bodyJson };
@@ -1358,13 +1416,38 @@
 
   const originalFetch = window.fetch.bind(window);
 
+  // Body shape is decided by the content-type, not by what happens to parse.
+  // A urlencoded body is a field map, so the adapter needs a URLSearchParams
+  // and the rewritten request must go back out urlencoded.
+  function contentTypeOf(input, init) {
+    const h = (init && init.headers) || (input && input.headers);
+    if (!h) return "";
+    if (typeof h.get === "function") return h.get("content-type") || "";
+    return h["content-type"] || h["Content-Type"] || "";
+  }
+  function parseBody(rawBody, contentType) {
+    if (/urlencoded/i.test(contentType || "")) return new URLSearchParams(rawBody);
+    try {
+      return JSON.parse(rawBody);
+    } catch (_) {
+      return null;
+    }
+  }
+  function serializeBody(parsed) {
+    return parsed instanceof URLSearchParams ? parsed.toString() : JSON.stringify(parsed);
+  }
+
   window.fetch = async function maskedFetch(input, init) {
     try {
+      // A WHATWG URL object has ``href`` but no ``url``, so ``fetch(new URL(...), init)``
+      // would otherwise read an empty URL and never match an adapter.
       const rawUrl =
         typeof input === "string"
           ? input
           : input && typeof input.url === "string"
           ? input.url
+          : input && typeof input.href === "string"
+          ? input.href
           : "";
       const method =
         (init && init.method) || (input && input.method) || "GET";
@@ -1393,7 +1476,7 @@
       // or not. Deduped so chat polling doesn't flood the console.
       try {
         const h = new URL(url, location.href).host;
-        if (/(claude\.(ai|com)|\.claude\.com|chatgpt\.com|\.openai\.com|gemini\.google\.com|manus\.im|butterfly-effect\.dev)/i.test(h)) {
+        if (SUPPORTED_HOST_RE.test(h)) {
           logOnce(
             adapter ? "provider POST (adapter matched):" : "provider POST (NO adapter match):",
             url,
@@ -1408,13 +1491,19 @@
       }
 
       const rawBody = init ? init.body : input && input.body;
-      if (typeof rawBody !== "string") {
+      // The measured send passes a ``URLSearchParams`` object as the body, so the
+      // body is not a string and the content-type may be set by the browser rather
+      // than spelled out in ``init.headers``.
+      const isForm = rawBody instanceof URLSearchParams;
+      const text = typeof rawBody === "string" ? rawBody : (isForm ? String(rawBody) : null);
+      if (text === null) {
         return originalFetch(input, init);
       }
-      let parsed;
-      try {
-        parsed = JSON.parse(rawBody);
-      } catch (_) {
+      const parsed = parseBody(
+        text,
+        contentTypeOf(input, init) || (isForm ? "application/x-www-form-urlencoded;charset=UTF-8" : "")
+      );
+      if (parsed === null) {
         return originalFetch(input, init);
       }
 
@@ -1424,7 +1513,7 @@
       }
 
       const nextInit = { ...(init || {}) };
-      nextInit.body = JSON.stringify(result.body);
+      nextInit.body = serializeBody(result.body);
       LOG(`${adapter.name}: substituted masked body`);
       return originalFetch(input, nextInit);
     } catch (err) {
@@ -1447,6 +1536,166 @@
       );
     }
   };
+
+  // --- worker realm hook -------------------------------------------------
+  // A dedicated worker has its own ``globalThis.fetch``, so patching the page's
+  // ``window.fetch`` never sees a send the worker issues. The logged-out
+  // ("lightweight web") ChatGPT client sends the typed text from a module
+  // worker — measured 2026-11-22, created as
+  //   new Worker("https://chatgpt.com/unauth-mweb/assets/conversation-source-dil.worker-<hash>.js",
+  //              { type: "module" })
+  // We replace ``window.Worker`` with a blob worker that runs this shim: patch
+  // ``fetch`` inside the worker realm, ask this page script to mask (same
+  // pipeline, same approval UI), then import the original script so the page's
+  // own worker code keeps running. chatgpt.com's CSP allows
+  // ``worker-src 'self' blob:``, which is what makes the blob worker legal.
+  function workerShim(workerUrl) {
+    return [
+      "const NATIVE_FETCH = fetch;",
+      "const BASE = " + JSON.stringify(location.origin) + ";",
+      "const WORKER_URL = " + JSON.stringify(workerUrl) + ";",
+      "const TAG = " + JSON.stringify(TAG_WORKER) + ";",
+      "const pending = new Map();",
+      "let seq = 0;",
+      "const channel = new MessageChannel();",
+      // A module worker is "initialized" when its top-level module finishes
+      // evaluating. The original worker code is behind an async import, so any
+      // message that arrives between initialization and import resolution is
+      // dispatched once and lost: self.onmessage is assigned only afterwards.
+      // Queue those messages and re-dispatch them to the same realm once the
+      // original code has registered its handler.
+      "const queue = [];",
+      "let ready = false;",
+      "self.addEventListener(\"message\", (e) => {",
+      "  if (ready) return;",
+      "  queue.push(e);",
+      "});",
+      "channel.port1.onmessage = (e) => {",
+      "  const d = e.data;",
+      "  if (!d || !d.id) return;",
+      "  const r = pending.get(d.id);",
+      "  if (r) { pending.delete(d.id); r(d); }",
+      "};",
+      // Hand port2 to the page side; masking replies come back on port1.
+      'globalThis.postMessage({ source: TAG, type: "hello" }, [channel.port2]);',
+      "const call = (payload) => new Promise((resolve) => {",
+      '  const id = "w-" + (++seq);',
+      "  pending.set(id, resolve);",
+      "  channel.port1.postMessage({ source: TAG, id, ...payload });",
+      "  // [SECURITY] Fail-closed: if the extension never answers, the original",
+      "  // (PII-bearing) body must not leave the browser.",
+      "  setTimeout(() => {",
+      "    if (pending.has(id)) {",
+      "      pending.delete(id);",
+      '      resolve({ aborted: true, reason: "no answer from the extension" });',
+      "    }",
+      "  }, 120000);",
+      "});",
+      "globalThis.fetch = async function (input, init) {",
+      '  const rawUrl = typeof input === "string" ? input : ((input && input.url) || "");',
+      // The shim runs inside a blob worker, so a relative URL resolves against
+      // the blob URL instead of the page's origin. Resolve it once here and hand
+      // the absolute URL to the native fetch on every path.
+      "  let url = rawUrl;",
+      "  try { if (rawUrl) url = new URL(rawUrl, BASE).toString(); } catch (_) {}",
+      "  const target = rawUrl ? url : input;",
+      '  const method = ((init && init.method) || (input && input.method) || "GET").toUpperCase();',
+      '  if (method !== "POST") return NATIVE_FETCH(target, init);',
+      "  const rawBody = init ? init.body : (input && input.body);",
+      // The measured send passes a URLSearchParams object as the body, so the
+      // content-type is not always spelled out in init.headers.
+      "  const isForm = rawBody instanceof URLSearchParams;",
+      '  const text = typeof rawBody === "string" ? rawBody : (isForm ? String(rawBody) : null);',
+      "  if (text === null) return NATIVE_FETCH(target, init);",
+      "  const h = (init && init.headers) || (input && input.headers);",
+      "  const contentType = isForm",
+      '    ? "application/x-www-form-urlencoded;charset=UTF-8"',
+      '    : (h ? (typeof h.get === "function" ? h.get("content-type") : (h["content-type"] || h["Content-Type"] || "")) : "");',
+      '  const r = await call({ type: "worker-send", url, contentType, body: text });',
+      "  if (!r || r.aborted) {",
+      '    return Promise.reject(new TypeError("PII Guard: worker send " + ((r && r.reason) || "aborted")));',
+      "  }",
+      "  if (!r.changed) return NATIVE_FETCH(target, init);",
+      "  return NATIVE_FETCH(target, { ...(init || {}), body: r.body });",
+      "};",
+      // The original script installs its own self.onmessage when it loads, so
+      // the page's messages still reach it. Dynamic import works in module and
+      // classic worker scripts alike.
+      "import(WORKER_URL).then(() => {",
+      "  ready = true;",
+      "  for (const e of queue) {",
+      // MessageEvent's `source` must be a Window or a MessagePort, so a worker
+      // realm cannot set it to `self` (a WorkerGlobalScope). Only data and ports
+      // are carried; the original code reads those.
+      '    self.dispatchEvent(new MessageEvent("message", { data: e.data, ports: e.ports }));',
+      "  }",
+      "  queue.length = 0;",
+      "}).catch((e) => console.warn('[pii-guard] worker script import failed:', e.message));",
+    ].join("\n");
+  }
+
+  const NativeWorker = window.Worker;
+  if (NativeWorker) {
+    window.Worker = function (url, opts) {
+      let workerUrl = String(url);
+      try {
+        workerUrl = new URL(workerUrl, location.href).toString();
+      } catch (_) {}
+      if (!SUPPORTED_HOST_RE.test(workerUrl)) {
+        return new NativeWorker(url, opts);
+      }
+      const shimCode = workerShim(workerUrl);
+      const blobUrl = URL.createObjectURL(new Blob([shimCode], { type: "text/javascript" }));
+      logOnce("worker realm hook installed:", workerUrl);
+      const real = new NativeWorker(blobUrl, opts);
+
+      // The page only ever sees messages its own worker code posts, so our
+      // control frames (handshake + masking replies) must not reach the page's
+      // handler. This handle filters them and forwards everything else.
+      const handle = {
+        url: workerUrl,
+        postMessage: (data, transfer) => real.postMessage(data, transfer),
+        terminate: () => real.terminate(),
+      };
+      let pageOnMessage = null;
+      let pageListeners = [];
+      Object.defineProperty(handle, "onmessage", {
+        get: () => pageOnMessage,
+        set: (fn) => { pageOnMessage = typeof fn === "function" ? fn : null; },
+      });
+      handle.addEventListener = (type, fn) => {
+        if (type === "message" && typeof fn === "function") pageListeners.push(fn);
+      };
+      handle.removeEventListener = (type, fn) => {
+        if (type === "message") pageListeners = pageListeners.filter((f) => f !== fn);
+      };
+      real.addEventListener("message", (event) => {
+        const data = event.data;
+        if (data && data.source === TAG_WORKER) {
+          if (data.type === "hello" && event.ports && event.ports[0]) {
+            const port = event.ports[0];
+            port.onmessage = async (event2) => {
+              const d = event2.data;
+              if (!d || d.source !== TAG_WORKER || typeof d.id !== "string") return;
+              if (d.type === "worker-send") await handleWorkerSend(d, port);
+            };
+          }
+          return;
+        }
+        const forwarded = {
+          type: "message",
+          data,
+          ports: event.ports || [],
+          origin: event.origin || location.origin,
+          source: real,
+        };
+        if (pageOnMessage) pageOnMessage(forwarded);
+        for (const fn of pageListeners) fn(forwarded);
+      });
+      return handle;
+    };
+    window.Worker.prototype = NativeWorker.prototype;
+  }
 
   // --- XHR hook ----------------------------------------------------------
 
@@ -1479,7 +1728,7 @@
       // adapter match, mirrors the fetch hook.
       try {
         const h = new URL(url, location.href).host;
-        if (/(claude\.(ai|com)|\.claude\.com|chatgpt\.com|\.openai\.com|gemini\.google\.com|manus\.im|butterfly-effect\.dev)/i.test(h)) {
+        if (SUPPORTED_HOST_RE.test(h)) {
           logOnce(
             adapter ? "provider XHR (adapter matched):" : "provider XHR (NO adapter match):",
             url,
