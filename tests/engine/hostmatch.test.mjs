@@ -60,6 +60,21 @@ test("T-22.7 adapter domains match exactly or as subdomain roots", () => {
   assert.equal(HOST.hostMatches("https://evil.net/manus.im/socket.io/", BASE, ["manus.im"]), false);
 });
 
+// 8) security review (2026-11-24, 2nd finding): mutable allowlist was exposed
+//    through the page-accessible global. MAIN world page code could add a host and
+//    make itself trusted (worker wrap, beacon refusal, adapter match). Contract:
+//    allowlist lives in the closure; the exported API is frozen, and what page
+//    code can touch is only a snapshot.
+test("T-22.8 page code cannot mutate the allowlist through the exported API", () => {
+  assert.ok(Object.isFrozen(HOST), "exported API must be frozen");
+  assert.equal(HOST.HOSTS, undefined, "mutable Set must not be exposed; keep it in the closure");
+  const snapshot = HOST.listHosts();
+  assert.ok(Array.isArray(snapshot) && snapshot.includes("chatgpt.com"));
+  snapshot.push("evil.net");  // page code mutating the snapshot must not change a decision
+  assert.equal(HOST.isProviderHost("evil.net"), false, "snapshot mutation leaked into the decision");
+  assert.ok(!HOST.listHosts().includes("evil.net"), "second snapshot saw the mutation");
+});
+
 // 5) 注入順: hostmatch.js は injected.js より前 (namespace attach の前提)
 test("T-22.5 content.js injects hostmatch.js before injected.js", () => {
   const src = fs.readFileSync(new URL("../../browser-extension/content.js", import.meta.url), "utf8");

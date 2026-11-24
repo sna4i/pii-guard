@@ -54,7 +54,18 @@
     }
   }
 
-  const api = { HOSTS, isProviderHost, isProviderUrl, hostMatches };
+  // T-22.8 (security review, 2nd finding): the allowlist must not be reachable as
+  // mutable state through the page-accessible global. MAIN world page code and this
+  // API share the same world, so an exposed Set let a page add itself to the
+  // trusted set and get the provider treatment (worker wrap, beacon refusal,
+  // adapter match). Contract: allowlist stays in this closure; the exported API is
+  // frozen, and callers only ever get a snapshot via listHosts().
+  const api = Object.freeze({
+    isProviderHost,
+    isProviderUrl,
+    hostMatches,
+    listHosts: () => [...HOSTS],
+  });
   if (typeof module === "object" && module.exports) module.exports = api;
   if (root) root.PiiGuardHostmatch = api;
 })(typeof globalThis !== "undefined" ? globalThis : this);
