@@ -71,7 +71,7 @@ try {
   const port = server.address().port;
 
   ctx = await chromium.launchPersistentContext(path.join(tmp, "profile"), {
-    headless: false, ignoreHTTPSErrors: true,
+    channel: "chromium", headless: true, ignoreHTTPSErrors: true,
     args: [`--disable-extensions-except=${EXT}`, `--load-extension=${EXT}`,
            `--host-resolver-rules=MAP chatgpt.com 127.0.0.1:${port}`,
            "--ignore-certificate-errors", "--no-sandbox"],

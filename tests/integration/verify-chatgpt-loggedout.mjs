@@ -45,7 +45,7 @@ const state = (p) => p.evaluate((sel) => {
 
 try {
   ctx = await chromium.launchPersistentContext(path.join(tmp, "profile"), {
-    headless: false, viewport: { width: 1280, height: 800 }, locale: "ja-JP",
+    channel: "chromium", headless: true, viewport: { width: 1280, height: 800 }, locale: "ja-JP",
     args: [`--disable-extensions-except=${EXT}`, `--load-extension=${EXT}`, "--no-sandbox"],
   });
   const sw = ctx.serviceWorkers()[0] || (await ctx.waitForEvent("serviceworker", { timeout: 25000 }));

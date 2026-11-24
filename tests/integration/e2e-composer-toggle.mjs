@@ -181,7 +181,7 @@ try {
   });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
   ctx = await chromium.launchPersistentContext(path.join(tmp, "profile"), {
-    headless: false, ignoreHTTPSErrors: true,
+    channel: "chromium", headless: true, ignoreHTTPSErrors: true,
     args: [`--disable-extensions-except=${EXT}`, `--load-extension=${EXT}`, `--host-resolver-rules=MAP chatgpt.com 127.0.0.1:${server.address().port}`, "--ignore-certificate-errors", "--no-sandbox"],
   });
   const sw = ctx.serviceWorkers()[0] || (await ctx.waitForEvent("serviceworker", { timeout: 25000 }));
