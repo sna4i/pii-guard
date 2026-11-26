@@ -17,3 +17,11 @@ description = "同梱の推論ライブラリ (minify 済み)。トークナイ�
 paths = [
   '''^browser-extension/vendor/''',
 ]
+
+[[allowlists]]
+description = "判定層のトークナイザ (model/jev-0.8b/tokenizer.json) の SHA-256。ファイルの指紋で秘密ではないが、鍵の名前に token を含むので generic-api-key に当たる。この 1 つの鍵の 64 桁の 16 進だけを外す"
+targetRules = ["generic-api-key"]
+regexTarget = "line"
+regexes = [
+  '''^\s*"tokenizer_sha256":\s*"[0-9a-f]{64}",?\s*$''',
+]
